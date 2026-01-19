@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+ENV
+env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Credentials
+credentials/
+secrets/
+*.pem
+*.key
+
+# Output (will be created fresh)
+output/*.csv
+output/*.json
+
+# Docs
+*.md
+!README.md
+
+# Tests
+test_*.py
+tests/
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Advertisers - Newsletter Advertiser Intelligence{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">All Advertisers</h1>
+        <p class="text-sm text-gray-500 mt-1">{{ advertisers|length }} advertisers found</p>
+    </div>
+    <a href="/api/advertisers/export"
+       class="bg-primary text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">
+        Export CSV
+    </a>
+</div>
+
+<!-- Filters -->
+<div class="bg-white rounded-xl shadow-sm p-4 border border-gray-100 mb-6">
+    <div class="flex flex-wrap gap-4">
+        <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">Niche Fit</label>
+            <select onchange="filterByFit(this.value)" class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">All</option>
+                <option value="high" {% if filter_fit == 'high' %}selected{% endif %}>High Fit</option>
+                <option value="medium" {% if filter_fit == 'medium' %}selected{% endif %}>Medium Fit</option>
+                <option value="low" {% if filter_fit == 'low' %}selected{% endif %}>Low Fit</option>
+            </select>
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">Category</label>
+            <select onchange="filterByCategory(this.value)" class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">All</option>
+                <option value="clinic" {% if filter_category == 'clinic' %}selected{% endif %}>Clinic</option>
+                <option value="supplement" {% if filter_category == 'supplement' %}selected{% endif %}>Supplement</option>
+                <option value="diagnostic" {% if filter_category == 'diagnostic' %}selected{% endif %}>Diagnostic</option>
+                <option value="health_tech" {% if filter_category == 'health_tech' %}selected{% endif %}>Health Tech</option>
+                <option value="longevity" {% if filter_category == 'longevity' %}selected{% endif %}>Longevity</option>
+                <option value="pharma" {% if filter_category == 'pharma' %}selected{% endif %}>Pharma</option>
+                <option value="insurance" {% if filter_category == 'insurance' %}selected{% endif %}>Insurance</option>
+                <option value="other" {% if filter_category == 'other' %}selected{% endif %}>Other</option>
+            </select>
+        </div>
+        {% if filter_fit or filter_category %}
+        <div class="flex items-end">
+            <a href="/advertisers" class="text-sm text-primary hover:underline">Clear filters</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Advertisers Table -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Company</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Niche Fit</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Placement</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Copy</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Links</th>
+                </tr>
+            </thead>
+            <tbody class="bg-white divide-y divide-gray-200">
+                {% for adv in advertisers %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-6 py-4">
+                        <div class="text-sm font-medium text-gray-900">{{ adv.advertiser_name }}</div>
+                        <div class="text-sm text-gray-500">{{ adv.advertiser_domain or 'N/A' }}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 capitalize">
+                            {{ adv.category.replace('_', ' ') }}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        {% if 'High' in adv.niche_fit %}
+                        <span class="text-green-600 font-medium">{{ adv.niche_fit }}</span>
+                        {% elif 'Medium' in adv.niche_fit %}
+                        <span class="text-yellow-600 font-medium">{{ adv.niche_fit }}</span>
+                        {% else %}
+                        <span class="text-red-600 font-medium">{{ adv.niche_fit }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 capitalize">
+                        {{ adv.source_newsletter.replace('_', ' ') }}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 capitalize">
+                        {{ adv.placement_type.replace('_', ' ') }}
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate" title="{{ adv.ad_copy_snippet }}">
+                        {{ adv.ad_copy_snippet[:80] }}{% if adv.ad_copy_snippet|length > 80 %}...{% endif %}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        {% if adv.issue_url %}
+                        <a href="{{ adv.issue_url }}" target="_blank" class="text-primary hover:underline">Issue</a>
+                        {% endif %}
+                        {% if adv.sponsor_url %}
+                        <a href="{{ adv.sponsor_url }}" target="_blank" class="text-primary hover:underline ml-2">Site</a>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7" class="px-6 py-12 text-center text-gray-500">
+                        No advertisers match your filters.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    function filterByFit(fit) {
+        const params = new URLSearchParams(window.location.search);
+        if (fit) {
+            params.set('fit', fit);
+        } else {
+            params.delete('fit');
+        }
+        window.location.search = params.toString();
+    }
+
+    function filterByCategory(category) {
+        const params = new URLSearchParams(window.location.search);
+        if (category) {
+            params.set('category', category);
+        } else {
+            params.delete('category');
+        }
+        window.location.search = params.toString();
+    }
+</script>
+{% endblock %}
