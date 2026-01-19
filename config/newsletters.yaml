@@ -1,0 +1,259 @@
+# Newsletter Advertiser Intelligence System
+# Newsletter Source Configurations
+
+newsletters:
+  healthcare_brew:
+    name: "Healthcare Brew"
+    archive_url: "https://www.healthcare-brew.com/archive"
+    issue_url_pattern: "https://www.healthcare-brew.com/issues/{slug}"
+    requires_js: true
+    active: true
+
+    # Sponsor detection patterns (regex)
+    sponsor_patterns:
+      # "Presented By | [SponsorName](link)" - logo at top
+      presented_by_logo:
+        pattern: 'Presented By \| \[([^\]]+)\]'
+        placement_type: "presented_by_logo"
+        priority: 1
+
+      # "Presented By SponsorName" section - full advertorial
+      presented_by_section:
+        pattern: 'Presented By\s+(\w+(?:\s+\w+)*)'
+        placement_type: "presented_by_section"
+        priority: 1
+
+      # "Together With SponsorName" - secondary sponsor
+      together_with:
+        pattern: 'Together With\s+(\w+(?:\s+\w+)*)'
+        placement_type: "together_with"
+        priority: 2
+
+      # "*A message from our sponsor." - in-content mention
+      sponsor_message:
+        pattern: '\*A message from our sponsor'
+        placement_type: "sponsor_message"
+        priority: 3
+
+    # Selectors for extracting content
+    selectors:
+      archive_links: 'a[href*="/issues/"]'
+      issue_content: 'article, .newsletter-content, main'
+      sponsor_section: '[class*="sponsor"], [class*="partner"], [class*="presented"]'
+
+  morning_brew:
+    name: "Morning Brew"
+    archive_url: "https://www.morningbrew.com/daily/archive"
+    issue_url_pattern: "https://www.morningbrew.com/daily/issues/{slug}"
+    requires_js: true
+    active: true
+
+    sponsor_patterns:
+      presented_by_logo:
+        pattern: 'Presented By \| \[([^\]]+)\]'
+        placement_type: "presented_by_logo"
+        priority: 1
+
+      presented_by_section:
+        pattern: 'Presented By\s+(\w+(?:\s+\w+)*)'
+        placement_type: "presented_by_section"
+        priority: 1
+
+      together_with:
+        pattern: 'Together With\s+(\w+(?:\s+\w+)*)'
+        placement_type: "together_with"
+        priority: 2
+
+    selectors:
+      archive_links: 'a[href*="/issues/"]'
+      issue_content: 'article, .newsletter-content, main'
+      sponsor_section: '[class*="sponsor"], [class*="partner"], [class*="presented"]'
+
+# Auto-detection keywords for unknown newsletters
+auto_detect:
+  sponsor_keywords:
+    - "Sponsored"
+    - "Presented by"
+    - "Together with"
+    - "Partner"
+    - "Advertisement"
+    - "Promoted"
+    - "Brought to you by"
+    - "A message from our sponsor"
+    - "Paid promotion"
+
+  link_patterns:
+    - "utm_source"
+    - "utm_campaign"
+    - "utm_medium"
+    - "?ref="
+    - "affiliate"
+    - "partner"
+
+# Advertiser categorization rules
+categorization:
+  clinic:
+    keywords:
+      - "stem cell"
+      - "regenerative"
+      - "clinic"
+      - "treatment center"
+      - "medical center"
+      - "therapy center"
+      - "infusion"
+      - "IV therapy"
+      - "wellness clinic"
+      - "functional medicine"
+      - "integrative medicine"
+    domains:
+      - "stemcell"
+      - "regenerative"
+      - "clinic"
+      - "medical"
+      - "therapy"
+      - "wellness"
+
+  supplement:
+    keywords:
+      - "supplement"
+      - "vitamin"
+      - "probiotic"
+      - "collagen"
+      - "omega"
+      - "nootropic"
+      - "adaptogen"
+      - "nutraceutical"
+      - "natural health"
+    domains:
+      - "supplement"
+      - "vitamin"
+      - "nutrition"
+      - "health"
+
+  diagnostic:
+    keywords:
+      - "test"
+      - "testing"
+      - "diagnostic"
+      - "lab"
+      - "biomarker"
+      - "screening"
+      - "blood test"
+      - "DNA"
+      - "genetic"
+      - "at-home test"
+    domains:
+      - "test"
+      - "lab"
+      - "diagnostic"
+      - "bio"
+      - "gene"
+
+  health_tech:
+    keywords:
+      - "wearable"
+      - "tracker"
+      - "monitor"
+      - "app"
+      - "device"
+      - "sensor"
+      - "smart"
+      - "connected"
+      - "health tech"
+      - "digital health"
+    domains:
+      - "health"
+      - "tech"
+      - "fit"
+      - "wearable"
+
+  longevity:
+    keywords:
+      - "longevity"
+      - "anti-aging"
+      - "lifespan"
+      - "healthspan"
+      - "aging"
+      - "senolytic"
+      - "NAD"
+      - "rapamycin"
+      - "metformin"
+      - "biohacking"
+    domains:
+      - "longevity"
+      - "age"
+      - "life"
+      - "bio"
+
+  pharma:
+    keywords:
+      - "pharmaceutical"
+      - "drug"
+      - "medication"
+      - "prescription"
+      - "FDA"
+      - "clinical trial"
+      - "pharma"
+    domains:
+      - "pharma"
+      - "rx"
+      - "med"
+
+  insurance:
+    keywords:
+      - "insurance"
+      - "coverage"
+      - "health plan"
+      - "medicare"
+      - "medicaid"
+      - "HSA"
+      - "FSA"
+    domains:
+      - "insurance"
+      - "health"
+      - "care"
+
+# Niche fit scoring for Renewal Weekly audience
+# Audience: Ages 55-68, $150K+ income, researching stem cell/regenerative medicine
+niche_fit:
+  high:
+    categories:
+      - "clinic"
+      - "longevity"
+      - "diagnostic"
+    keywords:
+      - "stem cell"
+      - "regenerative"
+      - "longevity"
+      - "anti-aging"
+      - "biohacking"
+      - "NAD"
+      - "peptide"
+      - "biomarker"
+      - "health testing"
+      - "functional medicine"
+
+  medium:
+    categories:
+      - "supplement"
+      - "health_tech"
+      - "pharma"
+    keywords:
+      - "supplement"
+      - "vitamin"
+      - "wellness"
+      - "health device"
+      - "tracker"
+
+  low:
+    categories:
+      - "insurance"
+    keywords:
+      - "B2B"
+      - "hospital"
+      - "enterprise"
+      - "healthcare IT"
+      - "EHR"
+      - "EMR"
+      - "pediatric"
+      - "children"

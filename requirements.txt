@@ -1,0 +1,23 @@
+# Newsletter Advertiser Intelligence System
+# Phase 1: Newsletter Scraper
+
+# Core dependencies
+playwright>=1.40.0
+pandas>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# HTTP and parsing
+httpx>=0.25.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Utilities
+tqdm>=4.66.0
+tenacity>=8.2.0
+
+# Future phases (uncomment when needed)
+# google-api-python-client>=2.100.0  # Google Sheets
+# google-auth-httplib2>=0.1.1
+# google-auth-oauthlib>=1.1.0
+# anthropic>=0.7.0  # Claude API for email personalization
