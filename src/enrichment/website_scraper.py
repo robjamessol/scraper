@@ -592,6 +592,24 @@ class WebsiteScraper:
             if "." not in domain_part or len(domain_part) < 4:
                 continue
 
+            # IMPORTANT: Only accept emails from the target domain
+            # This prevents picking up random emails from subdomains or other sites
+            # e.g., for hsbc.com, accept info@hsbc.com but not cc.life@mail.life.hsbc.com.sg
+            target_domain = domain.lower()
+            if not (domain_part == target_domain or domain_part.endswith("." + target_domain)):
+                # Check if it's the same root domain (e.g., hsbc.com vs hsbc.co.uk)
+                target_parts = target_domain.split(".")
+                email_parts = domain_part.split(".")
+                if len(target_parts) >= 2 and len(email_parts) >= 2:
+                    # Compare the main domain name (e.g., "hsbc")
+                    if target_parts[-2] != email_parts[-2]:
+                        continue
+                    # If email has too many subdomains, skip (likely regional subdomain)
+                    if len(email_parts) > 3:
+                        continue
+                else:
+                    continue
+
             # Determine email type
             email_prefix = email_lower.split("@")[0]
             email_type = "unknown"
@@ -676,27 +694,48 @@ class WebsiteScraper:
 
             for keyword in title_keywords:
                 if keyword.lower() in container_text.lower():
-                    # Extract the title portion
+                    # Extract the title portion - but limit length to avoid garbage
                     title_match = re.search(
-                        rf'({keyword}[^,\n]*)',
+                        rf'({keyword}[^,\n@(]*)',
                         container_text,
                         re.IGNORECASE
                     )
                     if title_match:
-                        title = title_match.group(1).strip()
-                        break
+                        extracted_title = title_match.group(1).strip()
+                        # Only accept titles that are reasonable length
+                        if len(extracted_title) <= 50:
+                            title = extracted_title
+                            break
 
             # Look for a name (capitalized words before the email or title)
             # Simple heuristic: 2-3 capitalized words in a row
             name_pattern = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b')
             name_matches = name_pattern.findall(container_text)
             if name_matches:
-                # Filter out common non-name phrases
-                skip_names = ["Contact Us", "Get In Touch", "Learn More", "Read More"]
+                # Filter out common non-name phrases and department names
+                skip_names = [
+                    "Contact Us", "Get In Touch", "Learn More", "Read More",
+                    "About Us", "Our Team", "Meet The Team", "The Team",
+                    # Department/role names that aren't people
+                    "Small Business", "Business Development", "Customer Service",
+                    "Human Resources", "Public Relations", "Media Relations",
+                    "Investor Relations", "Corporate Communications", "Sales Team",
+                    "Marketing Team", "Support Team", "Press Office",
+                    "Minority Business", "Development Center", "Chamber Of Commerce",
+                ]
+                skip_patterns = ["Center", "Centre", "Office", "Team", "Department", "Division", "Relations"]
                 for match in name_matches:
-                    if match not in skip_names and len(match.split()) <= 3:
-                        name = match
-                        break
+                    # Skip if it matches known non-names
+                    if match in skip_names:
+                        continue
+                    # Skip if it contains department-like words
+                    if any(pattern in match for pattern in skip_patterns):
+                        continue
+                    # Skip if it's too long (likely not a person's name)
+                    if len(match.split()) > 3 or len(match) > 30:
+                        continue
+                    name = match
+                    break
 
             if name or title:
                 break

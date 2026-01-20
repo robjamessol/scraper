@@ -721,7 +721,7 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Scrape website (ONE Claude call to suggest pages, fast regex for extraction)
+        # Step 1: Quick website scrape (homepage + /advertise + /contact)
         self._log(f"Step 1: Scraping website {domain}...")
         website_contacts = self._scrape_website_contacts(domain, company_name=company_name)
 
@@ -743,26 +743,18 @@ class ApolloEnricher:
         # Step 1b removed for speed - Claude extraction is slow
         # Website scraping + email patterns are sufficient
 
-        # Step 2: Generate & verify common email patterns (FREE - SMTP verification enabled)
+        # Step 2: Generate email patterns (no SMTP - too slow, just guesses)
         if len(contacts) < max_contacts:
-            self._log(f"Step 2: Finding emails via pattern generation for {domain}...")
-
-            # Use Claude to suggest best email prefixes for this company type
-            suggested_prefixes = self._get_claude_email_suggestions(
-                advertiser.get("advertiser_name", domain),
-                advertiser.get("full_ad_copy"),
-                advertiser.get("company_industry"),
-            )
+            self._log(f"Step 2: Generating email patterns for {domain}...")
 
             email_finder = EmailFinder(
-                verify_smtp=True,  # ENABLED - verify emails actually exist
-                timeout=3.0,  # Reduced timeout for speed
-                max_workers=5,  # More parallel workers for speed
+                verify_smtp=False,  # Disabled - too slow
+                timeout=3.0,
+                max_workers=3,
                 log_callback=self._log_callback,
-                priority_prefixes=suggested_prefixes,  # Claude's suggestions first
             )
-            # Only verify top 8 patterns for speed
-            found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2, max_verify=8)
+            # Just generate top patterns, no verification
+            found_emails = email_finder.find_emails(domain, max_results=max_contacts, max_verify=0)
 
             added_count = 0
             verified_count = 0
@@ -1184,8 +1176,8 @@ class ApolloEnricher:
         """
         Scrape a company website for contact information.
 
-        Uses Claude for ONE smart navigation decision (which pages to visit),
-        then fast regex extraction on those pages.
+        Fast approach: check homepage + /advertise + /contact only.
+        No Claude, no browser - just quick HTTP + regex.
 
         Args:
             domain: Domain to scrape
@@ -1196,10 +1188,10 @@ class ApolloEnricher:
         """
         try:
             scraper = WebsiteScraper(
-                timeout=5.0,  # Reduced for speed
-                max_pages=8,  # Homepage + Claude's suggestions + defaults
-                use_browser=False,  # Disabled - too slow
-                use_claude=True,  # ONE call to analyze homepage and suggest pages
+                timeout=5.0,
+                max_pages=3,  # Homepage + /advertise + /contact only
+                use_browser=False,
+                use_claude=False,  # Disabled for speed
                 log_callback=self._log_callback,
             )
             result = scraper.scrape_domain(domain, company_name=company_name)
