@@ -698,10 +698,10 @@ class ApolloEnricher:
         """
         Fully enrich an advertiser with company info and contacts.
 
-        Workflow (optimized for Apollo's strengths):
-        1. Use Apollo People Search to find contacts (FREE, better results)
-        2. Enrich only contacts Apollo found (high match rate)
-        3. Fallback: scrape website for emails if Apollo found nothing
+        Workflow (hybrid approach for maximum data):
+        1. Scrape website first to find emails (free, checks multiple pages)
+        2. Use Apollo People Search to find additional contacts (FREE)
+        3. Combine results, prioritizing Apollo-verified contacts
 
         Args:
             advertiser: Advertiser dict from scraper
@@ -716,24 +716,53 @@ class ApolloEnricher:
             return self._add_empty_contact_fields(advertiser, max_contacts)
 
         contacts = []
+        seen_emails = set()
 
-        # Step 1: Use Apollo People Search first (FREE, finds people Apollo knows about)
-        if self.is_configured:
-            self._log(f"Searching Apollo for contacts at {domain}...")
-            contacts = self.search_and_enrich(domain, max_contacts)
+        # Step 1: Scrape website first (free, thorough - checks contact/about/team pages)
+        self._log(f"Scraping website {domain} for contacts...")
+        website_contacts = self._scrape_website_contacts(domain)
 
-            if contacts:
-                self._log(f"Apollo found {len(contacts)} contact(s)")
+        if website_contacts:
+            self._log(f"Found {len(website_contacts)} email(s) on website")
+            # Convert to Contact objects
+            for wc in website_contacts[:max_contacts]:
+                contact = Contact(
+                    name=wc.name or wc.email.split("@")[0],
+                    email=wc.email,
+                    email_status="website",
+                    title=wc.title,
+                    phone=wc.phone,
+                    linkedin_url=wc.linkedin_url,
+                    confidence="medium",
+                )
+                contacts.append(contact)
+                seen_emails.add(wc.email.lower())
 
-        # Step 2: Fallback to website scraping if Apollo found nothing
-        if not contacts:
-            self._log(f"Apollo found nothing, scraping website {domain}...")
-            website_contacts = self._scrape_website_contacts(domain)
+        # Step 2: Use Apollo to find additional contacts (FREE search)
+        if self.is_configured and len(contacts) < max_contacts:
+            remaining = max_contacts - len(contacts)
+            self._log(f"Searching Apollo for {remaining} more contact(s) at {domain}...")
+            apollo_contacts = self.search_and_enrich(domain, remaining + 2)  # Get extras to filter duplicates
 
-            if website_contacts:
-                self._log(f"Found {len(website_contacts)} email(s) on website")
-                # Use website contacts as-is (don't try to enrich - Apollo doesn't know them)
-                contacts = self._convert_website_contacts(website_contacts[:max_contacts])
+            if apollo_contacts:
+                self._log(f"Apollo found {len(apollo_contacts)} contact(s)")
+                # Add Apollo contacts, avoiding duplicates
+                for ac in apollo_contacts:
+                    if len(contacts) >= max_contacts:
+                        break
+                    if ac.email and ac.email.lower() not in seen_emails:
+                        # Apollo contacts go first (higher quality)
+                        contacts.insert(0, ac)
+                        seen_emails.add(ac.email.lower())
+                    elif not ac.email:
+                        # No email but has other info - still useful
+                        contacts.append(ac)
+
+                # Re-sort: Apollo-verified first, then website contacts
+                contacts.sort(key=lambda c: 0 if c.email_status == "verified" else 1)
+
+        # Trim to max_contacts
+        contacts = contacts[:max_contacts]
 
         # Add contacts to advertiser
         enriched = advertiser.copy()
