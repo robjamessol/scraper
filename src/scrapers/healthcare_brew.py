@@ -14,6 +14,10 @@ from ..utils.helpers import (
     clean_text,
     normalize_company_name,
     truncate_text,
+    resolve_sponsor_domain,
+    is_tracking_domain,
+    resolve_redirect_url,
+    guess_domain_from_name,
 )
 
 
@@ -314,6 +318,9 @@ class HealthcareBrewScraper(BaseScraper):
         """
         Find the sponsor's URL from nearby links.
 
+        IMPORTANT: This method now follows tracking redirects to get the
+        actual advertiser domain, not the newsletter's tracking domain.
+
         Args:
             html: HTML content
             soup: Parsed soup
@@ -323,12 +330,14 @@ class HealthcareBrewScraper(BaseScraper):
         Returns:
             Tuple of (sponsor_url, sponsor_domain)
         """
-        # Skip these domains when looking for sponsor URLs
+        # Skip these domains - they're not the actual advertisers
         skip_domains = {
             "healthcare-brew.com",
             "healthcarebrew.com",
             "morningbrew.com",
             "morning-brew.com",
+            "links.morningbrew.com",
+            "link.morningbrew.com",
             "twitter.com",
             "x.com",
             "facebook.com",
@@ -349,33 +358,63 @@ class HealthcareBrewScraper(BaseScraper):
         section_soup = BeautifulSoup(section, "lxml")
         normalized_sponsor = normalize_company_name(sponsor_name)
 
-        # First, look for links with sponsor name in text or URL
+        best_url = None
+        best_domain = None
+
+        # Look for links in the sponsor section
         for link in section_soup.find_all("a", href=True):
             href = link.get("href", "")
             text = clean_text(link.get_text())
 
-            # Skip internal and social links
-            domain = extract_domain(href)
-            if not domain or any(skip in href.lower() for skip in skip_domains):
+            if not href or href.startswith("mailto:"):
                 continue
 
             # Check if this link relates to the sponsor
-            if (
+            link_domain = extract_domain(href)
+            is_relevant = (
                 normalized_sponsor in normalize_company_name(text) or
-                normalized_sponsor in domain.lower() or
-                "utm_" in href.lower()  # Tracking link = likely sponsor
-            ):
-                return href, domain
+                (link_domain and normalized_sponsor in link_domain.lower()) or
+                "utm_" in href.lower() or  # Tracking link = likely sponsor
+                "mbadid" in href.lower()   # Morning Brew ad ID
+            )
 
-        # Fallback: first external link in the section
-        for link in section_soup.find_all("a", href=True):
-            href = link.get("href", "")
-            domain = extract_domain(href)
+            if not is_relevant:
+                continue
 
-            if domain and not any(skip in href.lower() for skip in skip_domains):
-                return href, domain
+            # Check if this is a tracking link that needs resolving
+            if is_tracking_domain(href):
+                logger.debug(f"Resolving tracking link for {sponsor_name}: {href[:60]}...")
+                resolved_url = resolve_redirect_url(href)
+                if resolved_url:
+                    resolved_domain = extract_domain(resolved_url)
+                    if resolved_domain and resolved_domain.lower() not in skip_domains:
+                        logger.debug(f"Resolved to: {resolved_domain}")
+                        return resolved_url, resolved_domain
 
-        return None, None
+            # If it's already a good domain, use it
+            if link_domain and link_domain.lower() not in skip_domains:
+                return href, link_domain
+
+            # Keep the first tracking URL as fallback (we'll try to resolve it later)
+            if not best_url and href:
+                best_url = href
+                best_domain = link_domain
+
+        # If we found a tracking URL but couldn't resolve, try one more time
+        if best_url and is_tracking_domain(best_url):
+            resolved_url = resolve_redirect_url(best_url)
+            if resolved_url:
+                resolved_domain = extract_domain(resolved_url)
+                if resolved_domain and resolved_domain.lower() not in skip_domains:
+                    return resolved_url, resolved_domain
+
+        # Last resort: guess domain from company name
+        guessed_domain = guess_domain_from_name(sponsor_name)
+        if guessed_domain:
+            logger.debug(f"Guessed domain for {sponsor_name}: {guessed_domain}")
+            return None, guessed_domain
+
+        return best_url, best_domain
 
     def _find_landing_page(
         self,

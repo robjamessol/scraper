@@ -1,7 +1,83 @@
 """Helper utilities for text processing and data extraction."""
 
 import re
+import logging
 from urllib.parse import urlparse
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Known tracking/redirect domains that should be resolved
+TRACKING_DOMAINS = {
+    "links.morningbrew.com",
+    "link.morningbrew.com",
+    "links.healthcare-brew.com",
+    "link.healthcare-brew.com",
+    "email.morningbrew.com",
+    "t.co",
+    "bit.ly",
+    "tinyurl.com",
+    "ow.ly",
+    "buff.ly",
+    "mailtrack.io",
+    "click.convertkit-mail.com",
+    "click.convertkit-mail2.com",
+}
+
+
+def resolve_redirect_url(url: str, timeout: float = 5.0) -> str | None:
+    """
+    Follow redirects to get the final destination URL.
+
+    This is critical for newsletter tracking links like:
+    links.morningbrew.com/c/xxx → actual-advertiser.com
+
+    Args:
+        url: URL that may redirect
+        timeout: Request timeout in seconds
+
+    Returns:
+        Final destination URL, or original URL if no redirects
+    """
+    if not url:
+        return None
+
+    try:
+        # Use HEAD request to follow redirects without downloading content
+        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+            response = client.head(url)
+            final_url = str(response.url)
+
+            # If we got redirected somewhere useful, return it
+            if final_url and final_url != url:
+                logger.debug(f"Resolved redirect: {url[:50]}... → {final_url[:50]}...")
+                return final_url
+
+            return url
+
+    except httpx.TimeoutException:
+        logger.debug(f"Timeout resolving redirect for {url[:50]}...")
+        return url
+    except Exception as e:
+        logger.debug(f"Error resolving redirect for {url[:50]}...: {e}")
+        return url
+
+
+def is_tracking_domain(url: str) -> bool:
+    """
+    Check if URL is from a known tracking/redirect domain.
+
+    Args:
+        url: URL to check
+
+    Returns:
+        True if this is a tracking domain that should be resolved
+    """
+    domain = extract_domain(url)
+    if not domain:
+        return False
+    return domain.lower() in TRACKING_DOMAINS
 
 
 def extract_domain(url: str) -> str | None:
@@ -216,5 +292,89 @@ def parse_date_from_url(url: str) -> str | None:
                 return f"{groups[0]}-{groups[1]}-{groups[2]}"
             else:
                 return f"{groups[2]}-{groups[0]}-{groups[1]}"
+
+    return None
+
+
+def guess_domain_from_name(company_name: str) -> str | None:
+    """
+    Guess a company's domain from their name.
+
+    This is a fallback when we can't find a link.
+    Common patterns: "HealthEdge" → "healthedge.com"
+
+    Args:
+        company_name: Company name
+
+    Returns:
+        Guessed domain or None
+    """
+    if not company_name:
+        return None
+
+    # Normalize: lowercase, remove spaces and special chars
+    name = company_name.lower().strip()
+
+    # Remove common suffixes
+    name = re.sub(r'\s*(inc|llc|ltd|corp|co|company|technologies|labs|health|medical)\.?$', '', name, flags=re.IGNORECASE)
+
+    # Remove spaces and special characters for domain
+    domain_name = re.sub(r'[^a-z0-9]', '', name)
+
+    if not domain_name or len(domain_name) < 2:
+        return None
+
+    # Return guessed .com domain
+    return f"{domain_name}.com"
+
+
+def resolve_sponsor_domain(
+    tracking_url: str | None,
+    company_name: str | None,
+    resolve_redirects: bool = True,
+) -> str | None:
+    """
+    Get the actual sponsor domain from a tracking URL or company name.
+
+    Priority:
+    1. Follow redirects on tracking URLs to get real domain
+    2. Extract domain from non-tracking URL
+    3. Guess domain from company name
+
+    Args:
+        tracking_url: URL that may be a tracking link
+        company_name: Company name as fallback
+        resolve_redirects: Whether to follow redirects (slower but more accurate)
+
+    Returns:
+        Sponsor's actual domain or None
+    """
+    # Skip newsletter/tracking domains
+    skip_domains = {
+        "morningbrew.com", "healthcare-brew.com", "healthcarebrew.com",
+        "links.morningbrew.com", "link.morningbrew.com",
+        "twitter.com", "x.com", "facebook.com", "linkedin.com",
+        "instagram.com", "youtube.com", "google.com",
+    }
+
+    if tracking_url:
+        # Check if this is a tracking domain that needs resolving
+        current_domain = extract_domain(tracking_url)
+
+        if current_domain and current_domain.lower() in skip_domains:
+            # This is a tracking link - try to resolve it
+            if resolve_redirects and is_tracking_domain(tracking_url):
+                resolved_url = resolve_redirect_url(tracking_url)
+                if resolved_url:
+                    resolved_domain = extract_domain(resolved_url)
+                    if resolved_domain and resolved_domain.lower() not in skip_domains:
+                        return resolved_domain
+        elif current_domain and current_domain.lower() not in skip_domains:
+            # This is already a real domain
+            return current_domain
+
+    # Fallback: guess from company name
+    if company_name:
+        return guess_domain_from_name(company_name)
 
     return None

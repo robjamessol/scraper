@@ -20,6 +20,9 @@ from ..utils.helpers import (
     truncate_text,
     extract_links_from_html,
     is_tracking_link,
+    is_tracking_domain,
+    resolve_redirect_url,
+    guess_domain_from_name,
 )
 
 
@@ -316,6 +319,9 @@ class BaseScraper(ABC):
         """
         Find the sponsor's domain from links near their mention.
 
+        IMPORTANT: This method follows tracking/redirect links to get
+        the actual advertiser domain, not the newsletter's tracking domain.
+
         Args:
             html: Full HTML content
             sponsor_name: Name of the sponsor
@@ -333,12 +339,15 @@ class BaseScraper(ABC):
         # Parse links in this section
         links = extract_links_from_html(section)
 
-        # Filter out newsletter's own domain and common tracking domains
+        # Filter out newsletter's own domain and tracking domains
         skip_domains = {
             "morningbrew.com",
             "healthcare-brew.com",
             "healthcarebrew.com",
             "morning-brew.com",
+            "links.morningbrew.com",
+            "link.morningbrew.com",
+            "links.healthcare-brew.com",
             "twitter.com",
             "x.com",
             "facebook.com",
@@ -350,28 +359,68 @@ class BaseScraper(ABC):
             "t.co",
         }
 
-        # Look for links that might be the sponsor
-        for link in links:
-            domain = link.get("domain")
-            if not domain or domain in skip_domains:
-                continue
+        normalized_sponsor = normalize_company_name(sponsor_name)
 
-            # Check if link text or domain relates to sponsor name
-            normalized_sponsor = normalize_company_name(sponsor_name)
+        # First pass: look for links that clearly relate to sponsor
+        for link in links:
+            href = link.get("href", "")
+            domain = link.get("domain")
             link_text = normalize_company_name(link.get("text", ""))
 
-            if normalized_sponsor in link_text or normalized_sponsor in domain:
+            if not href:
+                continue
+
+            # Check if link relates to sponsor by name
+            is_relevant = (
+                normalized_sponsor in link_text or
+                (domain and normalized_sponsor in domain.lower())
+            )
+
+            # Or has tracking params (indicates it's an ad link)
+            is_tracking = is_tracking_link(href) or "mbadid" in href.lower()
+
+            if not is_relevant and not is_tracking:
+                continue
+
+            # If this is a tracking domain, resolve the redirect
+            if is_tracking_domain(href):
+                logger.debug(f"Resolving tracking link for {sponsor_name}: {href[:60]}...")
+                resolved_url = resolve_redirect_url(href)
+                if resolved_url:
+                    resolved_domain = extract_domain(resolved_url)
+                    if resolved_domain and resolved_domain.lower() not in skip_domains:
+                        logger.debug(f"Resolved {sponsor_name} to: {resolved_domain}")
+                        return resolved_domain
+
+            # If it's already a good domain, use it
+            if domain and domain.lower() not in skip_domains:
                 return domain
 
-            # If it's a tracking link, it's likely the sponsor
-            if is_tracking_link(link.get("href", "")):
-                return domain
-
-        # Fallback: return first external link that's not in skip list
+        # Second pass: try any external link with tracking params
         for link in links:
+            href = link.get("href", "")
             domain = link.get("domain")
-            if domain and domain not in skip_domains:
+
+            if not href:
+                continue
+
+            # Check if it's a tracking link we should resolve
+            if is_tracking_domain(href):
+                resolved_url = resolve_redirect_url(href)
+                if resolved_url:
+                    resolved_domain = extract_domain(resolved_url)
+                    if resolved_domain and resolved_domain.lower() not in skip_domains:
+                        return resolved_domain
+
+            # Or if it's just an external link
+            if domain and domain.lower() not in skip_domains:
                 return domain
+
+        # Last resort: guess domain from company name
+        guessed = guess_domain_from_name(sponsor_name)
+        if guessed:
+            logger.debug(f"Guessed domain for {sponsor_name}: {guessed}")
+            return guessed
 
         return None
 
