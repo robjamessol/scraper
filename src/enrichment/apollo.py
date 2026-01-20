@@ -5,12 +5,11 @@ Finds marketing/advertising contacts at companies discovered from newsletter ads
 
 Workflow:
 1. Scrape company website for contact emails (free, checks multiple pages with Playwright)
-2. Use Hunter.io to find public emails for the domain (free tier: 25/month)
+2. Generate & verify common email patterns via SMTP (info@, contact@, sales@, etc.)
 3. Use Apollo People Search for additional contacts (free tier: 600 credits/month)
 4. Combine all results, prioritizing verified contacts
 
-Free tier: 600 email credits/month
-Sign up at: https://www.apollo.io/
+All contact finding is FREE - no paid APIs needed!
 """
 
 import os
@@ -24,7 +23,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .website_scraper import WebsiteScraper, WebsiteContact
-from .hunter import HunterEnricher, HunterContact
+from .email_finder import EmailFinder, FoundEmail
 
 logger = logging.getLogger(__name__)
 
@@ -700,10 +699,10 @@ class ApolloEnricher:
         """
         Fully enrich an advertiser with company info and contacts.
 
-        Workflow (multi-source approach for maximum coverage):
-        1. Scrape website first (free, uses Playwright for JS-rendered sites)
-        2. Use Hunter.io to find public emails (free tier: 25/month)
-        3. Use Apollo People Search for additional contacts (free: 600/month)
+        Workflow (multi-source approach - ALL FREE):
+        1. Scrape website (free, uses Playwright for JS-rendered sites)
+        2. Generate & verify common email patterns via SMTP (info@, sales@, etc.)
+        3. Use Apollo People Search for additional contacts (free tier)
         4. Combine all results, prioritizing verified contacts
 
         Args:
@@ -740,40 +739,36 @@ class ApolloEnricher:
                 contacts.append(contact)
                 seen_emails.add(wc.email.lower())
 
-        # Step 2: Use Hunter.io to find emails (great for domains without visible contact info)
+        # Step 2: Generate & verify common email patterns (FREE - no API needed)
         if len(contacts) < max_contacts:
-            hunter = HunterEnricher(log_callback=self._log_callback)
-            if hunter.is_configured:
-                self._log(f"Step 2: Searching Hunter.io for {domain}...")
-                hunter_contacts = hunter.domain_search(domain, limit=max_contacts + 2)
+            self._log(f"Step 2: Finding emails via pattern generation for {domain}...")
+            email_finder = EmailFinder(
+                verify_smtp=True,
+                log_callback=self._log_callback,
+            )
+            found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2)
 
-                for hc in hunter_contacts:
-                    if len(contacts) >= max_contacts:
-                        break
-                    if hc.email and hc.email.lower() not in seen_emails:
-                        # Convert Hunter contact to our Contact format
-                        name = None
-                        if hc.first_name and hc.last_name:
-                            name = f"{hc.first_name} {hc.last_name}"
-                        elif hc.first_name:
-                            name = hc.first_name
+            added_count = 0
+            for fe in found_emails:
+                if len(contacts) >= max_contacts:
+                    break
+                if fe.email and fe.email.lower() not in seen_emails:
+                    contact = Contact(
+                        name=fe.email.split("@")[0],  # Use prefix as name
+                        email=fe.email,
+                        email_status="smtp_verified" if fe.verified else "pattern",
+                        title=None,
+                        phone=None,
+                        linkedin_url=None,
+                        confidence=fe.confidence,
+                    )
+                    contacts.append(contact)
+                    seen_emails.add(fe.email.lower())
+                    added_count += 1
 
-                        contact = Contact(
-                            name=name or hc.email.split("@")[0],
-                            email=hc.email,
-                            email_status="hunter",
-                            title=hc.position,
-                            phone=hc.phone_number,
-                            linkedin_url=hc.linkedin,
-                            confidence="high" if hc.confidence >= 80 else "medium",
-                        )
-                        contacts.append(contact)
-                        seen_emails.add(hc.email.lower())
-
-                if hunter_contacts:
-                    self._log(f"Hunter.io: Added {len(hunter_contacts)} contact(s)")
-            else:
-                self._log("Step 2: Hunter.io not configured (skipping)", "warning")
+            if added_count > 0:
+                verified_count = sum(1 for fe in found_emails if fe.verified)
+                self._log(f"Email finder: Added {added_count} contact(s) ({verified_count} verified)")
 
         # Step 3: Use Apollo to find additional contacts (FREE search)
         if self.is_configured and len(contacts) < max_contacts:
@@ -793,14 +788,16 @@ class ApolloEnricher:
                     elif not ac.email:
                         contacts.append(ac)
 
-        # Sort: Apollo verified > Hunter high confidence > others
+        # Sort: Apollo verified > SMTP verified > website > pattern guesses
         def contact_priority(c: Contact) -> int:
-            if c.email_status == "verified":
+            if c.email_status == "verified":  # Apollo verified
                 return 0
-            if c.email_status == "hunter" and c.confidence == "high":
+            if c.email_status == "smtp_verified":  # Our SMTP verification
                 return 1
-            if c.email_status == "hunter":
+            if c.email_status == "website":  # Found on website
                 return 2
+            if c.email_status == "pattern":  # Unverified pattern guess
+                return 4
             return 3
 
         contacts.sort(key=contact_priority)
