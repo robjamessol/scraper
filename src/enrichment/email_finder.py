@@ -60,7 +60,7 @@ class EmailFinder:
     def __init__(
         self,
         verify_smtp: bool = True,
-        timeout: float = 5.0,
+        timeout: float = 3.0,  # Reduced from 5s for speed
         max_workers: int = 5,
         log_callback: callable = None,
         priority_prefixes: list[str] | None = None,
@@ -241,6 +241,7 @@ class EmailFinder:
         domain: str,
         max_results: int = 5,
         verify: bool = None,
+        max_verify: int = 8,  # Limit SMTP checks for speed
     ) -> list[FoundEmail]:
         """
         Find and optionally verify emails for a domain.
@@ -249,6 +250,7 @@ class EmailFinder:
             domain: Company domain
             max_results: Max emails to return
             verify: Whether to SMTP verify (defaults to self.verify_smtp)
+            max_verify: Max emails to SMTP verify (for speed)
 
         Returns:
             List of FoundEmail objects, verified ones first
@@ -276,17 +278,21 @@ class EmailFinder:
             self._log(f"No MX records for {domain}, skipping verification", "warning")
             return candidates[:max_results]
 
-        self._log(f"Verifying {len(candidates)} email patterns via SMTP...")
+        # Only verify top candidates for speed (Claude suggestions + top standard prefixes)
+        to_verify = candidates[:max_verify]
+        remaining = candidates[max_verify:]
+
+        self._log(f"Verifying top {len(to_verify)} email patterns via SMTP...")
 
         verified = []
         unverified = []
 
         # Verify emails in parallel
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit verification jobs
+            # Submit verification jobs for LIMITED candidates only
             future_to_email = {
                 executor.submit(self._verify_email_smtp, e.email): e
-                for e in candidates
+                for e in to_verify
             }
 
             for future in as_completed(future_to_email):
@@ -308,8 +314,8 @@ class EmailFinder:
                 except Exception as e:
                     unverified.append(email_obj)
 
-        # Combine results: verified first, then unverified by priority
-        results = verified + unverified
+        # Combine results: verified first, then unverified from checked, then remaining
+        results = verified + unverified + remaining
         results = results[:max_results]
 
         verified_count = sum(1 for e in results if e.verified)

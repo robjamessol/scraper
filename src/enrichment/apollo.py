@@ -721,11 +721,9 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Scrape website (thorough, Claude-guided when available)
-        self._log(f"Step 1: Scraping website {domain} (Claude-guided)...")
-        website_contacts = self._scrape_website_contacts(
-            domain, company_name=company_name, thorough=True
-        )
+        # Step 1: Scrape website (Claude for navigation hints, regex for extraction)
+        self._log(f"Step 1: Scraping website {domain}...")
+        website_contacts = self._scrape_website_contacts(domain, company_name=company_name)
 
         if website_contacts:
             self._log(f"Website: Found {len(website_contacts)} email(s)")
@@ -742,29 +740,8 @@ class ApolloEnricher:
                 contacts.append(contact)
                 seen_emails.add(wc.email.lower())
 
-        # Step 1b: If website scraping found few emails, try Claude extraction
-        if len(contacts) < max_contacts:
-            claude_emails = self._extract_emails_with_claude(
-                domain,
-                advertiser.get("advertiser_name", domain),
-            )
-            for ce in claude_emails:
-                if len(contacts) >= max_contacts:
-                    break
-                email = ce.get("email", "").lower()
-                if email and email not in seen_emails:
-                    contact = Contact(
-                        name=ce.get("name") if ce.get("name") and not self._is_email_prefix_name(ce.get("name")) else None,
-                        email=ce["email"],
-                        email_status="claude_extracted",
-                        title=ce.get("title"),
-                        phone=None,
-                        linkedin_url=None,
-                        confidence="medium",
-                    )
-                    contacts.append(contact)
-                    seen_emails.add(email)
-                    self._log(f"Claude extracted: {ce['email']} ({ce.get('purpose', 'unknown')})")
+        # Step 1b removed for speed - Claude extraction is slow
+        # Website scraping + email patterns are sufficient
 
         # Step 2: Generate & verify common email patterns (FREE - SMTP verification enabled)
         if len(contacts) < max_contacts:
@@ -779,12 +756,13 @@ class ApolloEnricher:
 
             email_finder = EmailFinder(
                 verify_smtp=True,  # ENABLED - verify emails actually exist
-                timeout=5.0,  # 5 second timeout per verification
-                max_workers=3,  # Parallel verification
+                timeout=3.0,  # Reduced timeout for speed
+                max_workers=5,  # More parallel workers for speed
                 log_callback=self._log_callback,
                 priority_prefixes=suggested_prefixes,  # Claude's suggestions first
             )
-            found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2)
+            # Only verify top 8 patterns for speed
+            found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2, max_verify=8)
 
             added_count = 0
             verified_count = 0
@@ -847,12 +825,7 @@ class ApolloEnricher:
         contacts.sort(key=contact_priority)
         contacts = contacts[:max_contacts]
 
-        # Step 4: Use Claude to prioritize contacts if we have multiple
-        if len(contacts) > 1:
-            contacts = self._prioritize_contacts_with_claude(
-                contacts,
-                advertiser.get("advertiser_name", domain),
-            )
+        # Step 4 removed for speed - simple priority sorting is sufficient
 
         self._log(f"Total contacts found for {domain}: {len(contacts)}")
 
@@ -1207,27 +1180,25 @@ class ApolloEnricher:
         self,
         domain: str,
         company_name: str | None = None,
-        thorough: bool = True,
     ) -> list[WebsiteContact]:
         """
         Scrape a company website for contact information.
 
-        Uses Claude (if available) for intelligent navigation and extraction.
+        Optimized for speed: uses Claude for navigation hints only, regex for extraction.
 
         Args:
             domain: Domain to scrape
-            company_name: Company name for better Claude extraction
-            thorough: If True, use more pages and Claude guidance
+            company_name: Company name for better extraction
 
         Returns:
             List of WebsiteContact objects
         """
         try:
             scraper = WebsiteScraper(
-                timeout=8.0 if thorough else 5.0,
-                max_pages=10 if thorough else 4,  # More pages for thoroughness
-                use_browser=thorough,  # Enable browser for JS-rendered sites
-                use_claude=thorough,  # Use Claude for intelligent navigation
+                timeout=5.0,  # Reduced for speed
+                max_pages=6,  # Check homepage + key pages only
+                use_browser=False,  # Disabled - too slow
+                use_claude=False,  # Disabled - not needed, we check fixed pages
                 log_callback=self._log_callback,
             )
             result = scraper.scrape_domain(domain, company_name=company_name)

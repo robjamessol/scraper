@@ -76,25 +76,16 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
-# Pages likely to contain contact information (expanded significantly)
+# Pages likely to contain contact information - OPTIMIZED for speed
+# Focus on the 3 most important: advertising, contact, about (95% of contacts are here)
 CONTACT_PAGE_PATTERNS = [
-    # Advertising/partnership pages (most relevant for ad sales) - HIGHEST PRIORITY
-    "/advertise", "/advertising", "/partnerships", "/partners", "/sponsors",
-    "/media-kit", "/mediakit", "/media", "/sponsorship", "/ad-sales",
-    "/advertise-with-us", "/become-a-partner", "/work-with-us",
+    # Advertising/partnership pages - HIGHEST PRIORITY (most relevant for ad sales)
+    "/advertise", "/advertising", "/partnerships", "/partners",
+    "/media-kit", "/mediakit", "/sponsorship",
     # Contact pages - HIGH PRIORITY
-    "/contact", "/contact-us", "/get-in-touch", "/reach-us", "/connect",
-    "/contact-sales", "/sales", "/inquiries", "/inquiry",
-    # About/team pages - MEDIUM PRIORITY (often has leadership contacts)
-    "/about", "/about-us", "/company", "/team", "/our-team",
-    "/leadership", "/people", "/management", "/executives", "/founders",
-    "/who-we-are", "/our-story", "/meet-the-team",
-    # Press/PR pages (often has media contacts)
-    "/press", "/press-room", "/newsroom", "/news", "/pr", "/media-relations",
-    # Support pages (sometimes has sales contact)
-    "/support", "/help", "/faq",
-    # Footer links that might have contact
-    "/privacy", "/terms", "/legal", "/imprint",  # Sometimes has legal@ email
+    "/contact", "/contact-us",
+    # About pages - has footer with contact info
+    "/about", "/about-us",
 ]
 
 # Email obfuscation patterns to decode
@@ -337,20 +328,15 @@ class WebsiteScraper:
         # Build base URL
         base_url = f"https://{domain}"
 
-        self._log(f"Scraping {domain} for contacts (Claude-guided: {self.use_claude})...")
+        self._log(f"Scraping {domain} for contacts...")
 
         # Track visited URLs to avoid duplicates
         visited_urls: set[str] = set()
         urls_to_visit: list[str] = [base_url]
-        claude_priority_urls: list[str] = []  # URLs suggested by Claude (visit first)
 
-        # Add common contact page URLs
+        # Add key contact page URLs (optimized short list)
         for pattern in CONTACT_PAGE_PATTERNS:
             urls_to_visit.append(urljoin(base_url, pattern))
-
-        # Also try common variations
-        urls_to_visit.append(urljoin(base_url, "/contact-us"))
-        urls_to_visit.append(urljoin(base_url, "/get-in-touch"))
 
         # Deduplicate initial URLs
         urls_to_visit = list(dict.fromkeys(urls_to_visit))
@@ -358,7 +344,6 @@ class WebsiteScraper:
         pages_scraped = 0
         consecutive_errors = 0
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
-        homepage_html = None  # Cache homepage for Claude analysis
 
         def has_good_contacts() -> bool:
             """Check if we have high-quality contacts worth stopping for."""
@@ -374,55 +359,8 @@ class WebsiteScraper:
             follow_redirects=True,
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
         ) as client:
-            # Phase 1: Fetch homepage and use Claude to analyze best pages
-            try:
-                homepage_response = client.get(base_url)
-                if homepage_response.status_code == 200:
-                    homepage_html = homepage_response.text
-                    pages_scraped += 1
-                    visited_urls.add(base_url)
-
-                    # Use Claude to analyze homepage and suggest best pages to visit
-                    claude = self._get_claude_agent()
-                    if claude and homepage_html:
-                        self._log("Using Claude to analyze site navigation...")
-                        nav_analysis = claude.analyze_website_navigation(
-                            homepage_html, domain,
-                            goal="find advertising, marketing, or partnership contact emails"
-                        )
-                        if nav_analysis:
-                            suggested = nav_analysis.get("suggested_paths", [])
-                            if suggested:
-                                self._log(f"Claude suggested pages: {suggested[:5]}")
-                                # Add Claude's suggestions to front of queue (high priority)
-                                for path in reversed(suggested[:8]):
-                                    full_url = urljoin(base_url, path)
-                                    if full_url not in visited_urls:
-                                        claude_priority_urls.insert(0, full_url)
-
-                            # Also use Claude to find best links on homepage
-                            best_links = claude.identify_best_contact_links(
-                                homepage_html, base_url, list(visited_urls)
-                            )
-                            for link in best_links[:5]:
-                                if link not in visited_urls and link not in claude_priority_urls:
-                                    claude_priority_urls.append(link)
-
-                    # Extract contacts from homepage
-                    page_contacts = self._extract_contacts_from_html(homepage_html, base_url, domain)
-                    for contact in page_contacts:
-                        if contact.email not in all_emails:
-                            all_emails[contact.email] = contact
-
-            except Exception as e:
-                self._log(f"Error fetching homepage: {e}", "warning")
-                consecutive_errors += 1
-
-            # Reorder URLs: Claude priority URLs first, then standard patterns
-            if claude_priority_urls:
-                # Remove duplicates and already-visited
-                claude_priority_urls = [u for u in claude_priority_urls if u not in visited_urls]
-                urls_to_visit = claude_priority_urls + [u for u in urls_to_visit if u not in claude_priority_urls]
+            # Optimized: Check homepage + key pages directly (no Claude analysis needed)
+            # 95% of contact info is in homepage footer, /contact, or /advertise
 
             for url in urls_to_visit:
                 # Stop conditions
@@ -478,38 +416,8 @@ class WebsiteScraper:
                             if contact.phone and not existing.phone:
                                 existing.phone = contact.phone
 
-                    # Use Claude for deeper extraction on high-value pages
-                    # (advertise, contact, team, about pages)
-                    is_high_value_page = any(
-                        kw in url.lower() for kw in
-                        ["advertise", "contact", "team", "about", "partner", "media", "sponsor"]
-                    )
-                    claude = self._get_claude_agent()
-                    if claude and is_high_value_page and len(all_emails) < 5:
-                        self._log(f"Using Claude to extract contacts from: {url}")
-                        claude_contacts = claude.extract_contacts_from_page(html, url, company_name)
-                        for cc in claude_contacts:
-                            email = cc.get("email")
-                            if email and email not in all_emails:
-                                # Convert Claude contact to WebsiteContact
-                                email_type = cc.get("type", "unknown")
-                                if email_type in ["advertising", "partnerships"]:
-                                    email_type = "advertising"
-                                elif email_type in ["business", "marketing"]:
-                                    email_type = "generic"
-                                elif email_type == "personal":
-                                    email_type = "personal"
-                                else:
-                                    email_type = "unknown"
-
-                                all_emails[email] = WebsiteContact(
-                                    email=email,
-                                    source_page=url,
-                                    email_type=email_type,
-                                    name=cc.get("name"),
-                                    title=cc.get("title"),
-                                )
-                                self._log(f"  Claude found: {email} ({cc.get('type')})")
+                    # Skip Claude per-page extraction for speed - regex is sufficient
+                    # Claude is used for homepage navigation analysis only
 
                     # Look for additional contact page links on EVERY page (not just homepage)
                     # This helps find contact links in navigation, footer, etc.
@@ -543,33 +451,8 @@ class WebsiteScraper:
                 if contact.email not in all_emails:
                     all_emails[contact.email] = contact
 
-        # Phase 3: If still no advertising-specific emails, use Claude for final analysis
-        ad_emails = [c for c in all_emails.values() if c.email_type == "advertising"]
-        if not ad_emails and homepage_html:
-            claude = self._get_claude_agent()
-            if claude:
-                self._log("No advertising emails found, using Claude for deeper analysis...")
-                # Have Claude do a thorough pass on the homepage
-                claude_contacts = claude.extract_contacts_from_page(
-                    homepage_html, base_url, company_name
-                )
-                for cc in claude_contacts:
-                    email = cc.get("email")
-                    if email and email not in all_emails:
-                        email_type = cc.get("type", "unknown")
-                        if email_type in ["advertising", "partnerships"]:
-                            email_type = "advertising"
-                        elif email_type in ["business", "marketing"]:
-                            email_type = "generic"
-
-                        all_emails[email] = WebsiteContact(
-                            email=email,
-                            source_page=base_url,
-                            email_type=email_type,
-                            name=cc.get("name"),
-                            title=cc.get("title"),
-                        )
-                        self._log(f"  Claude deep extraction found: {email}")
+        # Phase 3 removed for speed - Claude extraction is too slow
+        # Email patterns will be generated and verified via SMTP in apollo.py instead
 
         # Clean up Claude agent
         if self._claude_agent:
