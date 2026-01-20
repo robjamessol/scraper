@@ -698,10 +698,10 @@ class ApolloEnricher:
         """
         Fully enrich an advertiser with company info and contacts.
 
-        Workflow:
-        1. Scrape company website for contact emails (free)
-        2. Use Apollo to verify/enrich website contacts (efficient credit use)
-        3. Fall back to Apollo search if no website contacts found
+        Workflow (optimized for Apollo's strengths):
+        1. Use Apollo People Search to find contacts (FREE, better results)
+        2. Enrich only contacts Apollo found (high match rate)
+        3. Fallback: scrape website for emails if Apollo found nothing
 
         Args:
             advertiser: Advertiser dict from scraper
@@ -717,34 +717,23 @@ class ApolloEnricher:
 
         contacts = []
 
-        # Step 1: Scrape website for contacts (free, no API credits)
-        self._log(f"Scraping website {domain} for contacts...")
-        website_contacts = self._scrape_website_contacts(domain)
+        # Step 1: Use Apollo People Search first (FREE, finds people Apollo knows about)
+        if self.is_configured:
+            self._log(f"Searching Apollo for contacts at {domain}...")
+            contacts = self.search_and_enrich(domain, max_contacts)
 
-        if website_contacts:
-            self._log(f"Found {len(website_contacts)} email(s) on website")
+            if contacts:
+                self._log(f"Apollo found {len(contacts)} contact(s)")
 
-            # Step 2: Verify/enrich website contacts via Apollo
-            if self.is_configured:
-                contacts = self._enrich_website_contacts(website_contacts, domain, max_contacts)
-            else:
-                # No Apollo - just use website contacts as-is
+        # Step 2: Fallback to website scraping if Apollo found nothing
+        if not contacts:
+            self._log(f"Apollo found nothing, scraping website {domain}...")
+            website_contacts = self._scrape_website_contacts(domain)
+
+            if website_contacts:
+                self._log(f"Found {len(website_contacts)} email(s) on website")
+                # Use website contacts as-is (don't try to enrich - Apollo doesn't know them)
                 contacts = self._convert_website_contacts(website_contacts[:max_contacts])
-
-        # Step 3: Fall back to Apollo search if not enough contacts
-        if len(contacts) < max_contacts and self.is_configured:
-            remaining = max_contacts - len(contacts)
-            self._log(f"Searching Apollo for {remaining} more contact(s)...")
-            apollo_contacts = self.search_and_enrich(domain, remaining)
-
-            # Add Apollo contacts, avoiding duplicates by email
-            existing_emails = {c.email.lower() for c in contacts if c.email}
-            for c in apollo_contacts:
-                if c.email and c.email.lower() not in existing_emails:
-                    contacts.append(c)
-                    existing_emails.add(c.email.lower())
-                    if len(contacts) >= max_contacts:
-                        break
 
         # Add contacts to advertiser
         enriched = advertiser.copy()
@@ -786,7 +775,8 @@ class ApolloEnricher:
     def _scrape_website_contacts(self, domain: str) -> list[WebsiteContact]:
         """Scrape a company website for contact information."""
         try:
-            scraper = WebsiteScraper(timeout=8.0, max_pages=4, log_callback=self._log_callback)
+            # Allow more pages to find contact info (6 pages, 6s timeout each)
+            scraper = WebsiteScraper(timeout=6.0, max_pages=6, log_callback=self._log_callback)
             result = scraper.scrape_domain(domain)
             return result.contacts
         except Exception as e:

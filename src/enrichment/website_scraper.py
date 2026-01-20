@@ -51,16 +51,31 @@ class WebsiteScrapeResult:
 
 # Email patterns that are likely useful for ad sales outreach
 PRIORITY_EMAIL_PREFIXES = [
-    "advertising", "ads", "partnerships", "partner", "sponsors", "sponsorship",
-    "marketing", "media", "sales", "business", "bd", "biz",
-    "hello", "contact", "info", "press", "pr",
+    # Highest priority - ad/partnership specific
+    "advertising", "ads", "ad", "partnerships", "partner", "sponsors", "sponsorship",
+    "media", "mediasales", "adsales", "adops",
+    # High priority - business/sales
+    "marketing", "sales", "business", "bd", "biz", "commercial",
+    # Medium priority - general contact
+    "hello", "contact", "info", "inquiries", "enquiries",
+    # Lower priority - PR/comms (but still useful)
+    "press", "pr", "communications", "comms", "news",
 ]
 
-# Pages likely to contain contact information
+# Pages likely to contain contact information (expanded)
 CONTACT_PAGE_PATTERNS = [
-    "/contact", "/about", "/team", "/leadership", "/people",
-    "/advertise", "/advertising", "/partnerships", "/sponsors",
-    "/press", "/media", "/about-us", "/our-team", "/company",
+    # Advertising/partnership pages (most relevant for ad sales)
+    "/advertise", "/advertising", "/partnerships", "/partners", "/sponsors",
+    "/media-kit", "/mediakit", "/media", "/sponsorship", "/ad-sales",
+    # Contact pages
+    "/contact", "/contact-us", "/get-in-touch", "/reach-us",
+    # About/team pages
+    "/about", "/about-us", "/company", "/team", "/our-team",
+    "/leadership", "/people", "/management", "/executives",
+    # Press/PR pages (often have media contact)
+    "/press", "/press-room", "/newsroom", "/news", "/pr",
+    # Footer links that might have contact
+    "/privacy", "/terms", "/legal",  # Sometimes has legal@ email
 ]
 
 # Email regex pattern
@@ -176,6 +191,14 @@ class WebsiteScraper:
         consecutive_errors = 0
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
 
+        def has_good_contacts() -> bool:
+            """Check if we have high-quality contacts worth stopping for."""
+            if len(all_emails) < 2:
+                return False
+            # Only stop early if we have advertising/sales emails
+            ad_emails = [c for c in all_emails.values() if c.email_type == "advertising"]
+            return len(ad_emails) >= 1 and len(all_emails) >= 3
+
         with httpx.Client(
             timeout=self.timeout,
             headers=self.headers,
@@ -189,8 +212,8 @@ class WebsiteScraper:
                 if consecutive_errors >= self.max_errors:
                     self._log(f"Stopping after {consecutive_errors} errors", "warning")
                     break
-                # Early exit: if we have 3+ good contacts, stop
-                if len(all_emails) >= 3:
+                # Early exit only if we have high-quality contacts
+                if has_good_contacts():
                     break
 
                 if url in visited_urls:
@@ -236,12 +259,12 @@ class WebsiteScraper:
                             if contact.phone and not existing.phone:
                                 existing.phone = contact.phone
 
-                    # Look for additional contact page links on homepage
-                    if url == base_url:
-                        new_urls = self._find_contact_links(html, base_url)
-                        for new_url in new_urls:
-                            if new_url not in visited_urls and new_url not in urls_to_visit:
-                                urls_to_visit.append(new_url)
+                    # Look for additional contact page links on EVERY page (not just homepage)
+                    # This helps find contact links in navigation, footer, etc.
+                    new_urls = self._find_contact_links(html, base_url)
+                    for new_url in new_urls:
+                        if new_url not in visited_urls and new_url not in urls_to_visit:
+                            urls_to_visit.append(new_url)
 
                 except httpx.TimeoutException:
                     consecutive_errors += 1
@@ -417,22 +440,55 @@ class WebsiteScraper:
         soup = BeautifulSoup(html, "lxml")
         contact_urls = []
 
+        # Expanded keywords - prioritize advertising/sales related
         contact_keywords = [
-            "contact", "about", "team", "leadership", "advertise",
-            "partnerships", "press", "media", "people", "company",
+            # Advertising/sales (highest priority for our use case)
+            "advertise", "advertising", "sponsors", "sponsorship", "media-kit",
+            "mediakit", "ad-sales", "partnerships", "partner",
+            # Contact pages
+            "contact", "get-in-touch", "reach-us", "inquiry", "enquiry",
+            # Team/about pages
+            "about", "team", "leadership", "people", "management", "company",
+            # Press/media (often has contacts)
+            "press", "newsroom", "media", "pr",
         ]
+
+        base_domain = urlparse(base_url).netloc
 
         for a in soup.find_all("a", href=True):
             href = a["href"]
             text = a.get_text().lower().strip()
+
+            # Skip empty or javascript links
+            if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                continue
 
             # Check if link text or href contains contact keywords
             href_lower = href.lower()
             if any(kw in text or kw in href_lower for kw in contact_keywords):
                 full_url = urljoin(base_url, href)
                 # Only include same-domain links
-                if urlparse(full_url).netloc == urlparse(base_url).netloc:
-                    contact_urls.append(full_url)
+                try:
+                    if urlparse(full_url).netloc == base_domain:
+                        contact_urls.append(full_url)
+                except Exception:
+                    continue
+
+        # Also look specifically in footer and nav sections
+        for section in soup.find_all(["footer", "nav"]):
+            for a in section.find_all("a", href=True):
+                href = a["href"]
+                if not href or href.startswith(("javascript:", "#")):
+                    continue
+                full_url = urljoin(base_url, href)
+                try:
+                    if urlparse(full_url).netloc == base_domain:
+                        # Add footer/nav links that might be contact pages
+                        href_lower = href.lower()
+                        if any(kw in href_lower for kw in ["contact", "about", "team", "advertise"]):
+                            contact_urls.append(full_url)
+                except Exception:
+                    continue
 
         return list(dict.fromkeys(contact_urls))  # Deduplicate
 
