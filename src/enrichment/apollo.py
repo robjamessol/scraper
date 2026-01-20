@@ -2,8 +2,11 @@
 Apollo.io Contact Enrichment Module
 
 Finds marketing/advertising contacts at companies discovered from newsletter ads.
-Uses Apollo.io's People Search API (free) to find prospects, then
-People Match API (credits) to get verified contact data.
+
+Workflow:
+1. First scrape company website for contact emails (free, no API)
+2. Use Apollo People Match to verify/enrich found contacts (uses credits efficiently)
+3. Fall back to Apollo People Search if website has no contacts
 
 Free tier: 600 email credits/month
 Sign up at: https://www.apollo.io/
@@ -18,6 +21,8 @@ from urllib.parse import urlparse
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from .website_scraper import WebsiteScraper, WebsiteContact
 
 logger = logging.getLogger(__name__)
 
@@ -664,6 +669,11 @@ class ApolloEnricher:
         """
         Fully enrich an advertiser with company info and contacts.
 
+        Workflow:
+        1. Scrape company website for contact emails (free)
+        2. Use Apollo to verify/enrich website contacts (efficient credit use)
+        3. Fall back to Apollo search if no website contacts found
+
         Args:
             advertiser: Advertiser dict from scraper
             max_contacts: Max contacts to find
@@ -676,8 +686,36 @@ class ApolloEnricher:
         if not domain:
             return self._add_empty_contact_fields(advertiser, max_contacts)
 
-        # Use two-step workflow for efficiency
-        contacts = self.search_and_enrich(domain, max_contacts)
+        contacts = []
+
+        # Step 1: Scrape website for contacts (free, no API credits)
+        self._log(f"Scraping website {domain} for contacts...")
+        website_contacts = self._scrape_website_contacts(domain)
+
+        if website_contacts:
+            self._log(f"Found {len(website_contacts)} email(s) on website")
+
+            # Step 2: Verify/enrich website contacts via Apollo
+            if self.is_configured:
+                contacts = self._enrich_website_contacts(website_contacts, domain, max_contacts)
+            else:
+                # No Apollo - just use website contacts as-is
+                contacts = self._convert_website_contacts(website_contacts[:max_contacts])
+
+        # Step 3: Fall back to Apollo search if not enough contacts
+        if len(contacts) < max_contacts and self.is_configured:
+            remaining = max_contacts - len(contacts)
+            self._log(f"Searching Apollo for {remaining} more contact(s)...")
+            apollo_contacts = self.search_and_enrich(domain, remaining)
+
+            # Add Apollo contacts, avoiding duplicates by email
+            existing_emails = {c.email.lower() for c in contacts if c.email}
+            for c in apollo_contacts:
+                if c.email and c.email.lower() not in existing_emails:
+                    contacts.append(c)
+                    existing_emails.add(c.email.lower())
+                    if len(contacts) >= max_contacts:
+                        break
 
         # Add contacts to advertiser
         enriched = advertiser.copy()
@@ -715,6 +753,95 @@ class ApolloEnricher:
         enriched["verified_emails"] = sum(1 for c in contacts if c.is_verified)
 
         return enriched
+
+    def _scrape_website_contacts(self, domain: str) -> list[WebsiteContact]:
+        """Scrape a company website for contact information."""
+        try:
+            scraper = WebsiteScraper(timeout=8.0, max_pages=4, log_callback=self._log_callback)
+            result = scraper.scrape_domain(domain)
+            return result.contacts
+        except Exception as e:
+            self._log(f"Website scrape error: {e}", "warning")
+            return []
+
+    def _enrich_website_contacts(
+        self,
+        website_contacts: list[WebsiteContact],
+        domain: str,
+        max_contacts: int,
+    ) -> list[Contact]:
+        """
+        Enrich contacts found on website via Apollo.
+
+        Uses People Match with the email we found - very efficient since
+        we're matching by email rather than searching.
+        """
+        contacts = []
+
+        # Prioritize advertising/generic emails over personal
+        # (personal emails from websites may be outdated)
+        sorted_contacts = sorted(
+            website_contacts,
+            key=lambda c: 0 if c.email_type == "advertising" else (1 if c.email_type == "generic" else 2)
+        )
+
+        for wc in sorted_contacts[:max_contacts * 2]:  # Try more in case some fail
+            if len(contacts) >= max_contacts:
+                break
+
+            # Try to get name parts if we found a name
+            first_name = None
+            last_name = None
+            if wc.name:
+                parts = wc.name.split()
+                if len(parts) >= 2:
+                    first_name = parts[0]
+                    last_name = " ".join(parts[1:])
+                elif len(parts) == 1:
+                    first_name = parts[0]
+
+            # Enrich via Apollo using the email we found
+            self._log(f"  Verifying {wc.email}...")
+            enriched = self.enrich_person(
+                domain=domain,
+                email=wc.email,
+                first_name=first_name,
+                last_name=last_name,
+            )
+
+            if enriched and enriched.email:
+                self._log(f"  ✓ Verified: {enriched.name} ({enriched.title})")
+                contacts.append(enriched)
+            else:
+                # Apollo couldn't verify - use website data as-is
+                contact = Contact(
+                    name=wc.name or wc.email.split("@")[0],
+                    email=wc.email,
+                    email_status="website",  # Found on website, not verified by Apollo
+                    title=wc.title,
+                    phone=wc.phone,
+                    linkedin_url=wc.linkedin_url,
+                    confidence="medium",
+                )
+                contacts.append(contact)
+                self._log(f"  ○ Using website data: {wc.email}")
+
+        return contacts
+
+    def _convert_website_contacts(self, website_contacts: list[WebsiteContact]) -> list[Contact]:
+        """Convert WebsiteContact objects to Contact objects (when no Apollo configured)."""
+        return [
+            Contact(
+                name=wc.name or wc.email.split("@")[0],
+                email=wc.email,
+                email_status="website",
+                title=wc.title,
+                phone=wc.phone,
+                linkedin_url=wc.linkedin_url,
+                confidence="medium",
+            )
+            for wc in website_contacts
+        ]
 
     def _add_empty_contact_fields(self, advertiser: dict, max_contacts: int) -> dict:
         """Add empty contact fields to advertiser."""
