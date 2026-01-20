@@ -53,11 +53,6 @@
                         Ready
                     </span>
                     {% endif %}
-                    <button onclick="startScan()"
-                            class="bg-primary text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
-                            {% if scan_status.is_running %}disabled{% endif %}>
-                        Run Scan
-                    </button>
                 </div>
             </div>
         </div>
@@ -79,14 +74,31 @@
 
     <script>
         async function startScan() {
-            if (!confirm('Start a new scan? This may take several minutes.')) return;
+            // Get limit from dropdown if it exists
+            const limitSelect = document.getElementById('scanLimit');
+            const limit = limitSelect ? limitSelect.value : '25';
+            const limitText = limit ? `${limit} issues` : 'all issues';
+
+            if (!confirm(`Start a new scan (${limitText})? This may take several minutes.`)) return;
 
             try {
-                const res = await fetch('/api/scan', { method: 'POST' });
+                // Build URL with limit parameter
+                let url = '/api/scan';
+                if (limit) {
+                    url += `?limit=${limit}`;
+                }
+
+                const res = await fetch(url, { method: 'POST' });
                 const data = await res.json();
 
                 if (res.ok) {
-                    alert('Scan started! The page will refresh when complete.');
+                    alert('Scan started! The page will refresh automatically when complete.');
+                    // Disable the button
+                    const btn = document.getElementById('scanButton');
+                    if (btn) {
+                        btn.disabled = true;
+                        btn.textContent = 'Scanning...';
+                    }
                     pollStatus();
                 } else {
                     alert('Error: ' + data.detail);

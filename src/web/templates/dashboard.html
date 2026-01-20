@@ -67,18 +67,30 @@
             <p class="text-sm text-gray-500 mt-1">No scans yet</p>
             {% endif %}
         </div>
-        <div class="flex space-x-3">
+        <div class="flex items-center space-x-3">
             <a href="/api/advertisers/export"
                class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200">
                 Export CSV
             </a>
+            <div class="flex items-center space-x-2">
+                <label class="text-sm text-gray-600">Issues:</label>
+                <select id="scanLimit" class="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+                    <option value="5">5 (Quick Test)</option>
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="">All (Slow)</option>
+                </select>
+            </div>
             <button onclick="startScan()"
+                    id="scanButton"
                     class="bg-primary text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
                     {% if scan_status.is_running %}disabled{% endif %}>
                 {% if scan_status.is_running %}
                 Scanning... {{ scan_status.progress }}%
                 {% else %}
-                Run New Scan
+                Run Scan
                 {% endif %}
             </button>
         </div>
