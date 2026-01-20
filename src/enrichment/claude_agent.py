@@ -579,6 +579,231 @@ Return structured email data."""
         except json.JSONDecodeError:
             return []
 
+    def analyze_website_navigation(
+        self,
+        html: str,
+        domain: str,
+        goal: str = "find advertising/marketing contact information",
+    ) -> dict | None:
+        """
+        Use Claude to analyze a website's homepage and suggest which pages to visit.
+
+        Much smarter than keyword matching - understands site structure and context.
+
+        Args:
+            html: Homepage HTML content
+            domain: Domain being scraped
+            goal: What we're looking for
+
+        Returns:
+            Dict with suggested_paths, priority_links, and navigation_notes
+        """
+        if not self.is_configured or not html:
+            return None
+
+        system_prompt = """You are an expert at navigating company websites to find contact information.
+
+Analyze the HTML and identify the BEST pages to visit to find advertising, marketing, or partnership contacts.
+
+Respond ONLY with valid JSON:
+{
+    "suggested_paths": ["/advertise", "/contact", "/about/team"],
+    "priority_links": ["text to look for in links"],
+    "navigation_notes": "brief observation about site structure",
+    "has_contact_form": true/false,
+    "has_email_visible": true/false
+}
+
+Focus on:
+- /advertise, /partnerships, /media-kit pages (highest priority)
+- Contact pages with email addresses
+- Team/about pages that list people
+- Footer links that might have contact info
+- Look for patterns like /company/team, /about-us/leadership"""
+
+        # Truncate HTML but keep important parts (head, nav, footer)
+        html_sample = html[:15000]  # First 15k chars should include nav/header
+
+        user_prompt = f"""Analyze this website ({domain}) to find the best pages for: {goal}
+
+HTML:
+{html_sample}
+
+Suggest specific paths to visit and what to look for."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=500)
+
+        if not response:
+            return None
+
+        try:
+            result = json.loads(response)
+            return result
+        except json.JSONDecodeError:
+            return None
+
+    def extract_contacts_from_page(
+        self,
+        html: str,
+        page_url: str,
+        company_name: str,
+    ) -> list[dict]:
+        """
+        Use Claude to extract ALL contact information from a page.
+
+        Optimized for finding advertising/marketing contacts with:
+        - Email priority hierarchy for ad sales outreach
+        - Obfuscated email detection
+        - Name/title extraction
+        - Confidence scoring
+
+        Args:
+            html: Page HTML content
+            page_url: URL of the page
+            company_name: Company name for context
+
+        Returns:
+            List of contact dicts with email, name, title, type, confidence
+        """
+        if not self.is_configured or not html:
+            return []
+
+        system_prompt = """You are an expert at identifying contact emails for advertising and sponsorship outreach.
+
+**Your Task:**
+1. Identify ALL email addresses in the content (including obfuscated ones)
+2. Classify each email by its likely purpose
+3. Rank them by relevance for ad sales outreach
+4. Provide a confidence score for each
+
+**Email Priority Hierarchy (most to least preferred):**
+1. Advertising/Ad Sales (ads@, advertising@, adsales@, media@, mediakit@)
+2. Partnerships/Sponsorships (partnerships@, sponsors@, sponsorship@)
+3. Business Development (bizdev@, business@, opportunities@, bd@)
+4. Marketing (marketing@, press@, pr@, communications@)
+5. General inquiries (info@, hello@, contact@)
+6. Named individuals in relevant roles (Ad Sales Manager, Partnership Director, VP Marketing, Head of BD)
+
+**Exclude these (do not return):**
+- Customer support (support@, help@, customerservice@)
+- Technical (tech@, engineering@, dev@)
+- HR/Careers (jobs@, careers@, hr@, recruiting@)
+- Legal (legal@, compliance@)
+- Unsubscribe/noreply addresses
+
+**Handle obfuscated emails:**
+- "name [at] domain [dot] com" → name@domain.com
+- "name(at)domain.com" → name@domain.com
+- HTML entities (&#64; for @)
+- JavaScript concatenation
+
+Respond ONLY with valid JSON:
+{
+    "contacts": [
+        {
+            "email": "email@domain.com",
+            "name": "Person Name or null",
+            "title": "Job Title or null",
+            "type": "advertising|partnerships|business|marketing|general|personal",
+            "confidence": "high|medium|low",
+            "source_context": "brief note about where found"
+        }
+    ],
+    "advertise_page_url": "URL if /advertise or media kit page found, else null",
+    "contact_form_url": "URL if contact form found for advertising, else null"
+}
+
+Return {"contacts": []} if no suitable emails found. DO NOT make up emails."""
+
+        # Get text content + important HTML for email detection
+        html_sample = html[:20000]
+
+        user_prompt = f"""Analyze this page from {company_name} and extract contact information for ad sales outreach:
+
+**Source URL:** {page_url}
+
+**Page Content:**
+{html_sample}
+
+Find every relevant email, especially advertising/partnership contacts."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=1200)
+
+        if not response:
+            return []
+
+        try:
+            data = json.loads(response)
+            contacts = data.get("contacts", [])
+            if isinstance(contacts, list):
+                # Add any page-level info to first contact as notes
+                if contacts and data.get("advertise_page_url"):
+                    contacts[0]["advertise_page"] = data["advertise_page_url"]
+                return contacts
+            return []
+        except json.JSONDecodeError:
+            return []
+
+    def identify_best_contact_links(
+        self,
+        html: str,
+        base_url: str,
+        already_visited: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Use Claude to identify which links on a page are most likely to lead to contact info.
+
+        Smarter than keyword matching - understands context and link text.
+
+        Args:
+            html: Page HTML
+            base_url: Base URL for resolving relative links
+            already_visited: URLs already visited (to avoid duplicates)
+
+        Returns:
+            List of URLs to visit, in priority order
+        """
+        if not self.is_configured or not html:
+            return []
+
+        already_visited = already_visited or []
+
+        system_prompt = """Analyze this webpage and identify links most likely to lead to contact information.
+
+Respond ONLY with a JSON array of paths/URLs in priority order:
+["/advertise", "/team", "/contact-us"]
+
+Prioritize:
+1. Advertising/partnership/media pages (most valuable for ad sales)
+2. Team/leadership/about pages (often list people with emails)
+3. Contact pages
+4. Press/media pages (often have media contact emails)
+
+Return maximum 8 URLs. Only return paths that exist in the HTML."""
+
+        html_sample = html[:12000]
+        visited_note = f"\n\nAlready visited (skip these): {already_visited[:10]}" if already_visited else ""
+
+        user_prompt = f"""Find the best links to contact information on this page ({base_url}):
+
+{html_sample}{visited_note}
+
+Return JSON array of paths to visit."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=300)
+
+        if not response:
+            return []
+
+        try:
+            paths = json.loads(response)
+            if isinstance(paths, list):
+                from urllib.parse import urljoin
+                return [urljoin(base_url, p) for p in paths if isinstance(p, str)]
+            return []
+        except json.JSONDecodeError:
+            return []
+
     def prioritize_contacts(
         self,
         contacts: list[dict],

@@ -713,6 +713,7 @@ class ApolloEnricher:
             Enriched advertiser dict with contact fields added
         """
         domain = self.clean_domain(advertiser.get("advertiser_domain"))
+        company_name = advertiser.get("advertiser_name")
 
         if not domain:
             return self._add_empty_contact_fields(advertiser, max_contacts)
@@ -720,9 +721,11 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Scrape website first (free, thorough - checks contact/about/team pages)
-        self._log(f"Step 1: Scraping website {domain}...")
-        website_contacts = self._scrape_website_contacts(domain)
+        # Step 1: Scrape website (thorough, Claude-guided when available)
+        self._log(f"Step 1: Scraping website {domain} (Claude-guided)...")
+        website_contacts = self._scrape_website_contacts(
+            domain, company_name=company_name, thorough=True
+        )
 
         if website_contacts:
             self._log(f"Website: Found {len(website_contacts)} email(s)")
@@ -1182,17 +1185,34 @@ class ApolloEnricher:
 
         return False
 
-    def _scrape_website_contacts(self, domain: str) -> list[WebsiteContact]:
-        """Scrape a company website for contact information."""
+    def _scrape_website_contacts(
+        self,
+        domain: str,
+        company_name: str | None = None,
+        thorough: bool = True,
+    ) -> list[WebsiteContact]:
+        """
+        Scrape a company website for contact information.
+
+        Uses Claude (if available) for intelligent navigation and extraction.
+
+        Args:
+            domain: Domain to scrape
+            company_name: Company name for better Claude extraction
+            thorough: If True, use more pages and Claude guidance
+
+        Returns:
+            List of WebsiteContact objects
+        """
         try:
-            # Fast scraping - disable Playwright for speed (adds 10-20s per domain)
             scraper = WebsiteScraper(
-                timeout=5.0,
-                max_pages=4,  # Reduced for speed
-                use_browser=False,  # Playwright is slow, disable for speed
+                timeout=8.0 if thorough else 5.0,
+                max_pages=10 if thorough else 4,  # More pages for thoroughness
+                use_browser=thorough,  # Enable browser for JS-rendered sites
+                use_claude=thorough,  # Use Claude for intelligent navigation
                 log_callback=self._log_callback,
             )
-            result = scraper.scrape_domain(domain)
+            result = scraper.scrape_domain(domain, company_name=company_name)
             return result.contacts
         except Exception as e:
             self._log(f"Website scrape error: {e}", "warning")

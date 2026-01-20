@@ -127,17 +127,20 @@ LINKEDIN_PATTERN = re.compile(
 class WebsiteScraper:
     """Scrapes company websites to find contact information.
 
-    Uses a two-phase approach:
-    1. Fast HTTP requests with httpx
-    2. Fallback to Playwright for JavaScript-rendered sites
+    Uses a multi-phase approach:
+    1. Analyze homepage with Claude to identify best pages (if enabled)
+    2. Fast HTTP requests with httpx
+    3. Use Claude for intelligent contact extraction on key pages
+    4. Fallback to Playwright for JavaScript-rendered sites
     """
 
     def __init__(
         self,
         timeout: float = 8.0,  # Increased for reliability
-        max_pages: int = 6,    # Increased to check more pages
+        max_pages: int = 10,   # Increased for more thorough scraping
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
+        use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
         log_callback: callable = None,
     ):
         """
@@ -148,13 +151,16 @@ class WebsiteScraper:
             max_pages: Maximum pages to scrape per domain
             max_errors: Stop scraping after this many consecutive errors
             use_browser: Use Playwright for JS-rendered sites (default True)
+            use_claude: Use Claude for intelligent page discovery and extraction
             log_callback: Optional callback for live logging
         """
         self.timeout = timeout
         self.max_pages = max_pages
         self.max_errors = max_errors
         self.use_browser = use_browser and PLAYWRIGHT_AVAILABLE
+        self.use_claude = use_claude
         self._log_callback = log_callback
+        self._claude_agent = None
 
         # Common headers to avoid being blocked
         self.headers = {
@@ -163,6 +169,20 @@ class WebsiteScraper:
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
         }
+
+    def _get_claude_agent(self):
+        """Get or create Claude agent (lazy initialization)."""
+        if self._claude_agent is None and self.use_claude:
+            try:
+                from .claude_agent import ClaudeAgent
+                self._claude_agent = ClaudeAgent(log_callback=self._log_callback)
+                if not self._claude_agent.is_configured:
+                    self._log("Claude API not configured, falling back to regex extraction", "warning")
+                    self._claude_agent = None
+            except ImportError:
+                self._log("Claude agent not available", "warning")
+                self._claude_agent = None
+        return self._claude_agent
 
     def _log(self, message: str, level: str = "info"):
         """Log a message, optionally to callback."""
@@ -276,12 +296,18 @@ class WebsiteScraper:
 
         return list(all_emails.values())
 
-    def scrape_domain(self, domain: str) -> WebsiteScrapeResult:
+    def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """
         Scrape a domain for contact information.
 
+        Uses Claude (if available) for intelligent navigation:
+        1. Analyze homepage to identify best pages to visit
+        2. Use Claude to extract contacts from complex pages
+        3. Identify additional relevant links
+
         Args:
             domain: Domain to scrape (e.g., "healthedge.com")
+            company_name: Optional company name for better Claude extraction
 
         Returns:
             WebsiteScrapeResult with found contacts
@@ -300,6 +326,7 @@ class WebsiteScraper:
             self._log(f"Stripped subdomain: {original_domain} → {domain}")
 
         result = WebsiteScrapeResult(domain=domain)
+        company_name = company_name or domain.split('.')[0].title()  # Fallback to domain name
 
         # Skip link service domains (they're not actual company sites)
         if domain.lower() in LINK_SERVICE_DOMAINS or any(domain.lower().endswith(f".{d}") for d in LINK_SERVICE_DOMAINS):
@@ -310,11 +337,12 @@ class WebsiteScraper:
         # Build base URL
         base_url = f"https://{domain}"
 
-        self._log(f"Scraping {domain} for contacts...")
+        self._log(f"Scraping {domain} for contacts (Claude-guided: {self.use_claude})...")
 
         # Track visited URLs to avoid duplicates
         visited_urls: set[str] = set()
         urls_to_visit: list[str] = [base_url]
+        claude_priority_urls: list[str] = []  # URLs suggested by Claude (visit first)
 
         # Add common contact page URLs
         for pattern in CONTACT_PAGE_PATTERNS:
@@ -330,6 +358,7 @@ class WebsiteScraper:
         pages_scraped = 0
         consecutive_errors = 0
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
+        homepage_html = None  # Cache homepage for Claude analysis
 
         def has_good_contacts() -> bool:
             """Check if we have high-quality contacts worth stopping for."""
@@ -345,6 +374,56 @@ class WebsiteScraper:
             follow_redirects=True,
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
         ) as client:
+            # Phase 1: Fetch homepage and use Claude to analyze best pages
+            try:
+                homepage_response = client.get(base_url)
+                if homepage_response.status_code == 200:
+                    homepage_html = homepage_response.text
+                    pages_scraped += 1
+                    visited_urls.add(base_url)
+
+                    # Use Claude to analyze homepage and suggest best pages to visit
+                    claude = self._get_claude_agent()
+                    if claude and homepage_html:
+                        self._log("Using Claude to analyze site navigation...")
+                        nav_analysis = claude.analyze_website_navigation(
+                            homepage_html, domain,
+                            goal="find advertising, marketing, or partnership contact emails"
+                        )
+                        if nav_analysis:
+                            suggested = nav_analysis.get("suggested_paths", [])
+                            if suggested:
+                                self._log(f"Claude suggested pages: {suggested[:5]}")
+                                # Add Claude's suggestions to front of queue (high priority)
+                                for path in reversed(suggested[:8]):
+                                    full_url = urljoin(base_url, path)
+                                    if full_url not in visited_urls:
+                                        claude_priority_urls.insert(0, full_url)
+
+                            # Also use Claude to find best links on homepage
+                            best_links = claude.identify_best_contact_links(
+                                homepage_html, base_url, list(visited_urls)
+                            )
+                            for link in best_links[:5]:
+                                if link not in visited_urls and link not in claude_priority_urls:
+                                    claude_priority_urls.append(link)
+
+                    # Extract contacts from homepage
+                    page_contacts = self._extract_contacts_from_html(homepage_html, base_url, domain)
+                    for contact in page_contacts:
+                        if contact.email not in all_emails:
+                            all_emails[contact.email] = contact
+
+            except Exception as e:
+                self._log(f"Error fetching homepage: {e}", "warning")
+                consecutive_errors += 1
+
+            # Reorder URLs: Claude priority URLs first, then standard patterns
+            if claude_priority_urls:
+                # Remove duplicates and already-visited
+                claude_priority_urls = [u for u in claude_priority_urls if u not in visited_urls]
+                urls_to_visit = claude_priority_urls + [u for u in urls_to_visit if u not in claude_priority_urls]
+
             for url in urls_to_visit:
                 # Stop conditions
                 if pages_scraped >= self.max_pages:
@@ -382,7 +461,7 @@ class WebsiteScraper:
                     pages_scraped += 1
                     html = response.text
 
-                    # Extract contacts from this page
+                    # Extract contacts from this page using regex
                     page_contacts = self._extract_contacts_from_html(html, url, domain)
 
                     for contact in page_contacts:
@@ -398,6 +477,39 @@ class WebsiteScraper:
                                 existing.title = contact.title
                             if contact.phone and not existing.phone:
                                 existing.phone = contact.phone
+
+                    # Use Claude for deeper extraction on high-value pages
+                    # (advertise, contact, team, about pages)
+                    is_high_value_page = any(
+                        kw in url.lower() for kw in
+                        ["advertise", "contact", "team", "about", "partner", "media", "sponsor"]
+                    )
+                    claude = self._get_claude_agent()
+                    if claude and is_high_value_page and len(all_emails) < 5:
+                        self._log(f"Using Claude to extract contacts from: {url}")
+                        claude_contacts = claude.extract_contacts_from_page(html, url, company_name)
+                        for cc in claude_contacts:
+                            email = cc.get("email")
+                            if email and email not in all_emails:
+                                # Convert Claude contact to WebsiteContact
+                                email_type = cc.get("type", "unknown")
+                                if email_type in ["advertising", "partnerships"]:
+                                    email_type = "advertising"
+                                elif email_type in ["business", "marketing"]:
+                                    email_type = "generic"
+                                elif email_type == "personal":
+                                    email_type = "personal"
+                                else:
+                                    email_type = "unknown"
+
+                                all_emails[email] = WebsiteContact(
+                                    email=email,
+                                    source_page=url,
+                                    email_type=email_type,
+                                    name=cc.get("name"),
+                                    title=cc.get("title"),
+                                )
+                                self._log(f"  Claude found: {email} ({cc.get('type')})")
 
                     # Look for additional contact page links on EVERY page (not just homepage)
                     # This helps find contact links in navigation, footer, etc.
@@ -418,9 +530,9 @@ class WebsiteScraper:
 
         result.pages_scraped = pages_scraped
 
-        # Phase 2: If httpx found nothing, try Playwright for JS-rendered sites
-        if not all_emails and self.use_browser:
-            self._log(f"No emails via HTTP, trying browser for JS-rendered content...")
+        # Phase 2: If httpx found nothing or few results, try Playwright for JS-rendered sites
+        if len(all_emails) < 2 and self.use_browser:
+            self._log(f"Few emails via HTTP, trying browser for JS-rendered content...")
             # Prioritize advertising/contact pages for browser scraping
             priority_urls = [base_url]
             for pattern in ["/advertise", "/contact", "/contact-us", "/about", "/team"]:
@@ -430,6 +542,42 @@ class WebsiteScraper:
             for contact in browser_contacts:
                 if contact.email not in all_emails:
                     all_emails[contact.email] = contact
+
+        # Phase 3: If still no advertising-specific emails, use Claude for final analysis
+        ad_emails = [c for c in all_emails.values() if c.email_type == "advertising"]
+        if not ad_emails and homepage_html:
+            claude = self._get_claude_agent()
+            if claude:
+                self._log("No advertising emails found, using Claude for deeper analysis...")
+                # Have Claude do a thorough pass on the homepage
+                claude_contacts = claude.extract_contacts_from_page(
+                    homepage_html, base_url, company_name
+                )
+                for cc in claude_contacts:
+                    email = cc.get("email")
+                    if email and email not in all_emails:
+                        email_type = cc.get("type", "unknown")
+                        if email_type in ["advertising", "partnerships"]:
+                            email_type = "advertising"
+                        elif email_type in ["business", "marketing"]:
+                            email_type = "generic"
+
+                        all_emails[email] = WebsiteContact(
+                            email=email,
+                            source_page=base_url,
+                            email_type=email_type,
+                            name=cc.get("name"),
+                            title=cc.get("title"),
+                        )
+                        self._log(f"  Claude deep extraction found: {email}")
+
+        # Clean up Claude agent
+        if self._claude_agent:
+            try:
+                self._claude_agent.close()
+            except Exception:
+                pass
+            self._claude_agent = None
 
         result.contacts = self._prioritize_contacts(list(all_emails.values()))
 
@@ -732,20 +880,30 @@ class WebsiteScraper:
 
 def scrape_website_for_contacts(
     domain: str,
-    max_pages: int = 5,
+    company_name: str | None = None,
+    max_pages: int = 10,
+    use_claude: bool = True,
     log_callback: callable = None,
 ) -> list[WebsiteContact]:
     """
     Convenience function to scrape a domain for contacts.
 
+    Uses Claude (if available) for intelligent navigation and extraction.
+
     Args:
         domain: Domain to scrape
-        max_pages: Maximum pages to check
+        company_name: Optional company name for better Claude extraction
+        max_pages: Maximum pages to check (default 10 for thoroughness)
+        use_claude: Whether to use Claude for intelligent scraping
         log_callback: Optional logging callback
 
     Returns:
         List of WebsiteContact objects, prioritized for outreach
     """
-    scraper = WebsiteScraper(max_pages=max_pages, log_callback=log_callback)
-    result = scraper.scrape_domain(domain)
+    scraper = WebsiteScraper(
+        max_pages=max_pages,
+        use_claude=use_claude,
+        log_callback=log_callback,
+    )
+    result = scraper.scrape_domain(domain, company_name=company_name)
     return result.contacts
