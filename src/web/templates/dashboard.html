@@ -4,8 +4,8 @@
 
 {% block content %}
 <!-- Stats Cards -->
-<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+<div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
+    <div class="bg-white rounded p-4 border border-gray-200">
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-500">Total Advertisers</p>
@@ -19,7 +19,7 @@
         </div>
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+    <div class="bg-white rounded p-4 border border-gray-200">
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-500">High Fit</p>
@@ -31,7 +31,7 @@
         </div>
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+    <div class="bg-white rounded p-4 border border-gray-200">
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-500">Medium Fit</p>
@@ -43,7 +43,7 @@
         </div>
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+    <div class="bg-white rounded p-4 border border-gray-200">
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-500">Low Fit</p>
@@ -57,7 +57,7 @@
 </div>
 
 <!-- Last Scan Info -->
-<div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100 mb-8">
+<div class="bg-white rounded p-4 border border-gray-200 mb-4">
     <div class="flex items-center justify-between">
         <div>
             <h2 class="text-lg font-semibold text-gray-900">Scan Status</h2>
@@ -69,12 +69,12 @@
         </div>
         <div class="flex items-center space-x-3">
             <a href="/api/advertisers/export"
-               class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200">
+               class="bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium hover:bg-gray-200">
                 Export CSV
             </a>
             <div class="flex items-center space-x-2">
                 <label class="text-sm text-gray-600">Issues:</label>
-                <select id="scanLimit" class="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+                <select id="scanLimit" class="border border-gray-300 rounded px-2 py-1.5 text-sm bg-white">
                     <option value="5">5 (Quick Test)</option>
                     <option value="10">10</option>
                     <option value="25" selected>25</option>
@@ -85,7 +85,7 @@
             </div>
             <button onclick="startScan()"
                     id="scanButton"
-                    class="bg-primary text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+                    class="bg-primary text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
                     {% if scan_status.is_running %}disabled{% endif %}>
                 {% if scan_status.is_running %}
                 Scanning... {{ scan_status.progress }}%
@@ -96,14 +96,14 @@
         </div>
     </div>
     {% if scan_status.last_error %}
-    <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+    <div class="mt-3 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">
         Error: {{ scan_status.last_error }}
     </div>
     {% endif %}
 </div>
 
 <!-- Live Progress Panel (shown when scanning) -->
-<div id="progressPanel" class="bg-gray-900 rounded-xl shadow-lg border border-gray-700 mb-8 {% if not scan_status.is_running %}hidden{% endif %}">
+<div id="progressPanel" class="bg-gray-900 rounded border border-gray-700 mb-4 {% if not scan_status.is_running %}hidden{% endif %}">
     <!-- Header -->
     <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
         <div class="flex items-center space-x-3">
@@ -148,10 +148,10 @@
 </div>
 
 <!-- Two Column Layout -->
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
     <!-- Categories -->
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4">By Category</h2>
+    <div class="bg-white rounded p-4 border border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">By Category</h2>
         <div class="space-y-3">
             {% for cat, count in categories.items() %}
             <div class="flex items-center justify-between">
@@ -163,8 +163,8 @@
     </div>
 
     <!-- Sources -->
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4">By Source</h2>
+    <div class="bg-white rounded p-4 border border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">By Source</h2>
         <div class="space-y-3">
             {% for src, count in sources.items() %}
             <div class="flex items-center justify-between">
@@ -176,16 +176,16 @@
     </div>
 
     <!-- Quick Actions -->
-    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
-        <div class="space-y-3">
-            <a href="/advertisers?fit=high" class="block w-full text-left px-4 py-3 bg-green-50 text-green-700 rounded-lg hover:bg-green-100 transition">
+    <div class="bg-white rounded p-4 border border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Quick Actions</h2>
+        <div class="space-y-2">
+            <a href="/advertisers?fit=high" class="block w-full text-left px-3 py-2 bg-green-50 text-green-700 rounded hover:bg-green-100 transition text-sm">
                 View High-Fit Advertisers ({{ stats.high_fit }})
             </a>
-            <a href="/api/advertisers/export" class="block w-full text-left px-4 py-3 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 transition">
+            <a href="/api/advertisers/export" class="block w-full text-left px-3 py-2 bg-gray-50 text-gray-700 rounded hover:bg-gray-100 transition text-sm">
                 Download Full CSV
             </a>
-            <a href="/api/status" target="_blank" class="block w-full text-left px-4 py-3 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 transition">
+            <a href="/api/status" target="_blank" class="block w-full text-left px-3 py-2 bg-indigo-50 text-indigo-700 rounded hover:bg-indigo-100 transition text-sm">
                 View API Status (JSON)
             </a>
         </div>
@@ -193,8 +193,8 @@
 </div>
 
 <!-- Recent Advertisers Table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-    <div class="px-6 py-4 border-b border-gray-100">
+<div class="bg-white rounded border border-gray-200 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-200">
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-semibold text-gray-900">Recent Advertisers</h2>
             <a href="/advertisers" class="text-sm text-primary hover:underline">View all</a>
@@ -256,22 +256,22 @@
 </div>
 
 <!-- API Documentation -->
-<div class="mt-8 bg-white rounded-xl shadow-sm p-6 border border-gray-100">
-    <h2 class="text-lg font-semibold text-gray-900 mb-4">API Endpoints for n8n Integration</h2>
-    <div class="space-y-4 text-sm">
-        <div class="p-4 bg-gray-50 rounded-lg">
+<div class="mt-4 bg-white rounded p-4 border border-gray-200">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">API Endpoints for n8n Integration</h2>
+    <div class="space-y-2 text-sm">
+        <div class="p-3 bg-gray-50 rounded">
             <code class="text-indigo-600">POST /api/scan</code>
             <p class="text-gray-600 mt-1">Start a new scan. Body: {"newsletters": ["healthcare_brew"], "limit": 10}</p>
         </div>
-        <div class="p-4 bg-gray-50 rounded-lg">
+        <div class="p-3 bg-gray-50 rounded">
             <code class="text-indigo-600">GET /api/status</code>
             <p class="text-gray-600 mt-1">Get current scan status and progress</p>
         </div>
-        <div class="p-4 bg-gray-50 rounded-lg">
+        <div class="p-3 bg-gray-50 rounded">
             <code class="text-indigo-600">GET /api/advertisers?fit=high&limit=50</code>
             <p class="text-gray-600 mt-1">Get advertisers with optional filtering by fit, category, source</p>
         </div>
-        <div class="p-4 bg-gray-50 rounded-lg">
+        <div class="p-3 bg-gray-50 rounded">
             <code class="text-indigo-600">GET /api/advertisers/export</code>
             <p class="text-gray-600 mt-1">Download all advertisers as CSV</p>
         </div>
