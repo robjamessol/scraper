@@ -84,20 +84,23 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 10.0,
-        max_pages: int = 5,
+        timeout: float = 5.0,  # Reduced from 10s for faster failures
+        max_pages: int = 4,    # Reduced from 5 for efficiency
+        max_errors: int = 2,   # Stop early after repeated errors
         log_callback: callable = None,
     ):
         """
         Initialize the website scraper.
 
         Args:
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (default 5s for fast failures)
             max_pages: Maximum pages to scrape per domain
+            max_errors: Stop scraping after this many consecutive errors
             log_callback: Optional callback for live logging
         """
         self.timeout = timeout
         self.max_pages = max_pages
+        self.max_errors = max_errors
         self._log_callback = log_callback
 
         # Common headers to avoid being blocked
@@ -170,15 +173,24 @@ class WebsiteScraper:
         urls_to_visit = list(dict.fromkeys(urls_to_visit))
 
         pages_scraped = 0
+        consecutive_errors = 0
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
 
         with httpx.Client(
             timeout=self.timeout,
             headers=self.headers,
             follow_redirects=True,
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
         ) as client:
             for url in urls_to_visit:
+                # Stop conditions
                 if pages_scraped >= self.max_pages:
+                    break
+                if consecutive_errors >= self.max_errors:
+                    self._log(f"Stopping after {consecutive_errors} errors", "warning")
+                    break
+                # Early exit: if we have 3+ good contacts, stop
+                if len(all_emails) >= 3:
                     break
 
                 if url in visited_urls:
@@ -188,9 +200,22 @@ class WebsiteScraper:
 
                 try:
                     response = client.get(url)
-                    if response.status_code != 200:
+
+                    # Handle different status codes
+                    if response.status_code == 404:
+                        continue  # Page not found, try next
+                    elif response.status_code == 403:
+                        consecutive_errors += 1
+                        continue  # Forbidden, site may be blocking
+                    elif response.status_code >= 500:
+                        consecutive_errors += 1
+                        result.errors.append(f"Server error {response.status_code}: {url}")
+                        continue
+                    elif response.status_code != 200:
                         continue
 
+                    # Success - reset error counter
+                    consecutive_errors = 0
                     pages_scraped += 1
                     html = response.text
 
@@ -219,8 +244,13 @@ class WebsiteScraper:
                                 urls_to_visit.append(new_url)
 
                 except httpx.TimeoutException:
+                    consecutive_errors += 1
                     self._log(f"Timeout fetching {url}", "warning")
+                except httpx.ConnectError:
+                    consecutive_errors += 1
+                    self._log(f"Connection failed: {url}", "warning")
                 except Exception as e:
+                    consecutive_errors += 1
                     result.errors.append(f"Error fetching {url}: {str(e)}")
 
         result.pages_scraped = pages_scraped

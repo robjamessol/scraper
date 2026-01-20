@@ -2,11 +2,42 @@
 
 import re
 import logging
+import atexit
 from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Global HTTP client with connection pooling (reused across all calls)
+# This dramatically improves performance at scale (500+ items)
+_HTTP_CLIENT: httpx.Client | None = None
+
+
+def get_http_client() -> httpx.Client:
+    """Get or create the global HTTP client with connection pooling."""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        _HTTP_CLIENT = httpx.Client(
+            timeout=3.0,  # Fast default timeout
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+        )
+        # Register cleanup on exit
+        atexit.register(_cleanup_http_client)
+    return _HTTP_CLIENT
+
+
+def _cleanup_http_client():
+    """Clean up the global HTTP client."""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is not None:
+        _HTTP_CLIENT.close()
+        _HTTP_CLIENT = None
+
 
 # Known tracking/redirect domains that should be resolved
 TRACKING_DOMAINS = {
@@ -22,26 +53,52 @@ TRACKING_DOMAINS = {
     "tinyurl.com",
     "ow.ly",
     "buff.ly",
+    "goo.gl",
+    "is.gd",
+    "v.gd",
+    "rebrand.ly",
+    "short.io",
+    "cutt.ly",
     # Link/affiliate services (NOT the actual company)
     "go.linkby.com",
     "linkby.com",
     "linktr.ee",
+    "linktree.com",
+    "linkin.bio",
     "taplink.cc",
     "stan.store",
     "beacons.ai",
     "hoo.be",
     "snipfeed.co",
     "plink.com",
+    "about.me",
+    "carrd.co",
+    "bento.me",
+    "bio.link",
+    "lnk.bio",
     # Email tracking
     "mailtrack.io",
     "click.convertkit-mail.com",
     "click.convertkit-mail2.com",
     "mailchimp.com",
     "list-manage.com",
+    "hubspotlinks.com",
+    "track.customer.io",
+    "email.mg.substack.com",
+    # Affiliate/referral tracking
+    "shrsl.com",  # ShareASale
+    "jdoqocy.com",  # CJ Affiliate
+    "tkqlhce.com",  # CJ Affiliate
+    "anrdoezrs.com",  # CJ Affiliate
+    "pntrs.com",  # Impact
+    "pntra.com",  # Impact
+    "prf.hn",  # Impact
+    "sjv.io",  # Skimlinks
 }
 
 # Marketing/tracking subdomains to strip to get root company domain
 MARKETING_SUBDOMAINS = {
+    # Common marketing landing pages
     "get", "go", "info", "promo", "try", "start", "join", "buy", "shop",
     "links", "link", "click", "track", "t", "l", "r", "email", "mail",
     "news", "newsletter", "offers", "deals", "landing", "lp", "pages",
@@ -49,19 +106,28 @@ MARKETING_SUBDOMAINS = {
     "partners", "partner", "affiliate", "ref", "campaign", "ads", "ad",
     "learn", "discover", "explore", "hello", "hi", "meet", "connect",
     "invest", "demo", "trial", "free", "www2", "secure", "my", "account",
+    # Technical subdomains (not the main company site)
+    "api", "cdn", "static", "assets", "img", "images", "media",
+    "dev", "staging", "test", "sandbox", "beta", "preview",
+    "docs", "doc", "documentation", "help", "support", "faq",
+    "blog", "community", "forum", "status", "mail", "smtp",
+    # Regional/localized
+    "us", "uk", "eu", "au", "ca", "de", "fr", "es", "it", "jp",
 }
 
 
-def resolve_redirect_url(url: str, timeout: float = 5.0) -> str | None:
+def resolve_redirect_url(url: str, timeout: float = 2.5) -> str | None:
     """
     Follow redirects to get the final destination URL.
 
     This is critical for newsletter tracking links like:
     links.morningbrew.com/c/xxx → actual-advertiser.com
 
+    Uses a global connection pool for efficiency at scale.
+
     Args:
         url: URL that may redirect
-        timeout: Request timeout in seconds
+        timeout: Request timeout in seconds (default 2.5s for fast failures)
 
     Returns:
         Final destination URL, or original URL if no redirects
@@ -70,17 +136,17 @@ def resolve_redirect_url(url: str, timeout: float = 5.0) -> str | None:
         return None
 
     try:
+        client = get_http_client()
         # Use HEAD request to follow redirects without downloading content
-        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
-            response = client.head(url)
-            final_url = str(response.url)
+        response = client.head(url, timeout=timeout)
+        final_url = str(response.url)
 
-            # If we got redirected somewhere useful, return it
-            if final_url and final_url != url:
-                logger.debug(f"Resolved redirect: {url[:50]}... → {final_url[:50]}...")
-                return final_url
+        # If we got redirected somewhere useful, return it
+        if final_url and final_url != url:
+            logger.debug(f"Resolved redirect: {url[:50]}... → {final_url[:50]}...")
+            return final_url
 
-            return url
+        return url
 
     except httpx.TimeoutException:
         logger.debug(f"Timeout resolving redirect for {url[:50]}...")
@@ -106,15 +172,31 @@ def is_tracking_domain(url: str) -> bool:
     return domain.lower() in TRACKING_DOMAINS
 
 
+# Common multi-part TLDs that should be preserved
+MULTI_PART_TLDS = {
+    "co.uk", "com.au", "co.nz", "co.za", "com.br", "co.jp", "co.kr",
+    "com.mx", "co.in", "com.sg", "com.hk", "co.il", "com.ar", "com.tw",
+    "org.uk", "net.au", "gov.uk", "ac.uk", "edu.au",
+}
+
+
 def strip_marketing_subdomain(domain: str) -> str:
     """
     Strip common marketing/tracking subdomains to get the root company domain.
+
+    Handles:
+    - Simple subdomains: get.expertvoice.com → expertvoice.com
+    - Multiple subdomains: get.try.example.com → example.com
+    - Multi-part TLDs: get.example.co.uk → example.co.uk
+    - Preserves valid domains: healthedge.com → healthedge.com
 
     Examples:
         >>> strip_marketing_subdomain("get.expertvoice.com")
         'expertvoice.com'
         >>> strip_marketing_subdomain("invest.xtremeone.com")
         'xtremeone.com'
+        >>> strip_marketing_subdomain("get.example.co.uk")
+        'example.co.uk'
         >>> strip_marketing_subdomain("healthedge.com")
         'healthedge.com'
 
@@ -127,13 +209,70 @@ def strip_marketing_subdomain(domain: str) -> str:
     if not domain:
         return domain
 
+    domain = domain.lower().strip()
     parts = domain.split(".")
-    if len(parts) > 2:
-        # Check if first part is a marketing subdomain
-        if parts[0].lower() in MARKETING_SUBDOMAINS:
-            return ".".join(parts[1:])
 
-    return domain
+    if len(parts) <= 2:
+        return domain
+
+    # Check for multi-part TLD
+    potential_tld = ".".join(parts[-2:])
+    has_multi_part_tld = potential_tld in MULTI_PART_TLDS
+
+    # Calculate minimum parts needed for valid domain
+    # example.com = 2 parts, example.co.uk = 3 parts
+    min_parts = 3 if has_multi_part_tld else 2
+
+    # Strip marketing subdomains from the front
+    while len(parts) > min_parts:
+        if parts[0] in MARKETING_SUBDOMAINS:
+            parts = parts[1:]
+        else:
+            break
+
+    return ".".join(parts)
+
+
+def is_valid_domain(domain: str) -> bool:
+    """
+    Check if a domain appears to be valid.
+
+    Args:
+        domain: Domain to validate
+
+    Returns:
+        True if domain appears valid
+    """
+    if not domain:
+        return False
+
+    # Basic checks
+    if len(domain) < 4:  # Minimum: a.co
+        return False
+    if ".." in domain:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+
+    parts = domain.split(".")
+    if len(parts) < 2:
+        return False
+
+    # Check TLD is reasonable (2-10 chars)
+    tld = parts[-1]
+    if len(tld) < 2 or len(tld) > 10:
+        return False
+
+    # Check each part is alphanumeric with hyphens
+    for part in parts:
+        if not part:
+            return False
+        if not all(c.isalnum() or c == "-" for c in part):
+            return False
+        if part.startswith("-") or part.endswith("-"):
+            return False
+
+    return True
 
 
 def extract_domain(url: str, strip_marketing: bool = True) -> str | None:
