@@ -312,11 +312,13 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 try:
                     enriched_adv = apollo.enrich_advertiser(adv, max_contacts=3)
                     contacts_found = enriched_adv.get("contacts_found", 0)
+                    verified_count = enriched_adv.get("verified_emails", 0)
 
                     if contacts_found > 0:
                         primary = enriched_adv.get("primary_contact", "")
                         title = enriched_adv.get("primary_title", "")
-                        add_log(f"    ✅ Found {contacts_found} contact(s): {primary} ({title})")
+                        verified_badge = "✓" if enriched_adv.get("primary_email_verified") else ""
+                        add_log(f"    ✅ Found {contacts_found} contact(s), {verified_count} verified: {primary} ({title}) {verified_badge}")
                     else:
                         add_log(f"    ⚪ No contacts found")
 
@@ -326,7 +328,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                     enriched.append(adv)
 
             unique = enriched
-            add_log(f"📇 Enrichment complete. Used {apollo.get_credits_used()} API credits")
+            stats = apollo.get_stats()
+            add_log(f"📇 Enrichment complete. {stats['contacts_found']} contacts, {stats['emails_verified']} verified emails, {stats['total_credits_used']} credits used")
         else:
             add_log("ℹ️ Apollo.io not configured - skipping contact enrichment")
             add_log("   Set APOLLO_API_KEY in Railway to enable")
@@ -692,7 +695,8 @@ def run_enrichment_only(advertisers: list[dict]):
                 merged.append(adv)
 
         save_scan_data(merged)
-        add_log(f"🎉 Enrichment complete! Used {apollo.get_credits_used()} API credits")
+        stats = apollo.get_stats()
+        add_log(f"🎉 Enrichment complete! {stats['contacts_found']} contacts, {stats['emails_verified']} verified, {stats['total_credits_used']} credits")
 
         update_status(progress=100, total_advertisers=len(merged))
 

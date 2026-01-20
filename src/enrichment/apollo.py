@@ -2,19 +2,22 @@
 Apollo.io Contact Enrichment Module
 
 Finds marketing/advertising contacts at companies discovered from newsletter ads.
-Uses Apollo.io's People Search API to find decision makers.
+Uses Apollo.io's People Search API (free) to find prospects, then
+People Match API (credits) to get verified contact data.
 
 Free tier: 600 email credits/month
 Sign up at: https://www.apollo.io/
 """
 
 import os
+import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +30,20 @@ class Contact:
     title: str | None
     phone: str | None
     linkedin_url: str | None
+    email_status: str | None = None  # verified, guessed, etc.
     confidence: str = "high"
+    apollo_id: str | None = None
+
+    @property
+    def is_verified(self) -> bool:
+        """Check if email is verified."""
+        return self.email_status == "verified"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "email": self.email,
+            "email_verified": self.is_verified,
             "title": self.title,
             "phone": self.phone,
             "linkedin_url": self.linkedin_url,
@@ -62,22 +73,41 @@ class CompanyInfo:
         }
 
 
+@dataclass
+class ApolloStats:
+    """Track API usage statistics."""
+    search_calls: int = 0  # Free
+    enrich_calls: int = 0  # Uses credits
+    bulk_enrich_calls: int = 0
+    contacts_found: int = 0
+    emails_verified: int = 0
+    rate_limit_hits: int = 0
+
+
+class RateLimitError(Exception):
+    """Raised when Apollo rate limit is hit."""
+    pass
+
+
 class ApolloEnricher:
     """
     Contact enrichment using Apollo.io API.
+
+    Uses two-step workflow for credit efficiency:
+    1. People Search (FREE) - Find prospects with LinkedIn URLs
+    2. People Match (CREDITS) - Enrich with verified contact data
 
     Finds up to 3 contacts per company, prioritizing:
     1. Advertising/Media roles (ad buyers, media planners)
     2. Partnership/BD roles
     3. Marketing leadership (VP, Director, CMO)
-    4. Any marketing role (fallback)
     """
 
-    BASE_URL = "https://api.apollo.io/v1"
+    BASE_URL = "https://api.apollo.io/api/v1"
 
     # Title search priorities (most likely to buy newsletter ads)
     TITLE_PRIORITIES = [
-        # Tier 1 - Ad buyers (most likely to have budget for newsletter ads)
+        # Tier 1 - Ad buyers (most likely to have budget)
         ["advertising", "media buyer", "media planner", "ad ops", "paid media",
          "performance marketing", "growth marketing", "demand gen"],
         # Tier 2 - Partnerships (often handle newsletter deals)
@@ -85,11 +115,13 @@ class ApolloEnricher:
          "alliances", "affiliate"],
         # Tier 3 - Marketing leadership (decision makers)
         ["vp marketing", "vice president marketing", "director marketing",
-         "head of marketing", "cmo", "chief marketing officer", "marketing director"],
+         "head of marketing", "cmo", "chief marketing officer"],
         # Tier 4 - General marketing (fallback)
-        ["marketing manager", "brand marketing", "content marketing",
-         "digital marketing", "marketing lead"],
+        ["marketing manager", "brand marketing", "digital marketing"],
     ]
+
+    # Seniority levels to prioritize
+    SENIORITIES = ["director", "vp", "c_suite", "founder", "manager"]
 
     def __init__(self, api_key: str | None = None):
         """
@@ -104,25 +136,71 @@ class ApolloEnricher:
             logger.warning("Apollo API key not configured. Contact enrichment disabled.")
 
         self.client = httpx.Client(timeout=30.0)
-        self._credits_used = 0
+        self.stats = ApolloStats()
+        self._last_request_time = 0
+        self._min_request_interval = 0.5  # 500ms between requests for rate limiting
 
     @property
     def is_configured(self) -> bool:
         """Check if Apollo API is configured."""
         return self.api_key is not None
 
-    def get_credits_used(self) -> int:
-        """Get number of API credits used this session."""
-        return self._credits_used
+    def get_stats(self) -> dict:
+        """Get API usage statistics."""
+        return {
+            "search_calls_free": self.stats.search_calls,
+            "enrich_calls_paid": self.stats.enrich_calls,
+            "bulk_enrich_calls": self.stats.bulk_enrich_calls,
+            "total_credits_used": self.stats.enrich_calls + self.stats.bulk_enrich_calls,
+            "contacts_found": self.stats.contacts_found,
+            "emails_verified": self.stats.emails_verified,
+            "rate_limit_hits": self.stats.rate_limit_hits,
+        }
+
+    @staticmethod
+    def clean_domain(domain: str | None) -> str | None:
+        """
+        Clean domain to just the domain name (no protocol, path, etc.)
+
+        IMPORTANT: Apollo expects domain only, not full URL.
+        """
+        if not domain:
+            return None
+
+        # Remove protocol if present
+        if "://" in domain:
+            domain = urlparse(domain).netloc or domain
+
+        # Remove www. prefix
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        # Remove any path
+        domain = domain.split("/")[0]
+
+        # Remove port if present
+        domain = domain.split(":")[0]
+
+        return domain.lower().strip() if domain else None
+
+    def _rate_limit_wait(self):
+        """Ensure minimum time between requests."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            time.sleep(self._min_request_interval - elapsed)
+        self._last_request_time = time.time()
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=2, min=2, max=16),
+        retry=retry_if_exception_type(RateLimitError),
     )
     def _api_request(self, endpoint: str, data: dict) -> dict | None:
-        """Make an API request to Apollo."""
+        """Make an API request to Apollo with rate limit handling."""
         if not self.is_configured:
             return None
+
+        self._rate_limit_wait()
 
         url = f"{self.BASE_URL}/{endpoint}"
         headers = {
@@ -133,107 +211,355 @@ class ApolloEnricher:
 
         try:
             response = self.client.post(url, json=data, headers=headers)
+
+            if response.status_code == 429:
+                self.stats.rate_limit_hits += 1
+                logger.warning("Apollo rate limit hit, backing off...")
+                raise RateLimitError("Rate limit exceeded")
+
             response.raise_for_status()
             return response.json()
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 logger.error("Apollo API key invalid or expired")
-            elif e.response.status_code == 429:
-                logger.warning("Apollo rate limit hit, backing off...")
-                raise  # Let tenacity retry
+            elif e.response.status_code == 422:
+                logger.warning(f"Apollo validation error: {e.response.text}")
             else:
                 logger.error(f"Apollo API error: {e.response.status_code} - {e.response.text}")
             return None
+
+        except RateLimitError:
+            raise  # Let tenacity handle retry
 
         except Exception as e:
             logger.error(f"Apollo API request failed: {e}")
             return None
 
-    def search_contacts(
+    def search_prospects(
+        self,
+        domain: str,
+        titles: list[str] | None = None,
+        max_results: int = 10,
+    ) -> list[dict]:
+        """
+        Search for prospects at a company (FREE - no credits used).
+
+        Returns basic info including LinkedIn URLs and Apollo IDs,
+        but NO emails or phone numbers.
+
+        Args:
+            domain: Company domain (e.g., "healthedge.com")
+            titles: Optional list of job titles to filter by
+            max_results: Max results to return
+
+        Returns:
+            List of prospect dicts with name, title, linkedin_url, apollo_id
+        """
+        if not self.is_configured:
+            return []
+
+        domain = self.clean_domain(domain)
+        if not domain:
+            return []
+
+        search_data = {
+            "q_organization_domains_list": [domain],
+            "page": 1,
+            "per_page": min(max_results, 100),
+        }
+
+        if titles:
+            search_data["person_titles"] = titles
+
+        # Add seniority filter for better results
+        search_data["person_seniorities"] = self.SENIORITIES
+
+        result = self._api_request("mixed_people/search", search_data)
+
+        if not result:
+            return []
+
+        self.stats.search_calls += 1
+
+        prospects = []
+        for person in result.get("people", []):
+            prospect = {
+                "apollo_id": person.get("id"),
+                "name": person.get("name", "Unknown"),
+                "first_name": person.get("first_name"),
+                "last_name": person.get("last_name"),
+                "title": person.get("title"),
+                "linkedin_url": person.get("linkedin_url"),
+                # Note: Search does NOT return email/phone - need to enrich
+            }
+            prospects.append(prospect)
+
+        logger.debug(f"Found {len(prospects)} prospects at {domain} (free search)")
+        return prospects
+
+    def enrich_person(
+        self,
+        domain: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        email: str | None = None,
+        linkedin_url: str | None = None,
+        apollo_id: str | None = None,
+    ) -> Contact | None:
+        """
+        Enrich a single person with contact data (USES CREDITS).
+
+        IMPORTANT: Must provide sufficient identifying data for a match.
+        Priority order for best match rates:
+        1. email (best)
+        2. linkedin_url (~60% match rate)
+        3. apollo_id (exact match)
+        4. first_name + last_name + domain (good match rate)
+        5. name only = WILL FAIL
+
+        Args:
+            domain: Company domain
+            first_name: Person's first name
+            last_name: Person's last name
+            email: Known email address (best for matching)
+            linkedin_url: LinkedIn profile URL
+            apollo_id: Apollo ID from previous search
+
+        Returns:
+            Contact object with email/phone or None
+        """
+        if not self.is_configured:
+            return None
+
+        domain = self.clean_domain(domain)
+
+        # Validate we have enough data to match
+        has_email = bool(email)
+        has_linkedin = bool(linkedin_url)
+        has_apollo_id = bool(apollo_id)
+        has_name_and_domain = bool(first_name and last_name and domain)
+
+        if not (has_email or has_linkedin or has_apollo_id or has_name_and_domain):
+            logger.warning("Insufficient data for Apollo enrichment - need email, linkedin, apollo_id, or name+domain")
+            return None
+
+        # Build payload with all available identifiers
+        payload = {
+            "reveal_personal_emails": True,
+            "reveal_phone_number": True,
+        }
+
+        if email:
+            payload["email"] = email
+        if linkedin_url:
+            payload["linkedin_url"] = linkedin_url
+        if apollo_id:
+            payload["id"] = apollo_id
+        if first_name:
+            payload["first_name"] = first_name
+        if last_name:
+            payload["last_name"] = last_name
+        if domain:
+            payload["domain"] = domain
+
+        result = self._api_request("people/match", payload)
+
+        if not result or not result.get("person"):
+            return None
+
+        self.stats.enrich_calls += 1
+        person = result["person"]
+
+        contact = self._parse_contact(person)
+        if contact:
+            self.stats.contacts_found += 1
+            if contact.is_verified:
+                self.stats.emails_verified += 1
+
+        return contact
+
+    def bulk_enrich_people(
+        self,
+        prospects: list[dict],
+    ) -> list[Contact]:
+        """
+        Bulk enrich multiple prospects (more efficient than single calls).
+
+        Uses bulk_match endpoint - up to 10 people per call.
+
+        Args:
+            prospects: List of prospect dicts with identifying data
+
+        Returns:
+            List of Contact objects
+        """
+        if not self.is_configured or not prospects:
+            return []
+
+        contacts = []
+
+        # Process in batches of 10
+        for i in range(0, len(prospects), 10):
+            batch = prospects[i:i+10]
+
+            details = []
+            for p in batch:
+                detail = {}
+
+                # Add all available identifiers
+                if p.get("email"):
+                    detail["email"] = p["email"]
+                if p.get("linkedin_url"):
+                    detail["linkedin_url"] = p["linkedin_url"]
+                if p.get("apollo_id"):
+                    detail["id"] = p["apollo_id"]
+                if p.get("first_name"):
+                    detail["first_name"] = p["first_name"]
+                if p.get("last_name"):
+                    detail["last_name"] = p["last_name"]
+                if p.get("domain"):
+                    detail["domain"] = self.clean_domain(p["domain"])
+
+                # Skip if no useful identifiers
+                if not detail:
+                    continue
+
+                details.append(detail)
+
+            if not details:
+                continue
+
+            result = self._api_request("people/bulk_match", {
+                "reveal_personal_emails": True,
+                "reveal_phone_number": True,
+                "details": details,
+            })
+
+            if not result:
+                continue
+
+            self.stats.bulk_enrich_calls += 1
+
+            # Check for missing records
+            missing = result.get("missing_records", 0)
+            if missing > 0:
+                logger.debug(f"Bulk enrich: {missing} records not found")
+
+            for match in result.get("matches", []):
+                person = match.get("person")
+                if person:
+                    contact = self._parse_contact(person)
+                    if contact:
+                        contacts.append(contact)
+                        self.stats.contacts_found += 1
+                        if contact.is_verified:
+                            self.stats.emails_verified += 1
+
+        return contacts
+
+    def _parse_contact(self, person: dict) -> Contact | None:
+        """Parse Apollo person data into Contact object."""
+        if not person:
+            return None
+
+        email = person.get("email")
+        email_status = person.get("email_status")
+
+        # Extract phone - prefer direct dial
+        phone = None
+        phone_numbers = person.get("phone_numbers", [])
+        for pn in phone_numbers:
+            if pn.get("status") == "valid_number":
+                if pn.get("type") == "direct":
+                    phone = pn.get("sanitized_number") or pn.get("number")
+                    break
+                elif not phone:
+                    phone = pn.get("sanitized_number") or pn.get("number")
+
+        return Contact(
+            name=person.get("name", "Unknown"),
+            email=email,
+            email_status=email_status,
+            title=person.get("title"),
+            phone=phone,
+            linkedin_url=person.get("linkedin_url"),
+            apollo_id=person.get("id"),
+            confidence="high" if email_status == "verified" else "medium",
+        )
+
+    def search_and_enrich(
         self,
         domain: str,
         max_contacts: int = 3,
     ) -> list[Contact]:
         """
-        Find contacts at a company by domain.
+        Two-step workflow: Search (free) → Enrich (paid).
+
+        This is the recommended approach for credit efficiency.
 
         Args:
-            domain: Company domain (e.g., "healthedge.com")
-            max_contacts: Maximum contacts to return (default 3)
+            domain: Company domain
+            max_contacts: Maximum contacts to return
 
         Returns:
-            List of Contact objects, prioritized by title relevance
+            List of enriched Contact objects
         """
         if not self.is_configured:
-            logger.debug("Apollo not configured, skipping contact search")
             return []
 
+        domain = self.clean_domain(domain)
         if not domain:
             return []
 
         contacts = []
         seen_emails = set()
 
-        # Search each title tier until we have enough contacts
+        # Search each title tier until we have enough
         for tier_idx, titles in enumerate(self.TITLE_PRIORITIES):
             if len(contacts) >= max_contacts:
                 break
 
-            result = self._api_request("mixed_people/search", {
-                "q_organization_domains": domain,
-                "person_titles": titles,
-                "page": 1,
-                "per_page": 5,
-            })
+            # Step 1: Free search to get prospects with LinkedIn URLs
+            prospects = self.search_prospects(domain, titles, max_results=5)
 
-            if not result or "people" not in result:
+            if not prospects:
                 continue
 
-            self._credits_used += 1
+            # Prepare prospects for bulk enrichment
+            to_enrich = []
+            for p in prospects:
+                if len(contacts) + len(to_enrich) >= max_contacts:
+                    break
 
-            for person in result.get("people", []):
+                # Add domain to each prospect for better matching
+                p["domain"] = domain
+                to_enrich.append(p)
+
+            if not to_enrich:
+                continue
+
+            # Step 2: Bulk enrich to get actual contact data
+            enriched = self.bulk_enrich_people(to_enrich)
+
+            for contact in enriched:
                 if len(contacts) >= max_contacts:
                     break
 
-                email = person.get("email")
-                if email and email in seen_emails:
+                # Skip duplicates
+                if contact.email and contact.email in seen_emails:
                     continue
 
-                if email:
-                    seen_emails.add(email)
+                if contact.email:
+                    seen_emails.add(contact.email)
 
-                contact = Contact(
-                    name=person.get("name", "Unknown"),
-                    email=email,
-                    title=person.get("title"),
-                    phone=self._extract_phone(person),
-                    linkedin_url=person.get("linkedin_url"),
-                    confidence="high" if tier_idx < 2 else "medium",
-                )
+                # Update confidence based on tier
+                contact.confidence = "high" if tier_idx < 2 else "medium"
                 contacts.append(contact)
 
-                logger.debug(f"Found contact: {contact.name} ({contact.title}) at {domain}")
+                logger.debug(f"Found contact: {contact.name} ({contact.title}) - verified: {contact.is_verified}")
 
         return contacts
-
-    def _extract_phone(self, person: dict) -> str | None:
-        """Extract phone number from Apollo person data."""
-        # Try direct phone
-        if person.get("phone_number"):
-            return person["phone_number"]
-
-        # Try phone numbers array
-        phones = person.get("phone_numbers", [])
-        if phones:
-            # Prefer direct dial
-            for phone in phones:
-                if phone.get("type") == "direct":
-                    return phone.get("number")
-            # Fall back to any phone
-            return phones[0].get("number")
-
-        return None
 
     def enrich_company(self, domain: str) -> CompanyInfo | None:
         """
@@ -245,7 +571,11 @@ class ApolloEnricher:
         Returns:
             CompanyInfo object or None
         """
-        if not self.is_configured or not domain:
+        if not self.is_configured:
+            return None
+
+        domain = self.clean_domain(domain)
+        if not domain:
             return None
 
         result = self._api_request("organizations/enrich", {
@@ -255,7 +585,6 @@ class ApolloEnricher:
         if not result or "organization" not in result:
             return None
 
-        self._credits_used += 1
         org = result["organization"]
 
         return CompanyInfo(
@@ -283,14 +612,13 @@ class ApolloEnricher:
         Returns:
             Enriched advertiser dict with contact fields added
         """
-        domain = advertiser.get("advertiser_domain")
+        domain = self.clean_domain(advertiser.get("advertiser_domain"))
 
         if not domain:
-            # Add empty contact fields
             return self._add_empty_contact_fields(advertiser, max_contacts)
 
-        # Get contacts
-        contacts = self.search_contacts(domain, max_contacts)
+        # Use two-step workflow for efficiency
+        contacts = self.search_and_enrich(domain, max_contacts)
 
         # Add contacts to advertiser
         enriched = advertiser.copy()
@@ -302,12 +630,14 @@ class ApolloEnricher:
                 contact = contacts[i]
                 enriched[f"{prefix}_contact"] = contact.name
                 enriched[f"{prefix}_email"] = contact.email
+                enriched[f"{prefix}_email_verified"] = contact.is_verified
                 enriched[f"{prefix}_title"] = contact.title
                 enriched[f"{prefix}_phone"] = contact.phone
                 enriched[f"{prefix}_linkedin"] = contact.linkedin_url
             else:
                 enriched[f"{prefix}_contact"] = None
                 enriched[f"{prefix}_email"] = None
+                enriched[f"{prefix}_email_verified"] = False
                 enriched[f"{prefix}_title"] = None
                 enriched[f"{prefix}_phone"] = None
                 enriched[f"{prefix}_linkedin"] = None
@@ -323,6 +653,7 @@ class ApolloEnricher:
 
         enriched["enriched"] = True
         enriched["contacts_found"] = len(contacts)
+        enriched["verified_emails"] = sum(1 for c in contacts if c.is_verified)
 
         return enriched
 
@@ -334,21 +665,24 @@ class ApolloEnricher:
             prefix = "primary" if i == 0 else f"backup_{i}"
             enriched[f"{prefix}_contact"] = None
             enriched[f"{prefix}_email"] = None
+            enriched[f"{prefix}_email_verified"] = False
             enriched[f"{prefix}_title"] = None
             enriched[f"{prefix}_phone"] = None
             enriched[f"{prefix}_linkedin"] = None
 
-        enriched["company_website"] = f"https://{advertiser.get('advertiser_domain', '')}" if advertiser.get('advertiser_domain') else None
+        domain = self.clean_domain(advertiser.get("advertiser_domain"))
+        enriched["company_website"] = f"https://{domain}" if domain else None
         enriched["company_linkedin"] = None
         enriched["company_industry"] = None
         enriched["company_size"] = None
         enriched["company_description"] = None
         enriched["enriched"] = False
         enriched["contacts_found"] = 0
+        enriched["verified_emails"] = 0
 
         return enriched
 
-    def bulk_enrich(
+    def bulk_enrich_advertisers(
         self,
         advertisers: list[dict],
         max_contacts: int = 3,
@@ -375,7 +709,13 @@ class ApolloEnricher:
             enriched_adv = self.enrich_advertiser(advertiser, max_contacts)
             enriched.append(enriched_adv)
 
-        logger.info(f"Enriched {total} advertisers, used {self._credits_used} API credits")
+        stats = self.get_stats()
+        logger.info(
+            f"Enriched {total} advertisers: "
+            f"{stats['contacts_found']} contacts found, "
+            f"{stats['emails_verified']} verified emails, "
+            f"{stats['total_credits_used']} credits used"
+        )
         return enriched
 
     def close(self):
@@ -409,11 +749,12 @@ def get_apollo_signup_instructions() -> str:
 
 4. **Usage**:
    - Free tier: 600 email credits/month
-   - Each contact lookup uses ~1 credit
-   - Enough for ~200 companies with 3 contacts each
+   - Search calls are FREE (finding prospects)
+   - Enrichment uses credits (getting emails/phones)
+   - The two-step workflow maximizes your credits
 
 The enrichment will automatically find:
-- Primary contact (marketing/ad buyer)
+- Primary contact (marketing/ad buyer) with verified email
 - 2 backup contacts
 - Company info (size, industry, LinkedIn)
 """
