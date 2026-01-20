@@ -281,11 +281,22 @@ class HealthcareBrewScraper(BaseScraper):
         # Extract ad copy - look for the sponsored content section
         ad_copy = self._extract_sponsor_content(html, soup, match.start(), sponsor_name)
 
+        # Extract product/service info from ad copy
+        product_info = self.extract_product_service(ad_copy, sponsor_name)
+
+        # Find landing page URL (the main CTA link)
+        landing_page = self._find_landing_page(html, soup, sponsor_name, match.start())
+
         return SponsorInfo(
             advertiser_name=sponsor_name,
             advertiser_domain=sponsor_domain,
             placement_type=placement_type,
             ad_copy_snippet=truncate_text(ad_copy, 150),
+            full_ad_copy=ad_copy,
+            ad_headline=product_info.get("headline"),
+            product_service=product_info.get("product_service"),
+            call_to_action=product_info.get("call_to_action"),
+            landing_page_url=landing_page,
             issue_url=issue_url,
             issue_date=issue_date,
             source_newsletter="healthcare_brew",
@@ -365,6 +376,62 @@ class HealthcareBrewScraper(BaseScraper):
                 return href, domain
 
         return None, None
+
+    def _find_landing_page(
+        self,
+        html: str,
+        soup: BeautifulSoup,
+        sponsor_name: str,
+        match_position: int,
+    ) -> str | None:
+        """
+        Find the main landing page URL (CTA link) for the sponsor.
+
+        Args:
+            html: HTML content
+            soup: Parsed soup
+            sponsor_name: Sponsor name
+            match_position: Position where sponsor was found
+
+        Returns:
+            Landing page URL or None
+        """
+        skip_domains = {
+            "healthcare-brew.com", "morningbrew.com", "twitter.com",
+            "x.com", "facebook.com", "linkedin.com", "instagram.com",
+        }
+
+        # Get section around the match
+        window_start = max(0, match_position - 200)
+        window_end = min(len(html), match_position + 3000)
+        section = html[window_start:window_end]
+
+        section_soup = BeautifulSoup(section, "lxml")
+
+        # Look for CTA-style links (buttons, "Learn More", etc.)
+        cta_keywords = [
+            "learn more", "get started", "sign up", "download", "try",
+            "read more", "discover", "explore", "register", "join",
+            "book", "schedule", "claim", "start", "see how", "find out",
+        ]
+
+        for link in section_soup.find_all("a", href=True):
+            href = link.get("href", "")
+            text = clean_text(link.get_text()).lower()
+            domain = extract_domain(href)
+
+            if not domain or domain in skip_domains:
+                continue
+
+            # Check if link text matches CTA patterns
+            if any(cta in text for cta in cta_keywords):
+                return href
+
+            # Check for tracking parameters (indicates ad link)
+            if "utm_" in href.lower() or "?ref=" in href.lower():
+                return href
+
+        return None
 
     def _extract_sponsor_content(
         self,

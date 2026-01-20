@@ -27,7 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pandas as pd
 
 from ..scrapers import HealthcareBrewScraper, MorningBrewScraper, SponsorInfo
-from ..enrichment import AdvertiserCategorizer
+from ..enrichment import AdvertiserCategorizer, ApolloEnricher, get_apollo_signup_instructions
 
 
 logger = logging.getLogger(__name__)
@@ -296,6 +296,41 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 seen.add(key)
                 unique.append(s)
 
+        # Contact enrichment with Apollo.io (if configured)
+        apollo = ApolloEnricher()
+        if apollo.is_configured:
+            add_log("📇 Enriching contacts via Apollo.io...")
+            update_status(current_action="Finding contacts")
+
+            enriched = []
+            for idx, adv in enumerate(unique):
+                name = adv.get("advertiser_name", "Unknown")
+                domain = adv.get("advertiser_domain", "")
+
+                add_log(f"  👤 [{idx+1}/{len(unique)}] Finding contacts for {name}...")
+
+                try:
+                    enriched_adv = apollo.enrich_advertiser(adv, max_contacts=3)
+                    contacts_found = enriched_adv.get("contacts_found", 0)
+
+                    if contacts_found > 0:
+                        primary = enriched_adv.get("primary_contact", "")
+                        title = enriched_adv.get("primary_title", "")
+                        add_log(f"    ✅ Found {contacts_found} contact(s): {primary} ({title})")
+                    else:
+                        add_log(f"    ⚪ No contacts found")
+
+                    enriched.append(enriched_adv)
+                except Exception as e:
+                    add_log(f"    ❌ Error: {str(e)[:40]}", level="error")
+                    enriched.append(adv)
+
+            unique = enriched
+            add_log(f"📇 Enrichment complete. Used {apollo.get_credits_used()} API credits")
+        else:
+            add_log("ℹ️ Apollo.io not configured - skipping contact enrichment")
+            add_log("   Set APOLLO_API_KEY in Railway to enable")
+
         # Save results
         add_log("💾 Saving results...")
         update_status(current_action="Saving results")
@@ -555,6 +590,118 @@ async def api_run_scheduled_now(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run_scheduled_scan)
     return {"message": "Scheduled scan triggered"}
+
+
+# ============== Apollo Enrichment ==============
+
+@app.get("/api/apollo/status")
+async def api_apollo_status():
+    """Check if Apollo.io is configured."""
+    apollo = ApolloEnricher()
+    return {
+        "configured": apollo.is_configured,
+        "message": "Apollo.io is configured and ready" if apollo.is_configured
+                   else "Apollo.io API key not set. Add APOLLO_API_KEY to environment variables.",
+    }
+
+
+@app.get("/api/apollo/setup")
+async def api_apollo_setup():
+    """Get Apollo.io setup instructions."""
+    return {
+        "instructions": get_apollo_signup_instructions(),
+    }
+
+
+@app.post("/api/enrich")
+async def api_enrich_contacts(background_tasks: BackgroundTasks):
+    """
+    Enrich existing advertisers with contact information.
+    Runs Apollo.io enrichment on advertisers that haven't been enriched yet.
+    """
+    apollo = ApolloEnricher()
+    if not apollo.is_configured:
+        raise HTTPException(400, detail="Apollo.io not configured. Set APOLLO_API_KEY environment variable.")
+
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="A scan is already in progress")
+
+    # Get existing advertisers
+    advertisers = get_advertisers()
+    unenriched = [a for a in advertisers if not a.get("enriched")]
+
+    if not unenriched:
+        return {"message": "All advertisers already enriched", "count": 0}
+
+    background_tasks.add_task(run_enrichment_only, unenriched)
+
+    return {
+        "message": f"Starting enrichment for {len(unenriched)} advertisers",
+        "count": len(unenriched),
+    }
+
+
+def run_enrichment_only(advertisers: list[dict]):
+    """Run contact enrichment only (no scraping)."""
+    with status_lock:
+        scan_status["logs"] = []
+        scan_status["is_running"] = True
+        scan_status["current_action"] = "Enriching contacts"
+        scan_status["progress"] = 0
+
+    add_log(f"📇 Starting contact enrichment for {len(advertisers)} advertisers...")
+
+    try:
+        apollo = ApolloEnricher()
+        enriched = []
+        all_advertisers = get_advertisers()
+
+        for idx, adv in enumerate(advertisers):
+            name = adv.get("advertiser_name", "Unknown")
+            update_status(
+                current_action=f"Enriching {idx+1}/{len(advertisers)}",
+                progress=int((idx / len(advertisers)) * 100),
+            )
+
+            add_log(f"  👤 [{idx+1}/{len(advertisers)}] {name}...")
+
+            try:
+                enriched_adv = apollo.enrich_advertiser(adv, max_contacts=3)
+                contacts = enriched_adv.get("contacts_found", 0)
+                if contacts > 0:
+                    add_log(f"    ✅ Found {contacts} contact(s)")
+                else:
+                    add_log(f"    ⚪ No contacts found")
+                enriched.append(enriched_adv)
+            except Exception as e:
+                add_log(f"    ❌ Error: {str(e)[:40]}", level="error")
+                enriched.append(adv)
+
+        # Merge enriched data back with all advertisers
+        enriched_domains = {a.get("advertiser_domain") for a in enriched if a.get("advertiser_domain")}
+        merged = []
+        for adv in all_advertisers:
+            domain = adv.get("advertiser_domain")
+            if domain in enriched_domains:
+                # Find the enriched version
+                for e in enriched:
+                    if e.get("advertiser_domain") == domain:
+                        merged.append(e)
+                        break
+            else:
+                merged.append(adv)
+
+        save_scan_data(merged)
+        add_log(f"🎉 Enrichment complete! Used {apollo.get_credits_used()} API credits")
+
+        update_status(progress=100, total_advertisers=len(merged))
+
+    except Exception as e:
+        add_log(f"❌ Enrichment failed: {e}", level="error")
+        update_status(last_error=str(e))
+
+    finally:
+        update_status(is_running=False, current_action=None)
 
 
 # ============== Health Check ==============

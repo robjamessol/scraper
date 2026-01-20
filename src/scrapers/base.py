@@ -41,7 +41,11 @@ class SponsorInfo:
     niche_fit: str = "Medium"
     confidence: str = "medium"
     sponsor_url: str | None = None
-    raw_html: str = ""
+    landing_page_url: str | None = None  # The actual ad landing page
+    product_service: str | None = None   # What they're selling
+    ad_headline: str | None = None       # The main headline
+    call_to_action: str | None = None    # CTA text (e.g., "Learn More", "Get Started")
+    full_ad_copy: str = ""               # Complete ad text
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for DataFrame/CSV export."""
@@ -50,13 +54,18 @@ class SponsorInfo:
             "advertiser_domain": self.advertiser_domain,
             "placement_type": self.placement_type,
             "ad_copy_snippet": self.ad_copy_snippet,
+            "full_ad_copy": self.full_ad_copy,
+            "ad_headline": self.ad_headline,
+            "product_service": self.product_service,
+            "call_to_action": self.call_to_action,
+            "landing_page_url": self.landing_page_url,
+            "sponsor_url": self.sponsor_url,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
             "source_newsletter": self.source_newsletter,
             "category": self.category,
             "niche_fit": self.niche_fit,
             "confidence": self.confidence,
-            "sponsor_url": self.sponsor_url,
         }
 
 
@@ -396,6 +405,93 @@ class BaseScraper(ABC):
         text = clean_text(text)
 
         return text
+
+    def extract_product_service(self, ad_copy: str, company_name: str) -> dict[str, str | None]:
+        """
+        Extract product/service information from ad copy.
+
+        Args:
+            ad_copy: The full ad copy text
+            company_name: Company name (to filter out)
+
+        Returns:
+            Dict with 'product_service', 'headline', 'call_to_action'
+        """
+        result = {
+            "product_service": None,
+            "headline": None,
+            "call_to_action": None,
+        }
+
+        if not ad_copy:
+            return result
+
+        # Clean up the ad copy
+        text = clean_text(ad_copy)
+        lines = [l.strip() for l in text.split('.') if l.strip()]
+
+        # Extract headline (usually first substantive line)
+        for line in lines[:3]:
+            # Skip if it's just the company name or "Presented By" header
+            if len(line) > 10 and company_name.lower() not in line.lower()[:20]:
+                if not line.lower().startswith(('presented', 'together', 'sponsored')):
+                    result["headline"] = truncate_text(line, 100)
+                    break
+
+        # Extract CTA (call to action) - look for common patterns
+        cta_patterns = [
+            r'(Learn [Mm]ore)',
+            r'(Get [Ss]tarted)',
+            r'(Sign [Uu]p)',
+            r'(Download)',
+            r'(Try [Ii]t [Ff]ree)',
+            r'(Start [Yy]our)',
+            r'(Read [Mm]ore)',
+            r'(Discover)',
+            r'(Explore)',
+            r'(Join)',
+            r'(Register)',
+            r'(Book [Aa]|Schedule)',
+            r'(Get [Yy]our)',
+            r'(Claim [Yy]our)',
+            r'(See [Hh]ow)',
+            r'(Find [Oo]ut)',
+        ]
+
+        for pattern in cta_patterns:
+            match = re.search(pattern, text)
+            if match:
+                result["call_to_action"] = match.group(1)
+                break
+
+        # Extract product/service - look for what they're offering
+        product_patterns = [
+            # Software/Platform
+            r'(?:our|the|new)\s+([\w\s]+(?:platform|software|tool|app|solution|system))',
+            # Service
+            r'(?:our|the|new)\s+([\w\s]+(?:service|services|program|plan))',
+            # Product categories
+            r'(?:our|the|new)\s+([\w\s]+(?:supplement|device|test|kit|treatment))',
+            # Generic "offering"
+            r'(?:introducing|announcing|meet)\s+([\w\s]+)',
+            # White paper / resource
+            r'(?:free|new)\s+([\w\s]*(?:guide|report|white\s*paper|ebook|webinar))',
+        ]
+
+        for pattern in product_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                product = clean_text(match.group(1))
+                if len(product) > 5 and len(product) < 100:
+                    result["product_service"] = product
+                    break
+
+        # If no specific product found, try to summarize what they're offering
+        if not result["product_service"] and result["headline"]:
+            # Use the headline as a fallback description
+            result["product_service"] = result["headline"]
+
+        return result
 
     def auto_detect_sponsors(self, html: str, issue_url: str) -> list[SponsorInfo]:
         """
