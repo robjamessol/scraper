@@ -743,7 +743,7 @@ class ApolloEnricher:
         if len(contacts) < max_contacts:
             self._log(f"Step 2: Finding emails via pattern generation for {domain}...")
             email_finder = EmailFinder(
-                verify_smtp=True,
+                verify_smtp=False,  # Disabled for speed - SMTP verification is slow
                 log_callback=self._log_callback,
             )
             found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2)
@@ -845,8 +845,13 @@ class ApolloEnricher:
     def _scrape_website_contacts(self, domain: str) -> list[WebsiteContact]:
         """Scrape a company website for contact information."""
         try:
-            # Allow more pages to find contact info (6 pages, 6s timeout each)
-            scraper = WebsiteScraper(timeout=6.0, max_pages=6, log_callback=self._log_callback)
+            # Fast scraping - disable Playwright for speed (adds 10-20s per domain)
+            scraper = WebsiteScraper(
+                timeout=5.0,
+                max_pages=4,  # Reduced for speed
+                use_browser=False,  # Playwright is slow, disable for speed
+                log_callback=self._log_callback,
+            )
             result = scraper.scrape_domain(domain)
             return result.contacts
         except Exception as e:
