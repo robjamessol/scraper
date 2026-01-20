@@ -293,9 +293,8 @@ class ApolloEnricher:
 
         if titles:
             search_data["person_titles"] = titles
-
-        # Add seniority filter for better results
-        search_data["person_seniorities"] = self.SENIORITIES
+            # Add seniority filter only when filtering by titles
+            search_data["person_seniorities"] = self.SENIORITIES
 
         self._log(f"Searching Apollo for {domain}...")
 
@@ -558,49 +557,66 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Search each title tier until we have enough
-        for tier_idx, titles in enumerate(self.TITLE_PRIORITIES):
-            if len(contacts) >= max_contacts:
-                break
+        # First try: broad search without title filter (gets more results)
+        self._log(f"Searching for any contacts at {domain}...")
+        prospects = self.search_prospects(domain, titles=None, max_results=10)
 
-            # Step 1: Free search to get prospects with LinkedIn URLs
-            prospects = self.search_prospects(domain, titles, max_results=5)
-
-            if not prospects:
-                continue
-
-            # Prepare prospects for bulk enrichment
-            to_enrich = []
+        if prospects:
+            self._log(f"Found {len(prospects)} prospects, enriching...")
+            # Add domain to each prospect for better matching
             for p in prospects:
-                if len(contacts) + len(to_enrich) >= max_contacts:
-                    break
-
-                # Add domain to each prospect for better matching
                 p["domain"] = domain
-                to_enrich.append(p)
 
-            if not to_enrich:
-                continue
-
-            # Step 2: Bulk enrich to get actual contact data
-            enriched = self.bulk_enrich_people(to_enrich)
+            # Bulk enrich to get actual contact data
+            enriched = self.bulk_enrich_people(prospects[:max_contacts * 2])  # Get extra in case some fail
 
             for contact in enriched:
                 if len(contacts) >= max_contacts:
                     break
-
-                # Skip duplicates
                 if contact.email and contact.email in seen_emails:
                     continue
-
                 if contact.email:
                     seen_emails.add(contact.email)
-
-                # Update confidence based on tier
-                contact.confidence = "high" if tier_idx < 2 else "medium"
                 contacts.append(contact)
+                self._log(f"  Got: {contact.name} ({contact.title}) - {contact.email}")
 
-                logger.debug(f"Found contact: {contact.name} ({contact.title}) - verified: {contact.is_verified}")
+        # If broad search didn't work, try title-specific searches
+        if len(contacts) < max_contacts:
+            for tier_idx, titles in enumerate(self.TITLE_PRIORITIES):
+                if len(contacts) >= max_contacts:
+                    break
+
+                self._log(f"Searching for {titles[0]}... roles at {domain}")
+                prospects = self.search_prospects(domain, titles, max_results=5)
+
+                if not prospects:
+                    continue
+
+                # Prepare prospects for bulk enrichment
+                to_enrich = []
+                for p in prospects:
+                    if len(contacts) + len(to_enrich) >= max_contacts:
+                        break
+                    p["domain"] = domain
+                    to_enrich.append(p)
+
+                if not to_enrich:
+                    continue
+
+                enriched = self.bulk_enrich_people(to_enrich)
+
+                for contact in enriched:
+                    if len(contacts) >= max_contacts:
+                        break
+                    if contact.email and contact.email in seen_emails:
+                        continue
+                    if contact.email:
+                        seen_emails.add(contact.email)
+                    contact.confidence = "high" if tier_idx < 2 else "medium"
+                    contacts.append(contact)
+
+        if not contacts:
+            self._log(f"No contacts found at {domain}", "warning")
 
         return contacts
 
