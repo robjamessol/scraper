@@ -257,10 +257,12 @@ class ApolloEnricher:
             List of prospect dicts with name, title, linkedin_url, apollo_id
         """
         if not self.is_configured:
+            logger.warning("Apollo not configured, skipping search")
             return []
 
         domain = self.clean_domain(domain)
         if not domain:
+            logger.warning("No domain provided for search")
             return []
 
         search_data = {
@@ -275,12 +277,19 @@ class ApolloEnricher:
         # Add seniority filter for better results
         search_data["person_seniorities"] = self.SENIORITIES
 
+        logger.info(f"Apollo search for domain: {domain}, titles: {titles[:2] if titles else 'any'}...")
         result = self._api_request("mixed_people/search", search_data)
 
         if not result:
+            logger.warning(f"Apollo search returned no result for {domain}")
             return []
 
         self.stats.search_calls += 1
+
+        # Log what we got back
+        people_count = len(result.get("people", []))
+        total_count = result.get("pagination", {}).get("total_entries", 0)
+        logger.info(f"Apollo search for {domain}: found {people_count} people (total: {total_count})")
 
         prospects = []
         for person in result.get("people", []):
@@ -294,8 +303,8 @@ class ApolloEnricher:
                 # Note: Search does NOT return email/phone - need to enrich
             }
             prospects.append(prospect)
+            logger.debug(f"  - {prospect['name']} ({prospect['title']}) - LinkedIn: {'yes' if prospect['linkedin_url'] else 'no'}")
 
-        logger.debug(f"Found {len(prospects)} prospects at {domain} (free search)")
         return prospects
 
     def enrich_person(
@@ -395,8 +404,10 @@ class ApolloEnricher:
             List of Contact objects
         """
         if not self.is_configured or not prospects:
+            logger.warning(f"Bulk enrich skipped: configured={self.is_configured}, prospects={len(prospects) if prospects else 0}")
             return []
 
+        logger.info(f"Bulk enriching {len(prospects)} prospects...")
         contacts = []
 
         # Process in batches of 10
@@ -423,13 +434,17 @@ class ApolloEnricher:
 
                 # Skip if no useful identifiers
                 if not detail:
+                    logger.debug(f"Skipping prospect with no identifiers: {p.get('name', 'unknown')}")
                     continue
 
                 details.append(detail)
+                logger.debug(f"Enriching: {p.get('name', 'unknown')} - identifiers: {list(detail.keys())}")
 
             if not details:
+                logger.warning("No valid details to enrich in this batch")
                 continue
 
+            logger.info(f"Calling bulk_match with {len(details)} people...")
             result = self._api_request("people/bulk_match", {
                 "reveal_personal_emails": True,
                 "reveal_phone_number": True,
@@ -437,14 +452,15 @@ class ApolloEnricher:
             })
 
             if not result:
+                logger.warning("Bulk match returned no result")
                 continue
 
             self.stats.bulk_enrich_calls += 1
 
-            # Check for missing records
+            # Log what we got back
+            matches_count = len(result.get("matches", []))
             missing = result.get("missing_records", 0)
-            if missing > 0:
-                logger.debug(f"Bulk enrich: {missing} records not found")
+            logger.info(f"Bulk match result: {matches_count} matches, {missing} missing")
 
             for match in result.get("matches", []):
                 person = match.get("person")

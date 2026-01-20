@@ -307,7 +307,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 name = adv.get("advertiser_name", "Unknown")
                 domain = adv.get("advertiser_domain", "")
 
-                add_log(f"  👤 [{idx+1}/{len(unique)}] Finding contacts for {name}...")
+                add_log(f"  👤 [{idx+1}/{len(unique)}] {name} @ {domain or '(no domain)'}...")
 
                 try:
                     enriched_adv = apollo.enrich_advertiser(adv, max_contacts=3)
