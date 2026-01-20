@@ -550,7 +550,7 @@ class HealthcareBrewScraper(BaseScraper):
         issue_url: str,
     ) -> str | None:
         """
-        Try to extract the issue publication date.
+        Try to extract the issue publication date with multiple fallback strategies.
 
         Args:
             soup: Parsed page
@@ -559,36 +559,64 @@ class HealthcareBrewScraper(BaseScraper):
         Returns:
             Date string in YYYY-MM-DD format, or None
         """
-        # Try common date meta tags
+        # Strategy 1: Try common date meta tags
         date_selectors = [
             ('meta[property="article:published_time"]', "content"),
+            ('meta[property="og:published_time"]', "content"),
             ('meta[name="date"]', "content"),
             ('meta[name="pubdate"]', "content"),
+            ('meta[name="publish-date"]', "content"),
+            ('meta[name="article:published"]', "content"),
             ('time[datetime]', "datetime"),
-            ('[class*="date"]', None),
-            ('[class*="published"]', None),
+            ('time', "datetime"),
         ]
 
         for selector, attr in date_selectors:
             element = soup.select_one(selector)
             if element:
-                date_str = element.get(attr) if attr else element.get_text()
-                date = self._parse_date(date_str)
-                if date:
-                    return date
+                date_str = element.get(attr)
+                if date_str:
+                    date = self._parse_date(date_str)
+                    if date:
+                        return date
 
-        # Try to extract from URL
-        # Pattern: /issues/some-slug-2026-01-15 or similar
+        # Strategy 2: Look for date in elements with date-related classes
+        date_containers = soup.select('[class*="date"], [class*="time"], [class*="publish"]')
+        for container in date_containers:
+            text = container.get_text()
+            date = self._parse_date(text)
+            if date:
+                return date
+
+        # Strategy 3: Try to extract from URL
         url_date_patterns = [
+            r'/(\d{4})-(\d{2})-(\d{2})/',
+            r'/(\d{4})/(\d{2})/(\d{2})/',
+            r'-(\d{4})(\d{2})(\d{2})(?:[/-]|$)',
             r'(\d{4})-(\d{2})-(\d{2})',
-            r'(\d{4})(\d{2})(\d{2})',
         ]
 
         for pattern in url_date_patterns:
             match = re.search(pattern, issue_url)
             if match:
-                groups = match.groups()
-                return f"{groups[0]}-{groups[1]}-{groups[2]}"
+                try:
+                    groups = match.groups()
+                    return f"{groups[0]}-{groups[1]}-{groups[2]}"
+                except (ValueError, IndexError):
+                    continue
+
+        # Strategy 4: Look for date patterns in page text
+        body_text = soup.get_text()
+        date_patterns = [
+            r'((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[.,]?\s+\d{1,2}[,.]?\s+\d{4})',
+            r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})',
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, body_text, re.IGNORECASE)
+            if match:
+                date = self._parse_date(match.group(1))
+                if date:
+                    return date
 
         return None
 

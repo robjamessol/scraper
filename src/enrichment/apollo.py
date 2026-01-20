@@ -864,7 +864,9 @@ class ApolloEnricher:
 
             if i < len(contacts):
                 contact = contacts[i]
-                enriched[f"{prefix}_contact"] = contact.name
+                # Filter out fake names (email prefixes, generic terms)
+                contact_name = contact.name if contact.name and not self._is_email_prefix_name(contact.name) else None
+                enriched[f"{prefix}_contact"] = contact_name
                 enriched[f"{prefix}_email"] = contact.email
                 enriched[f"{prefix}_email_verified"] = contact.is_verified
                 enriched[f"{prefix}_title"] = contact.title
@@ -1142,7 +1144,7 @@ class ApolloEnricher:
 
         Examples that return True:
         - "advertising", "ads", "info", "contact", "sales"
-        - "Fan Community", "Contact For", "cc.life"
+        - "Fan Community", "Contact For", "cc.life", "kuwait.info"
         """
         if not name:
             return True
@@ -1158,26 +1160,42 @@ class ApolloEnricher:
             "general", "inquiries", "enquiries", "business",
             "admin", "office", "reception", "careers", "jobs",
             "news", "newsletter", "subscribe", "feedback",
+            # Regional/country prefixes (e.g., "kuwait.info@hsbc.com")
+            "kuwait", "singapore", "hongkong", "malaysia", "usa", "uk",
         }
 
         # Check if name is just a prefix
         if name_lower in fake_name_patterns:
             return True
 
-        # Check if name contains suspicious patterns
+        # Check if name contains suspicious patterns (TLDs, generic terms)
         suspicious_patterns = [
-            "contact for", "fan community", ".life", ".com",
-            "@", "info@", "mailto", "email us",
+            "contact for", "fan community", "email us", "contact us",
+            # TLD-like patterns
+            ".life", ".com", ".info", ".sg", ".org", ".net", ".io", ".co",
+            ".mail", ".hsbc", ".bank",
+            # Email artifacts
+            "@", "info@", "mailto",
         ]
         for pattern in suspicious_patterns:
             if pattern in name_lower:
                 return True
 
+        # Check for domain-like patterns (e.g., "cc.life", "mail.life")
+        if "." in name and len(name.split(".")) >= 2:
+            # Likely a domain part, not a name
+            return True
+
         # Real names usually have at least 2 parts (first + last)
         # and don't contain numbers
         parts = name.split()
-        if len(parts) == 1 and len(name) < 4:
-            return True
+        if len(parts) == 1:
+            # Single word - check if it's too short or looks like email prefix
+            if len(name) < 4:
+                return True
+            # Check if it's all lowercase (real names are usually capitalized)
+            if name == name_lower and len(name) < 10:
+                return True
 
         # Check for numbers in name (unlikely for real names)
         if any(c.isdigit() for c in name):

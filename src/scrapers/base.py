@@ -548,6 +548,15 @@ class BaseScraper(ABC):
 
         Handles cases where inline styles leak into text extraction.
         """
+        # First, remove entire style block patterns at the start of text
+        # Pattern: "margin-top:0;...font-weight:700"">Content" or similar
+        text = re.sub(
+            r'^["\s]*(?:[a-z-]+\s*:\s*[^;]+;\s*)+["\'>]*\s*',
+            '',
+            text,
+            flags=re.IGNORECASE
+        )
+
         # Remove CSS property patterns (e.g., "margin-top:0;margin-bottom:0;")
         text = re.sub(
             r'[a-z-]+\s*:\s*[^;]+;\s*',
@@ -574,9 +583,10 @@ class BaseScraper(ABC):
             flags=re.IGNORECASE
         )
 
-        # Remove stray HTML attribute patterns (e.g., '700"">')
+        # Remove stray HTML attribute patterns (e.g., '700"">' or '"">)
         text = re.sub(r'\d+["\'>]+', ' ', text)
         text = re.sub(r'["\'>]{2,}', ' ', text)
+        text = re.sub(r'^["\s\']+', '', text)  # Leading quotes
 
         # Remove px/em/rem values
         text = re.sub(r'\d+(?:px|em|rem|%|pt)\s*', ' ', text, flags=re.IGNORECASE)
@@ -795,11 +805,18 @@ class BaseScraper(ABC):
                 domain = self._find_sponsor_domain(html, name, match.start())
                 ad_copy = self._extract_ad_copy(html, match.start(), match.end())
 
+                # Extract product/service info from ad copy
+                product_info = self.extract_product_service(ad_copy, name)
+
                 sponsors.append(SponsorInfo(
                     advertiser_name=name,
                     advertiser_domain=domain,
                     placement_type="auto_detected",
                     ad_copy_snippet=truncate_text(ad_copy, 150),
+                    full_ad_copy=ad_copy,
+                    ad_headline=product_info.get("headline"),
+                    product_service=product_info.get("product_service"),
+                    call_to_action=product_info.get("call_to_action"),
                     issue_url=issue_url,
                     issue_date=None,
                     source_newsletter=self.config.name.lower().replace(" ", "_"),
