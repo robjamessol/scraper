@@ -4,9 +4,10 @@ Apollo.io Contact Enrichment Module
 Finds marketing/advertising contacts at companies discovered from newsletter ads.
 
 Workflow:
-1. First scrape company website for contact emails (free, no API)
-2. Use Apollo People Match to verify/enrich found contacts (uses credits efficiently)
-3. Fall back to Apollo People Search if website has no contacts
+1. Scrape company website for contact emails (free, checks multiple pages with Playwright)
+2. Use Hunter.io to find public emails for the domain (free tier: 25/month)
+3. Use Apollo People Search for additional contacts (free tier: 600 credits/month)
+4. Combine all results, prioritizing verified contacts
 
 Free tier: 600 email credits/month
 Sign up at: https://www.apollo.io/
@@ -23,6 +24,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .website_scraper import WebsiteScraper, WebsiteContact
+from .hunter import HunterEnricher, HunterContact
 
 logger = logging.getLogger(__name__)
 
@@ -698,10 +700,11 @@ class ApolloEnricher:
         """
         Fully enrich an advertiser with company info and contacts.
 
-        Workflow (hybrid approach for maximum data):
-        1. Scrape website first to find emails (free, checks multiple pages)
-        2. Use Apollo People Search to find additional contacts (FREE)
-        3. Combine results, prioritizing Apollo-verified contacts
+        Workflow (multi-source approach for maximum coverage):
+        1. Scrape website first (free, uses Playwright for JS-rendered sites)
+        2. Use Hunter.io to find public emails (free tier: 25/month)
+        3. Use Apollo People Search for additional contacts (free: 600/month)
+        4. Combine all results, prioritizing verified contacts
 
         Args:
             advertiser: Advertiser dict from scraper
@@ -719,12 +722,11 @@ class ApolloEnricher:
         seen_emails = set()
 
         # Step 1: Scrape website first (free, thorough - checks contact/about/team pages)
-        self._log(f"Scraping website {domain} for contacts...")
+        self._log(f"Step 1: Scraping website {domain}...")
         website_contacts = self._scrape_website_contacts(domain)
 
         if website_contacts:
-            self._log(f"Found {len(website_contacts)} email(s) on website")
-            # Convert to Contact objects
+            self._log(f"Website: Found {len(website_contacts)} email(s)")
             for wc in website_contacts[:max_contacts]:
                 contact = Contact(
                     name=wc.name or wc.email.split("@")[0],
@@ -738,31 +740,73 @@ class ApolloEnricher:
                 contacts.append(contact)
                 seen_emails.add(wc.email.lower())
 
-        # Step 2: Use Apollo to find additional contacts (FREE search)
+        # Step 2: Use Hunter.io to find emails (great for domains without visible contact info)
+        if len(contacts) < max_contacts:
+            hunter = HunterEnricher(log_callback=self._log_callback)
+            if hunter.is_configured:
+                self._log(f"Step 2: Searching Hunter.io for {domain}...")
+                hunter_contacts = hunter.domain_search(domain, limit=max_contacts + 2)
+
+                for hc in hunter_contacts:
+                    if len(contacts) >= max_contacts:
+                        break
+                    if hc.email and hc.email.lower() not in seen_emails:
+                        # Convert Hunter contact to our Contact format
+                        name = None
+                        if hc.first_name and hc.last_name:
+                            name = f"{hc.first_name} {hc.last_name}"
+                        elif hc.first_name:
+                            name = hc.first_name
+
+                        contact = Contact(
+                            name=name or hc.email.split("@")[0],
+                            email=hc.email,
+                            email_status="hunter",
+                            title=hc.position,
+                            phone=hc.phone_number,
+                            linkedin_url=hc.linkedin,
+                            confidence="high" if hc.confidence >= 80 else "medium",
+                        )
+                        contacts.append(contact)
+                        seen_emails.add(hc.email.lower())
+
+                if hunter_contacts:
+                    self._log(f"Hunter.io: Added {len(hunter_contacts)} contact(s)")
+            else:
+                self._log("Step 2: Hunter.io not configured (skipping)", "warning")
+
+        # Step 3: Use Apollo to find additional contacts (FREE search)
         if self.is_configured and len(contacts) < max_contacts:
             remaining = max_contacts - len(contacts)
-            self._log(f"Searching Apollo for {remaining} more contact(s) at {domain}...")
-            apollo_contacts = self.search_and_enrich(domain, remaining + 2)  # Get extras to filter duplicates
+            self._log(f"Step 3: Searching Apollo for {remaining} more contact(s)...")
+            apollo_contacts = self.search_and_enrich(domain, remaining + 2)
 
             if apollo_contacts:
-                self._log(f"Apollo found {len(apollo_contacts)} contact(s)")
-                # Add Apollo contacts, avoiding duplicates
+                self._log(f"Apollo: Found {len(apollo_contacts)} contact(s)")
                 for ac in apollo_contacts:
                     if len(contacts) >= max_contacts:
                         break
                     if ac.email and ac.email.lower() not in seen_emails:
-                        # Apollo contacts go first (higher quality)
+                        # Apollo contacts are high quality
                         contacts.insert(0, ac)
                         seen_emails.add(ac.email.lower())
                     elif not ac.email:
-                        # No email but has other info - still useful
                         contacts.append(ac)
 
-                # Re-sort: Apollo-verified first, then website contacts
-                contacts.sort(key=lambda c: 0 if c.email_status == "verified" else 1)
+        # Sort: Apollo verified > Hunter high confidence > others
+        def contact_priority(c: Contact) -> int:
+            if c.email_status == "verified":
+                return 0
+            if c.email_status == "hunter" and c.confidence == "high":
+                return 1
+            if c.email_status == "hunter":
+                return 2
+            return 3
 
-        # Trim to max_contacts
+        contacts.sort(key=contact_priority)
         contacts = contacts[:max_contacts]
+
+        self._log(f"Total contacts found for {domain}: {len(contacts)}")
 
         # Add contacts to advertiser
         enriched = advertiser.copy()

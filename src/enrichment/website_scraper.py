@@ -1,12 +1,26 @@
-"""Website contact scraper - extracts contact info directly from company websites."""
+"""Website contact scraper - extracts contact info directly from company websites.
+
+Uses a hybrid approach:
+1. Try fast httpx requests first
+2. Fall back to Playwright (headless browser) for JavaScript-rendered sites
+"""
 
 import re
 import logging
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
+from contextlib import contextmanager
 
 import httpx
 from bs4 import BeautifulSoup
+
+# Playwright is optional - import with fallback
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    PlaywrightTimeout = Exception  # Fallback
 
 from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS
 
@@ -62,20 +76,36 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
-# Pages likely to contain contact information (expanded)
+# Pages likely to contain contact information (expanded significantly)
 CONTACT_PAGE_PATTERNS = [
-    # Advertising/partnership pages (most relevant for ad sales)
+    # Advertising/partnership pages (most relevant for ad sales) - HIGHEST PRIORITY
     "/advertise", "/advertising", "/partnerships", "/partners", "/sponsors",
     "/media-kit", "/mediakit", "/media", "/sponsorship", "/ad-sales",
-    # Contact pages
-    "/contact", "/contact-us", "/get-in-touch", "/reach-us",
-    # About/team pages
+    "/advertise-with-us", "/become-a-partner", "/work-with-us",
+    # Contact pages - HIGH PRIORITY
+    "/contact", "/contact-us", "/get-in-touch", "/reach-us", "/connect",
+    "/contact-sales", "/sales", "/inquiries", "/inquiry",
+    # About/team pages - MEDIUM PRIORITY (often has leadership contacts)
     "/about", "/about-us", "/company", "/team", "/our-team",
-    "/leadership", "/people", "/management", "/executives",
-    # Press/PR pages (often have media contact)
-    "/press", "/press-room", "/newsroom", "/news", "/pr",
+    "/leadership", "/people", "/management", "/executives", "/founders",
+    "/who-we-are", "/our-story", "/meet-the-team",
+    # Press/PR pages (often has media contacts)
+    "/press", "/press-room", "/newsroom", "/news", "/pr", "/media-relations",
+    # Support pages (sometimes has sales contact)
+    "/support", "/help", "/faq",
     # Footer links that might have contact
-    "/privacy", "/terms", "/legal",  # Sometimes has legal@ email
+    "/privacy", "/terms", "/legal", "/imprint",  # Sometimes has legal@ email
+]
+
+# Email obfuscation patterns to decode
+EMAIL_OBFUSCATION_PATTERNS = [
+    # Pattern: "email [at] domain [dot] com" or "email(at)domain(dot)com"
+    (r'([a-zA-Z0-9._%+-]+)\s*[\[\(]?\s*at\s*[\]\)]?\s*([a-zA-Z0-9.-]+)\s*[\[\(]?\s*dot\s*[\]\)]?\s*([a-zA-Z]{2,})', r'\1@\2.\3'),
+    # Pattern: "email @ domain . com" (with spaces)
+    (r'([a-zA-Z0-9._%+-]+)\s+@\s+([a-zA-Z0-9.-]+)\s+\.\s+([a-zA-Z]{2,})', r'\1@\2.\3'),
+    # Pattern: HTML entity encoding
+    (r'([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+)\.([a-zA-Z]{2,})', r'\1@\2.\3'),
+    (r'([a-zA-Z0-9._%+-]+)&#x40;([a-zA-Z0-9.-]+)\.([a-zA-Z]{2,})', r'\1@\2.\3'),
 ]
 
 # Email regex pattern
@@ -95,27 +125,35 @@ LINKEDIN_PATTERN = re.compile(
 
 
 class WebsiteScraper:
-    """Scrapes company websites to find contact information."""
+    """Scrapes company websites to find contact information.
+
+    Uses a two-phase approach:
+    1. Fast HTTP requests with httpx
+    2. Fallback to Playwright for JavaScript-rendered sites
+    """
 
     def __init__(
         self,
-        timeout: float = 5.0,  # Reduced from 10s for faster failures
-        max_pages: int = 4,    # Reduced from 5 for efficiency
-        max_errors: int = 2,   # Stop early after repeated errors
+        timeout: float = 8.0,  # Increased for reliability
+        max_pages: int = 6,    # Increased to check more pages
+        max_errors: int = 3,   # More tolerant of errors
+        use_browser: bool = True,  # Use Playwright as fallback for JS sites
         log_callback: callable = None,
     ):
         """
         Initialize the website scraper.
 
         Args:
-            timeout: Request timeout in seconds (default 5s for fast failures)
+            timeout: Request timeout in seconds
             max_pages: Maximum pages to scrape per domain
             max_errors: Stop scraping after this many consecutive errors
+            use_browser: Use Playwright for JS-rendered sites (default True)
             log_callback: Optional callback for live logging
         """
         self.timeout = timeout
         self.max_pages = max_pages
         self.max_errors = max_errors
+        self.use_browser = use_browser and PLAYWRIGHT_AVAILABLE
         self._log_callback = log_callback
 
         # Common headers to avoid being blocked
@@ -123,6 +161,7 @@ class WebsiteScraper:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
         }
 
     def _log(self, message: str, level: str = "info"):
@@ -135,6 +174,107 @@ class WebsiteScraper:
             logger.warning(message)
         else:
             logger.info(message)
+
+    @contextmanager
+    def _browser_context(self):
+        """Context manager for Playwright browser."""
+        if not PLAYWRIGHT_AVAILABLE:
+            yield None
+            return
+
+        playwright = None
+        browser = None
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-sandbox",
+                ],
+            )
+            yield browser
+        except Exception as e:
+            self._log(f"Failed to start browser: {e}", "error")
+            yield None
+        finally:
+            if browser:
+                browser.close()
+            if playwright:
+                playwright.stop()
+
+    def _scrape_with_browser(self, domain: str, urls: list[str]) -> list[WebsiteContact]:
+        """
+        Scrape URLs using Playwright for JavaScript-rendered content.
+
+        Args:
+            domain: The domain being scraped
+            urls: List of URLs to try
+
+        Returns:
+            List of contacts found
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return []
+
+        all_emails: dict[str, WebsiteContact] = {}
+
+        with self._browser_context() as browser:
+            if not browser:
+                return []
+
+            context = browser.new_context(
+                user_agent=self.headers["User-Agent"],
+                viewport={"width": 1280, "height": 720},
+            )
+
+            try:
+                page = context.new_page()
+
+                for url in urls[:self.max_pages]:
+                    try:
+                        self._log(f"Browser loading: {url}")
+                        page.goto(url, wait_until="networkidle", timeout=12000)
+
+                        # Wait a bit for any dynamic content
+                        page.wait_for_timeout(1000)
+
+                        # Get rendered HTML
+                        html = page.content()
+
+                        # Extract contacts
+                        contacts = self._extract_contacts_from_html(html, url, domain)
+                        for contact in contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+
+                        # Also look for mailto: links in the DOM
+                        mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                        for link in mailto_links:
+                            href = link.get_attribute("href")
+                            if href:
+                                email = href.replace("mailto:", "").split("?")[0].strip()
+                                if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                    all_emails[email] = WebsiteContact(
+                                        email=email,
+                                        source_page=url,
+                                        email_type="generic",
+                                    )
+
+                        # Stop if we found good contacts
+                        if len(all_emails) >= 3:
+                            break
+
+                    except PlaywrightTimeout:
+                        self._log(f"Browser timeout: {url}", "warning")
+                    except Exception as e:
+                        self._log(f"Browser error on {url}: {e}", "warning")
+
+            finally:
+                context.close()
+
+        return list(all_emails.values())
 
     def scrape_domain(self, domain: str) -> WebsiteScrapeResult:
         """
@@ -277,6 +417,20 @@ class WebsiteScraper:
                     result.errors.append(f"Error fetching {url}: {str(e)}")
 
         result.pages_scraped = pages_scraped
+
+        # Phase 2: If httpx found nothing, try Playwright for JS-rendered sites
+        if not all_emails and self.use_browser:
+            self._log(f"No emails via HTTP, trying browser for JS-rendered content...")
+            # Prioritize advertising/contact pages for browser scraping
+            priority_urls = [base_url]
+            for pattern in ["/advertise", "/contact", "/contact-us", "/about", "/team"]:
+                priority_urls.append(urljoin(base_url, pattern))
+
+            browser_contacts = self._scrape_with_browser(domain, priority_urls)
+            for contact in browser_contacts:
+                if contact.email not in all_emails:
+                    all_emails[contact.email] = contact
+
         result.contacts = self._prioritize_contacts(list(all_emails.values()))
 
         if result.contacts:
@@ -305,6 +459,16 @@ class WebsiteScraper:
         # Find all email addresses
         emails = set(EMAIL_PATTERN.findall(text))
 
+        # Also decode obfuscated emails
+        for pattern, replacement in EMAIL_OBFUSCATION_PATTERNS:
+            obfuscated = re.findall(pattern, text, re.IGNORECASE)
+            for match in obfuscated:
+                if isinstance(match, tuple):
+                    # Reconstruct email from groups
+                    decoded = f"{match[0]}@{match[1]}.{match[2]}"
+                    if EMAIL_PATTERN.match(decoded):
+                        emails.add(decoded)
+
         # Also check mailto: links
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -313,15 +477,47 @@ class WebsiteScraper:
                 if EMAIL_PATTERN.match(email):
                     emails.add(email)
 
+        # Check onclick handlers for emails (some sites use JS to build email)
+        for element in soup.find_all(onclick=True):
+            onclick = element.get("onclick", "")
+            email_matches = EMAIL_PATTERN.findall(onclick)
+            emails.update(email_matches)
+
+        # Check data attributes that might contain emails
+        for element in soup.find_all(attrs={"data-email": True}):
+            email = element.get("data-email", "")
+            if EMAIL_PATTERN.match(email):
+                emails.add(email)
+        for element in soup.find_all(attrs={"data-contact": True}):
+            email = element.get("data-contact", "")
+            if EMAIL_PATTERN.match(email):
+                emails.add(email)
+
         # Filter out emails from the same domain (internal emails only)
         # and skip obvious non-contact emails
-        skip_patterns = ["noreply", "no-reply", "donotreply", "unsubscribe", "privacy", "legal", "support@", "help@"]
+        skip_patterns = ["noreply", "no-reply", "donotreply", "unsubscribe", "example.com", "test@", "demo@", "wixpress.com"]
+
+        # Skip file extensions that look like emails (image@2x.png, etc.)
+        skip_extensions = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"]
 
         for email in emails:
             email_lower = email.lower()
 
             # Skip emails that match skip patterns
             if any(skip in email_lower for skip in skip_patterns):
+                continue
+
+            # Skip file-like patterns (AboutUs@2x.png)
+            if any(email_lower.endswith(ext) for ext in skip_extensions):
+                continue
+
+            # Skip if it looks like a retina image indicator (@2x, @3x)
+            if re.search(r'@\d+x', email_lower):
+                continue
+
+            # Skip if domain part has no dots or is too short (likely not real)
+            domain_part = email_lower.split("@")[-1]
+            if "." not in domain_part or len(domain_part) < 4:
                 continue
 
             # Determine email type
