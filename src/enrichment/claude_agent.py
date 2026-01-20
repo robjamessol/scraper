@@ -467,6 +467,179 @@ Return structured contact data."""
         except json.JSONDecodeError:
             return []
 
+    def suggest_email_prefixes(
+        self,
+        company_name: str,
+        ad_copy: str | None,
+        industry: str | None,
+    ) -> list[str] | None:
+        """
+        Suggest the best email prefixes for reaching ad/marketing contacts.
+
+        Claude analyzes the company type and suggests which email addresses
+        are most likely to exist and reach decision makers.
+
+        Args:
+            company_name: Company name
+            ad_copy: Ad copy for context
+            industry: Company industry if known
+
+        Returns:
+            List of suggested email prefixes in priority order
+        """
+        if not self.is_configured:
+            return None
+
+        system_prompt = """You are an expert at B2B outreach. Given a company, suggest the best email prefixes to reach their advertising/marketing decision makers.
+
+Respond ONLY with a JSON array of email prefixes (just the part before @), in priority order.
+Maximum 6 prefixes. Consider:
+- Company size (startups often use hello@, enterprises use formal prefixes)
+- Industry norms (tech companies: hello@, growth@; traditional: info@, contact@)
+- Who handles ad buying (marketing@, partnerships@, advertising@)
+
+Example response: ["partnerships", "marketing", "advertising", "hello", "info", "contact"]"""
+
+        context = f"Company: {company_name}"
+        if industry:
+            context += f"\nIndustry: {industry}"
+        if ad_copy:
+            context += f"\nAd context: {ad_copy[:500]}"
+
+        user_prompt = f"""Suggest the best email prefixes to reach ad/marketing contacts at this company:
+
+{context}
+
+Return a JSON array of prefixes."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=150)
+
+        if not response:
+            return None
+
+        try:
+            prefixes = json.loads(response)
+            if isinstance(prefixes, list):
+                # Clean up prefixes
+                return [p.lower().strip() for p in prefixes if isinstance(p, str)]
+            return None
+        except json.JSONDecodeError:
+            return None
+
+    def extract_emails_from_text(self, text: str, company_name: str) -> list[dict]:
+        """
+        Use Claude to extract and identify emails from messy website text.
+
+        More accurate than regex for:
+        - Obfuscated emails (name [at] domain [dot] com)
+        - Emails hidden in JavaScript
+        - Identifying which email is for what purpose
+
+        Args:
+            text: Raw text from website
+            company_name: Company name for context
+
+        Returns:
+            List of dicts with email, name, title, purpose
+        """
+        if not self.is_configured or not text:
+            return []
+
+        system_prompt = """Extract email addresses from text. Identify the purpose of each email.
+
+Respond ONLY with valid JSON array:
+[
+    {
+        "email": "email@domain.com",
+        "name": "Person Name or null",
+        "title": "Job Title or null",
+        "purpose": "advertising|sales|support|general|press|careers"
+    }
+]
+
+Handle obfuscated emails like "name [at] domain [dot] com" or "name(at)domain.com".
+Return [] if no emails found."""
+
+        user_prompt = f"""Extract emails for {company_name} from this text:
+
+{text[:5000]}
+
+Return structured email data."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=600)
+
+        if not response:
+            return []
+
+        try:
+            emails = json.loads(response)
+            if isinstance(emails, list):
+                return emails
+            return []
+        except json.JSONDecodeError:
+            return []
+
+    def prioritize_contacts(
+        self,
+        contacts: list[dict],
+        company_name: str,
+        goal: str = "newsletter advertising",
+    ) -> list[dict]:
+        """
+        Use Claude to rank contacts by likelihood to handle ad buying.
+
+        Args:
+            contacts: List of contact dicts with name, email, title
+            company_name: Company name
+            goal: What we're trying to sell
+
+        Returns:
+            Contacts sorted by priority with reasoning
+        """
+        if not self.is_configured or not contacts:
+            return contacts
+
+        system_prompt = """You are a sales expert. Rank these contacts by who is most likely to handle the purchasing decision for the stated goal.
+
+Respond ONLY with valid JSON array of contact emails in priority order:
+["best@example.com", "second@example.com", ...]
+
+Consider:
+- Job titles that indicate ad buying authority
+- Marketing/partnerships roles over general roles
+- Seniority (VP/Director over Manager over generic)"""
+
+        contacts_str = json.dumps(contacts[:10], indent=2)  # Limit to 10
+
+        user_prompt = f"""Rank these contacts at {company_name} for outreach about {goal}:
+
+{contacts_str}
+
+Return emails in priority order."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=300)
+
+        if not response:
+            return contacts
+
+        try:
+            priority_emails = json.loads(response)
+            if isinstance(priority_emails, list):
+                # Reorder contacts based on Claude's ranking
+                email_to_contact = {c.get("email", "").lower(): c for c in contacts}
+                sorted_contacts = []
+                for email in priority_emails:
+                    email_lower = email.lower()
+                    if email_lower in email_to_contact:
+                        sorted_contacts.append(email_to_contact[email_lower])
+                        del email_to_contact[email_lower]
+                # Add any contacts Claude didn't rank
+                sorted_contacts.extend(email_to_contact.values())
+                return sorted_contacts
+            return contacts
+        except json.JSONDecodeError:
+            return contacts
+
     def close(self):
         """Close the HTTP client."""
         self.client.close()

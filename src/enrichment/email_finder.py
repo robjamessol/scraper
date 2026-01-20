@@ -63,6 +63,7 @@ class EmailFinder:
         timeout: float = 5.0,
         max_workers: int = 5,
         log_callback: callable = None,
+        priority_prefixes: list[str] | None = None,
     ):
         """
         Initialize the email finder.
@@ -72,12 +73,14 @@ class EmailFinder:
             timeout: Socket timeout for SMTP checks
             max_workers: Max concurrent SMTP verification threads
             log_callback: Optional callback for live logging
+            priority_prefixes: Optional list of prefixes to try first (e.g., from Claude)
         """
         self.verify_smtp = verify_smtp
         self.timeout = timeout
         self.max_workers = max_workers
         self._log_callback = log_callback
         self._mx_cache: dict[str, list[str]] = {}
+        self._priority_prefixes = priority_prefixes or []
 
     def _log(self, message: str, level: str = "info"):
         """Log a message."""
@@ -168,6 +171,8 @@ class EmailFinder:
         """
         Generate common business email patterns for a domain.
 
+        If priority_prefixes are set (e.g., from Claude), those are tried first.
+
         Args:
             domain: Company domain (e.g., "healthedge.com")
 
@@ -182,7 +187,31 @@ class EmailFinder:
         emails = []
         seen = set()
 
-        # Generate emails from prefixes
+        # First, add priority prefixes (from Claude suggestions)
+        for prefix in self._priority_prefixes:
+            prefix = prefix.lower().strip()
+            email = f"{prefix}@{domain}"
+            if email not in seen:
+                seen.add(email)
+                # Determine email type
+                if prefix in ADVERTISING_PREFIXES:
+                    email_type = "advertising"
+                elif prefix in SALES_MARKETING_PREFIXES:
+                    email_type = "sales"
+                elif prefix in PR_PREFIXES:
+                    email_type = "pr"
+                else:
+                    email_type = "generic"
+
+                emails.append(FoundEmail(
+                    email=email,
+                    email_type=email_type,
+                    verified=False,
+                    confidence="medium",  # Higher confidence - Claude suggested
+                    source="claude_suggested",
+                ))
+
+        # Then add standard prefixes
         for prefix in ALL_PREFIXES:
             email = f"{prefix}@{domain}"
             if email not in seen:

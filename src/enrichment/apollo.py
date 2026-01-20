@@ -739,16 +739,52 @@ class ApolloEnricher:
                 contacts.append(contact)
                 seen_emails.add(wc.email.lower())
 
-        # Step 2: Generate & verify common email patterns (FREE - no API needed)
+        # Step 1b: If website scraping found few emails, try Claude extraction
+        if len(contacts) < max_contacts:
+            claude_emails = self._extract_emails_with_claude(
+                domain,
+                advertiser.get("advertiser_name", domain),
+            )
+            for ce in claude_emails:
+                if len(contacts) >= max_contacts:
+                    break
+                email = ce.get("email", "").lower()
+                if email and email not in seen_emails:
+                    contact = Contact(
+                        name=ce.get("name") if ce.get("name") and not self._is_email_prefix_name(ce.get("name")) else None,
+                        email=ce["email"],
+                        email_status="claude_extracted",
+                        title=ce.get("title"),
+                        phone=None,
+                        linkedin_url=None,
+                        confidence="medium",
+                    )
+                    contacts.append(contact)
+                    seen_emails.add(email)
+                    self._log(f"Claude extracted: {ce['email']} ({ce.get('purpose', 'unknown')})")
+
+        # Step 2: Generate & verify common email patterns (FREE - SMTP verification enabled)
         if len(contacts) < max_contacts:
             self._log(f"Step 2: Finding emails via pattern generation for {domain}...")
+
+            # Use Claude to suggest best email prefixes for this company type
+            suggested_prefixes = self._get_claude_email_suggestions(
+                advertiser.get("advertiser_name", domain),
+                advertiser.get("full_ad_copy"),
+                advertiser.get("company_industry"),
+            )
+
             email_finder = EmailFinder(
-                verify_smtp=False,  # Disabled for speed - SMTP verification is slow
+                verify_smtp=True,  # ENABLED - verify emails actually exist
+                timeout=5.0,  # 5 second timeout per verification
+                max_workers=3,  # Parallel verification
                 log_callback=self._log_callback,
+                priority_prefixes=suggested_prefixes,  # Claude's suggestions first
             )
             found_emails = email_finder.find_emails(domain, max_results=max_contacts + 2)
 
             added_count = 0
+            verified_count = 0
             for fe in found_emails:
                 if len(contacts) >= max_contacts:
                     break
@@ -762,15 +798,16 @@ class ApolloEnricher:
                         title=f"General ({fe.email_type})" if fe.email_type else None,
                         phone=None,
                         linkedin_url=None,
-                        confidence="low" if not fe.verified else fe.confidence,
+                        confidence="high" if fe.verified else "low",
                     )
                     contacts.append(contact)
                     seen_emails.add(fe.email.lower())
                     added_count += 1
+                    if fe.verified:
+                        verified_count += 1
 
             if added_count > 0:
-                verified_count = sum(1 for fe in found_emails if fe.verified)
-                self._log(f"Email finder: Added {added_count} contact(s) ({verified_count} verified)")
+                self._log(f"Email finder: Added {added_count} contact(s) ({verified_count} SMTP verified)")
 
         # Step 3: Use Apollo to find additional contacts (FREE search)
         if self.is_configured and len(contacts) < max_contacts:
@@ -790,20 +827,29 @@ class ApolloEnricher:
                     elif not ac.email:
                         contacts.append(ac)
 
-        # Sort: Apollo verified > SMTP verified > website > pattern guesses
+        # Sort: Apollo verified > SMTP verified > Claude extracted > website > pattern guesses
         def contact_priority(c: Contact) -> int:
             if c.email_status == "verified":  # Apollo verified
                 return 0
             if c.email_status == "smtp_verified":  # Our SMTP verification
                 return 1
-            if c.email_status == "website":  # Found on website
+            if c.email_status == "claude_extracted":  # Claude found on website
                 return 2
-            if c.email_status == "pattern":  # Unverified pattern guess
-                return 4
-            return 3
+            if c.email_status == "website":  # Found on website
+                return 3
+            if c.email_status == "pattern_guess":  # Unverified pattern guess
+                return 5
+            return 4
 
         contacts.sort(key=contact_priority)
         contacts = contacts[:max_contacts]
+
+        # Step 4: Use Claude to prioritize contacts if we have multiple
+        if len(contacts) > 1:
+            contacts = self._prioritize_contacts_with_claude(
+                contacts,
+                advertiser.get("advertiser_name", domain),
+            )
 
         self._log(f"Total contacts found for {domain}: {len(contacts)}")
 
@@ -858,6 +904,174 @@ class ApolloEnricher:
         enriched["verified_emails"] = sum(1 for c in contacts if c.is_verified)
 
         return enriched
+
+    def _extract_emails_with_claude(
+        self,
+        domain: str,
+        company_name: str,
+    ) -> list[dict]:
+        """
+        Use Claude to extract emails from website text that regex might miss.
+
+        Fetches the website and uses Claude to find obfuscated or hidden emails.
+
+        Args:
+            domain: Company domain
+            company_name: Company name
+
+        Returns:
+            List of dicts with email, name, title, purpose
+        """
+        try:
+            from .claude_agent import ClaudeAgent
+            import httpx
+
+            # First, fetch website text
+            try:
+                with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                    # Try contact page first, then homepage
+                    for path in ["/contact", "/contact-us", "/about", ""]:
+                        try:
+                            url = f"https://{domain}{path}"
+                            response = client.get(url)
+                            if response.status_code == 200:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(response.text, "lxml")
+                                # Remove scripts/styles
+                                for tag in soup(["script", "style"]):
+                                    tag.decompose()
+                                text = soup.get_text(separator=" ")
+                                if len(text) > 100:
+                                    break
+                        except Exception:
+                            continue
+                    else:
+                        return []
+            except Exception:
+                return []
+
+            # Now use Claude to extract emails
+            agent = ClaudeAgent(log_callback=self._log_callback)
+            if not agent.is_configured:
+                return []
+
+            emails = agent.extract_emails_from_text(text[:5000], company_name)
+            agent.close()
+
+            # Filter to only emails from this domain
+            domain_emails = [
+                e for e in emails
+                if e.get("email", "").lower().endswith(f"@{domain.lower()}")
+            ]
+
+            return domain_emails
+
+        except ImportError:
+            return []
+        except Exception as e:
+            self._log(f"Claude email extraction failed: {e}", "warning")
+            return []
+
+    def _prioritize_contacts_with_claude(
+        self,
+        contacts: list[Contact],
+        company_name: str,
+    ) -> list[Contact]:
+        """
+        Use Claude to intelligently prioritize contacts for ad sales outreach.
+
+        Args:
+            contacts: List of Contact objects
+            company_name: Company name
+
+        Returns:
+            Contacts sorted by priority
+        """
+        try:
+            from .claude_agent import ClaudeAgent
+
+            agent = ClaudeAgent(log_callback=self._log_callback)
+            if not agent.is_configured:
+                return contacts
+
+            # Convert to dicts for Claude
+            contact_dicts = [
+                {"email": c.email, "name": c.name, "title": c.title}
+                for c in contacts
+                if c.email
+            ]
+
+            if not contact_dicts:
+                return contacts
+
+            prioritized = agent.prioritize_contacts(
+                contact_dicts,
+                company_name,
+                goal="newsletter advertising",
+            )
+            agent.close()
+
+            # Map back to Contact objects
+            email_to_contact = {c.email.lower(): c for c in contacts if c.email}
+            result = []
+            for pd in prioritized:
+                email = pd.get("email", "").lower()
+                if email in email_to_contact:
+                    result.append(email_to_contact[email])
+                    del email_to_contact[email]
+
+            # Add any remaining
+            result.extend(email_to_contact.values())
+
+            self._log(f"Claude prioritized {len(result)} contacts")
+            return result
+
+        except ImportError:
+            return contacts
+        except Exception as e:
+            self._log(f"Claude contact prioritization failed: {e}", "warning")
+            return contacts
+
+    def _get_claude_email_suggestions(
+        self,
+        company_name: str,
+        ad_copy: str | None,
+        industry: str | None,
+    ) -> list[str] | None:
+        """
+        Use Claude to suggest the best email prefixes for this company.
+
+        Claude analyzes the company type and suggests which email addresses
+        are most likely to exist and reach the right person for ad sales.
+
+        Args:
+            company_name: Company name
+            ad_copy: Ad copy for context
+            industry: Company industry if known
+
+        Returns:
+            List of suggested email prefixes in priority order, or None
+        """
+        try:
+            from .claude_agent import ClaudeAgent
+
+            agent = ClaudeAgent(log_callback=self._log_callback)
+            if not agent.is_configured:
+                return None
+
+            result = agent.suggest_email_prefixes(company_name, ad_copy, industry)
+            agent.close()
+
+            if result:
+                self._log(f"Claude suggested prefixes: {result[:3]}")
+                return result
+            return None
+
+        except ImportError:
+            return None
+        except Exception as e:
+            self._log(f"Claude email suggestion failed: {e}", "warning")
+            return None
 
     def _enrich_company_with_claude(
         self,
