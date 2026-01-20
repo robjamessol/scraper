@@ -721,7 +721,7 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Scrape website (Claude for navigation hints, regex for extraction)
+        # Step 1: Scrape website (ONE Claude call to suggest pages, fast regex for extraction)
         self._log(f"Step 1: Scraping website {domain}...")
         website_contacts = self._scrape_website_contacts(domain, company_name=company_name)
 
@@ -1184,7 +1184,8 @@ class ApolloEnricher:
         """
         Scrape a company website for contact information.
 
-        Optimized for speed: uses Claude for navigation hints only, regex for extraction.
+        Uses Claude for ONE smart navigation decision (which pages to visit),
+        then fast regex extraction on those pages.
 
         Args:
             domain: Domain to scrape
@@ -1196,9 +1197,9 @@ class ApolloEnricher:
         try:
             scraper = WebsiteScraper(
                 timeout=5.0,  # Reduced for speed
-                max_pages=6,  # Check homepage + key pages only
+                max_pages=8,  # Homepage + Claude's suggestions + defaults
                 use_browser=False,  # Disabled - too slow
-                use_claude=False,  # Disabled - not needed, we check fixed pages
+                use_claude=True,  # ONE call to analyze homepage and suggest pages
                 log_callback=self._log_callback,
             )
             result = scraper.scrape_domain(domain, company_name=company_name)
