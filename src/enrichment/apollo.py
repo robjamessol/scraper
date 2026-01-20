@@ -728,13 +728,13 @@ class ApolloEnricher:
             self._log(f"Website: Found {len(website_contacts)} email(s)")
             for wc in website_contacts[:max_contacts]:
                 contact = Contact(
-                    name=wc.name or wc.email.split("@")[0],
+                    name=wc.name if wc.name and not self._is_email_prefix_name(wc.name) else None,
                     email=wc.email,
                     email_status="website",
                     title=wc.title,
                     phone=wc.phone,
                     linkedin_url=wc.linkedin_url,
-                    confidence="medium",
+                    confidence="medium" if wc.name else "low",
                 )
                 contacts.append(contact)
                 seen_emails.add(wc.email.lower())
@@ -753,14 +753,16 @@ class ApolloEnricher:
                 if len(contacts) >= max_contacts:
                     break
                 if fe.email and fe.email.lower() not in seen_emails:
+                    # Don't use email prefix as contact name - it's misleading
+                    # Mark as pattern-generated so it's clear this isn't a real person
                     contact = Contact(
-                        name=fe.email.split("@")[0],  # Use prefix as name
+                        name=None,  # No real name available for pattern-generated emails
                         email=fe.email,
-                        email_status="smtp_verified" if fe.verified else "pattern",
-                        title=None,
+                        email_status="smtp_verified" if fe.verified else "pattern_guess",
+                        title=f"General ({fe.email_type})" if fe.email_type else None,
                         phone=None,
                         linkedin_url=None,
-                        confidence=fe.confidence,
+                        confidence="low" if not fe.verified else fe.confidence,
                     )
                     contacts.append(contact)
                     seen_emails.add(fe.email.lower())
@@ -827,7 +829,7 @@ class ApolloEnricher:
                 enriched[f"{prefix}_phone"] = None
                 enriched[f"{prefix}_linkedin"] = None
 
-        # Get company info
+        # Get company info - try Apollo first, then Claude as fallback
         company = self.enrich_company(domain)
         if company:
             enriched["company_website"] = company.website_url
@@ -835,12 +837,136 @@ class ApolloEnricher:
             enriched["company_industry"] = company.industry
             enriched["company_size"] = company.employee_count
             enriched["company_description"] = company.description
+        else:
+            # Apollo failed - try Claude for company enrichment
+            self._log(f"Apollo has no company data for {domain}, trying Claude...")
+            claude_company = self._enrich_company_with_claude(
+                advertiser.get("advertiser_name", domain),
+                domain,
+                advertiser.get("full_ad_copy"),
+            )
+            if claude_company:
+                enriched["company_website"] = f"http://www.{domain}"
+                enriched["company_linkedin"] = None  # Claude can't find LinkedIn URLs
+                enriched["company_industry"] = claude_company.get("industry")
+                enriched["company_size"] = claude_company.get("company_size")
+                enriched["company_description"] = claude_company.get("description")
+                self._log(f"Claude provided company info: {claude_company.get('industry')}")
 
         enriched["enriched"] = True
         enriched["contacts_found"] = len(contacts)
         enriched["verified_emails"] = sum(1 for c in contacts if c.is_verified)
 
         return enriched
+
+    def _enrich_company_with_claude(
+        self,
+        company_name: str,
+        domain: str,
+        ad_copy: str | None = None,
+    ) -> dict | None:
+        """
+        Use Claude to generate company information when Apollo fails.
+
+        Args:
+            company_name: Company name
+            domain: Company domain
+            ad_copy: Optional ad copy for context
+
+        Returns:
+            Dict with company info or None
+        """
+        try:
+            from .claude_agent import ClaudeAgent
+
+            agent = ClaudeAgent(log_callback=self._log_callback)
+            if not agent.is_configured:
+                return None
+
+            # Use ad copy as context if available
+            website_text = ad_copy if ad_copy else None
+
+            analysis = agent.analyze_company(company_name, domain, website_text)
+            agent.close()
+
+            if analysis:
+                # Map company size estimate to a number
+                size_map = {
+                    "startup": "10",
+                    "small": "50",
+                    "medium": "200",
+                    "large": "1000",
+                    "enterprise": "5000+",
+                }
+                size = size_map.get(
+                    analysis.company_size_estimate.lower() if analysis.company_size_estimate else "",
+                    None
+                )
+
+                return {
+                    "description": analysis.description,
+                    "industry": analysis.industry,
+                    "company_size": size,
+                    "products_services": analysis.products_services,
+                }
+            return None
+
+        except ImportError:
+            self._log("Claude agent not available", "warning")
+            return None
+        except Exception as e:
+            self._log(f"Claude company enrichment failed: {e}", "warning")
+            return None
+
+    @staticmethod
+    def _is_email_prefix_name(name: str) -> bool:
+        """
+        Check if a 'name' is actually just an email prefix (not a real person).
+
+        Examples that return True:
+        - "advertising", "ads", "info", "contact", "sales"
+        - "Fan Community", "Contact For", "cc.life"
+        """
+        if not name:
+            return True
+
+        name_lower = name.lower().strip()
+
+        # Common email prefixes that aren't real names
+        fake_name_patterns = {
+            "advertising", "ads", "ad", "adops", "adsales",
+            "info", "contact", "hello", "support", "help",
+            "sales", "marketing", "press", "pr", "media",
+            "partnerships", "partner", "partners", "team",
+            "general", "inquiries", "enquiries", "business",
+            "admin", "office", "reception", "careers", "jobs",
+            "news", "newsletter", "subscribe", "feedback",
+        }
+
+        # Check if name is just a prefix
+        if name_lower in fake_name_patterns:
+            return True
+
+        # Check if name contains suspicious patterns
+        suspicious_patterns = [
+            "contact for", "fan community", ".life", ".com",
+            "@", "info@", "mailto", "email us",
+        ]
+        for pattern in suspicious_patterns:
+            if pattern in name_lower:
+                return True
+
+        # Real names usually have at least 2 parts (first + last)
+        # and don't contain numbers
+        parts = name.split()
+        if len(parts) == 1 and len(name) < 4:
+            return True
+
+        # Check for numbers in name (unlikely for real names)
+        if any(c.isdigit() for c in name):
+            return True
+
+        return False
 
     def _scrape_website_contacts(self, domain: str) -> list[WebsiteContact]:
         """Scrape a company website for contact information."""

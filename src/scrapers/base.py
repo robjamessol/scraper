@@ -528,18 +528,81 @@ class BaseScraper(ABC):
 
         # Parse and get text
         soup = BeautifulSoup(section, "lxml")
+
+        # Remove script and style elements completely
+        for element in soup(["script", "style", "head", "meta", "link"]):
+            element.decompose()
+
         text = soup.get_text(separator=" ")
+
+        # Clean up CSS/HTML artifacts that might have leaked through
+        text = self._strip_css_artifacts(text)
         text = clean_text(text)
 
         return text
 
-    def extract_product_service(self, ad_copy: str, company_name: str) -> dict[str, str | None]:
+    @staticmethod
+    def _strip_css_artifacts(text: str) -> str:
+        """
+        Remove CSS and HTML artifacts from extracted text.
+
+        Handles cases where inline styles leak into text extraction.
+        """
+        # Remove CSS property patterns (e.g., "margin-top:0;margin-bottom:0;")
+        text = re.sub(
+            r'[a-z-]+\s*:\s*[^;]+;\s*',
+            ' ',
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Remove CSS-like patterns (font-family, font-size, etc.)
+        text = re.sub(
+            r'(?:font-(?:family|size|weight)|margin-?(?:top|bottom|left|right)?|'
+            r'padding-?(?:top|bottom|left|right)?|color|background|border|'
+            r'line-height|text-align|display|width|height)\s*:\s*[^;""\'>\s]+[;\s]*',
+            ' ',
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Remove Helvetica, Arial, sans-serif font stack patterns
+        text = re.sub(
+            r'(?:Helvetica|Arial|sans-serif|serif|monospace)[,\s]*',
+            '',
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Remove stray HTML attribute patterns (e.g., '700"">')
+        text = re.sub(r'\d+["\'>]+', ' ', text)
+        text = re.sub(r'["\'>]{2,}', ' ', text)
+
+        # Remove px/em/rem values
+        text = re.sub(r'\d+(?:px|em|rem|%|pt)\s*', ' ', text, flags=re.IGNORECASE)
+
+        # Clean up multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+
+        return text.strip()
+
+    def extract_product_service(
+        self,
+        ad_copy: str,
+        company_name: str,
+        use_claude: bool = True,
+    ) -> dict[str, str | None]:
         """
         Extract product/service information from ad copy.
+
+        Uses a hybrid approach:
+        1. Try regex-based extraction first (fast, free)
+        2. If results are poor, use Claude for intelligent extraction (more accurate)
 
         Args:
             ad_copy: The full ad copy text
             company_name: Company name (to filter out)
+            use_claude: Whether to use Claude as fallback for better extraction
 
         Returns:
             Dict with 'product_service', 'headline', 'call_to_action'
@@ -613,12 +676,87 @@ class BaseScraper(ABC):
                     result["product_service"] = product
                     break
 
-        # If no specific product found, try to summarize what they're offering
+        # Check if regex extraction was successful
+        regex_quality = self._assess_extraction_quality(result, text)
+
+        # Use Claude for better extraction if regex results are poor
+        if use_claude and regex_quality < 0.5:
+            claude_result = self._extract_with_claude(ad_copy, company_name)
+            if claude_result:
+                # Merge Claude results, preferring Claude for missing/poor fields
+                if claude_result.get("headline") and not result["headline"]:
+                    result["headline"] = claude_result["headline"]
+                if claude_result.get("product_service") and not result["product_service"]:
+                    result["product_service"] = claude_result["product_service"]
+                if claude_result.get("call_to_action") and not result["call_to_action"]:
+                    result["call_to_action"] = claude_result["call_to_action"]
+
+        # Final fallback: use headline as product if nothing found
         if not result["product_service"] and result["headline"]:
-            # Use the headline as a fallback description
             result["product_service"] = result["headline"]
 
         return result
+
+    def _assess_extraction_quality(self, result: dict, text: str) -> float:
+        """
+        Assess quality of regex extraction (0-1 score).
+
+        Low score indicates Claude should be used.
+        """
+        score = 0.0
+
+        # Headline quality
+        if result["headline"]:
+            # Good headline is substantive
+            if len(result["headline"]) > 20:
+                score += 0.3
+            # Bad if headline looks like ad copy fragment
+            if result["headline"] == text[:len(result["headline"])]:
+                score -= 0.1
+
+        # Product quality
+        if result["product_service"]:
+            # Good product is specific
+            if result["product_service"] != result["headline"]:
+                score += 0.4
+            else:
+                score += 0.1  # Fallback to headline is weak
+
+        # CTA found
+        if result["call_to_action"]:
+            score += 0.3
+
+        return max(0.0, min(1.0, score))
+
+    def _extract_with_claude(self, ad_copy: str, company_name: str) -> dict | None:
+        """
+        Use Claude for intelligent ad copy extraction.
+
+        Only called when regex extraction quality is poor.
+        """
+        try:
+            from ..enrichment.claude_agent import ClaudeAgent
+
+            agent = ClaudeAgent()
+            if not agent.is_configured:
+                return None
+
+            analysis = agent.analyze_ad_copy(ad_copy, company_name)
+            agent.close()
+
+            if analysis:
+                return {
+                    "headline": analysis.headline,
+                    "product_service": analysis.product_service,
+                    "call_to_action": analysis.call_to_action,
+                }
+            return None
+        except ImportError:
+            logger.debug("Claude agent not available")
+            return None
+        except Exception as e:
+            logger.warning(f"Claude extraction failed: {e}")
+            return None
 
     def auto_detect_sponsors(self, html: str, issue_url: str) -> list[SponsorInfo]:
         """

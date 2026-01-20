@@ -792,24 +792,83 @@ class MorningBrewScraper(BaseScraper):
             return None
 
         sponsor_domain = self._find_sponsor_domain(html, sponsor_name, match.start())
-        ad_copy = self._extract_ad_copy(html, match.start(), match.end())
+
+        # Extract ad copy with larger window for full context
+        ad_copy = self._extract_ad_copy(html, match.start(), match.end(), max_length=1500)
+
+        # Extract product/service info from ad copy (was missing!)
+        product_info = self.extract_product_service(ad_copy, sponsor_name)
+
+        # Find landing page URL
+        landing_page = self._find_landing_page(html, soup, sponsor_name, match.start())
 
         return SponsorInfo(
             advertiser_name=sponsor_name,
             advertiser_domain=sponsor_domain,
             placement_type=placement_type,
             ad_copy_snippet=truncate_text(ad_copy, 150),
+            full_ad_copy=ad_copy,
+            ad_headline=product_info.get("headline"),
+            product_service=product_info.get("product_service"),
+            call_to_action=product_info.get("call_to_action"),
+            landing_page_url=landing_page,
             issue_url=issue_url,
             issue_date=issue_date,
             source_newsletter="morning_brew",
             confidence="high",
         )
 
+    def _find_landing_page(
+        self,
+        html: str,
+        soup: BeautifulSoup,
+        sponsor_name: str,
+        match_position: int,
+    ) -> str | None:
+        """Find the main landing page URL for the sponsor."""
+        skip_domains = {
+            "morningbrew.com", "morning-brew.com", "twitter.com",
+            "x.com", "facebook.com", "linkedin.com", "instagram.com",
+        }
+
+        window_start = max(0, match_position - 200)
+        window_end = min(len(html), match_position + 3000)
+        section = html[window_start:window_end]
+
+        section_soup = BeautifulSoup(section, "lxml")
+
+        cta_keywords = [
+            "learn more", "get started", "sign up", "download", "try",
+            "read more", "discover", "explore", "register", "join",
+        ]
+
+        for link in section_soup.find_all("a", href=True):
+            href = link.get("href", "")
+            text = clean_text(link.get_text()).lower()
+            domain = extract_domain(href)
+
+            if not domain or domain in skip_domains:
+                continue
+
+            if any(cta in text for cta in cta_keywords):
+                return href
+
+            if "utm_" in href.lower() or "?ref=" in href.lower():
+                return href
+
+        return None
+
     def _extract_issue_date(self, soup: BeautifulSoup, issue_url: str) -> str | None:
-        """Extract issue date."""
+        """Extract issue date with multiple fallback strategies."""
+        # Strategy 1: Try common meta tags
         date_selectors = [
             ('meta[property="article:published_time"]', "content"),
+            ('meta[property="og:published_time"]', "content"),
+            ('meta[name="date"]', "content"),
+            ('meta[name="pubdate"]', "content"),
+            ('meta[name="publish-date"]', "content"),
             ('time[datetime]', "datetime"),
+            ('time', "datetime"),
         ]
 
         for selector, attr in date_selectors:
@@ -817,10 +876,85 @@ class MorningBrewScraper(BaseScraper):
             if element:
                 date_str = element.get(attr)
                 if date_str:
-                    try:
-                        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                        return dt.strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
+                    parsed = self._parse_date_string(date_str)
+                    if parsed:
+                        return parsed
+
+        # Strategy 2: Look for date patterns in visible text
+        date_containers = soup.select('[class*="date"], [class*="time"], [class*="publish"]')
+        for container in date_containers:
+            text = container.get_text()
+            parsed = self._parse_date_string(text)
+            if parsed:
+                return parsed
+
+        # Strategy 3: Extract from URL
+        # Patterns: /issues/slug-2026-01-15, /issues/2026/01/15/slug, etc.
+        url_patterns = [
+            r'/(\d{4})-(\d{2})-(\d{2})/',
+            r'/(\d{4})/(\d{2})/(\d{2})/',
+            r'-(\d{4})(\d{2})(\d{2})(?:[/-]|$)',
+            r'(\d{4})-(\d{2})-(\d{2})',
+        ]
+        for pattern in url_patterns:
+            match = re.search(pattern, issue_url)
+            if match:
+                try:
+                    year, month, day = match.groups()
+                    return f"{year}-{month}-{day}"
+                except (ValueError, IndexError):
+                    continue
+
+        # Strategy 4: Look for date in page text content
+        body_text = soup.get_text()
+        date_patterns = [
+            # "January 15, 2026" or "Jan 15, 2026"
+            r'((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[.,]?\s+\d{1,2}[,.]?\s+\d{4})',
+            # "15 January 2026"
+            r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})',
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, body_text, re.IGNORECASE)
+            if match:
+                parsed = self._parse_date_string(match.group(1))
+                if parsed:
+                    return parsed
+
+        return None
+
+    def _parse_date_string(self, date_str: str | None) -> str | None:
+        """Parse various date string formats to YYYY-MM-DD."""
+        if not date_str:
+            return None
+
+        date_str = date_str.strip()
+
+        # ISO format with timezone
+        try:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+        # Common date formats
+        formats = [
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d",
+            "%B %d, %Y",
+            "%B %d %Y",
+            "%b %d, %Y",
+            "%b %d %Y",
+            "%d %B %Y",
+            "%m/%d/%Y",
+            "%m-%d-%Y",
+        ]
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
 
         return None

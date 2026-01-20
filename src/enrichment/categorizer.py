@@ -349,31 +349,108 @@ class AdvertiserCategorizer:
             confidence=0.5,
         )
 
-    def enrich_sponsor(self, sponsor_info: dict[str, Any]) -> dict[str, Any]:
+    def enrich_sponsor(
+        self,
+        sponsor_info: dict[str, Any],
+        use_claude: bool = True,
+    ) -> dict[str, Any]:
         """
         Add category and niche fit scoring to a sponsor record.
 
+        Uses a hybrid approach:
+        1. Try keyword-based categorization first (fast, free)
+        2. If confidence is low, use Claude for intelligent scoring (more accurate)
+
         Args:
             sponsor_info: Dictionary with sponsor information
+            use_claude: Whether to use Claude for low-confidence cases
 
         Returns:
             Updated dictionary with category and niche_fit fields
         """
         company_name = sponsor_info.get("advertiser_name", "")
         domain = sponsor_info.get("advertiser_domain", "")
-        ad_copy = sponsor_info.get("ad_copy_snippet", "")
+        ad_copy = sponsor_info.get("ad_copy_snippet", "") or sponsor_info.get("full_ad_copy", "")
+        company_description = sponsor_info.get("company_description", "")
 
-        # Get category
+        # Get category using keyword matching
         cat_score = self.categorize(company_name, domain, ad_copy)
         sponsor_info["category"] = cat_score.category
 
-        # Get niche fit
+        # Get niche fit using keyword matching
         fit_score = self.score_niche_fit(
             cat_score.category, company_name, domain, ad_copy
         )
-        sponsor_info["niche_fit"] = fit_score.display
 
+        # If confidence is low, try Claude for better analysis
+        if use_claude and (cat_score.confidence < 0.5 or fit_score.confidence < 0.5):
+            claude_result = self._score_with_claude(
+                company_name, ad_copy, company_description
+            )
+            if claude_result:
+                # Use Claude's results
+                sponsor_info["category"] = claude_result["category"]
+                sponsor_info["niche_fit"] = f"{claude_result['emoji']} {claude_result['score']}"
+                return sponsor_info
+
+        sponsor_info["niche_fit"] = fit_score.display
         return sponsor_info
+
+    def _score_with_claude(
+        self,
+        company_name: str,
+        ad_copy: str | None,
+        company_description: str | None,
+    ) -> dict | None:
+        """
+        Use Claude for intelligent niche fit scoring.
+
+        Only called when keyword matching has low confidence.
+        """
+        try:
+            from .claude_agent import ClaudeAgent
+
+            agent = ClaudeAgent()
+            if not agent.is_configured:
+                return None
+
+            # Define the target niche for Claude
+            target_niche = """
+Renewal Weekly audience:
+- Ages 55-68, affluent ($150K+ household income)
+- Researching stem cell treatments and regenerative medicine
+- Many have spent $15K+ on their health journey
+- Comparing options for $20-50K medical procedures
+- Interested in longevity, anti-aging, biohacking, health optimization
+
+HIGH FIT: Stem cell clinics, regenerative medicine, longevity products, biomarker testing, NAD+, peptides
+MEDIUM FIT: Health supplements, wearables, health tech, wellness products
+LOW FIT: B2B healthcare IT, hospital equipment, pediatrics, acute care, general consumer products
+"""
+
+            analysis = agent.analyze_niche_fit(
+                company_name=company_name,
+                ad_copy=ad_copy or "",
+                company_description=company_description,
+                target_niche=target_niche,
+            )
+            agent.close()
+
+            if analysis:
+                return {
+                    "score": analysis.fit_score,
+                    "emoji": analysis.fit_emoji,
+                    "category": analysis.category,
+                    "reasoning": analysis.reasoning,
+                }
+            return None
+
+        except ImportError:
+            logger.debug("Claude agent not available")
+            return None
+        except Exception as e:
+            logger.warning(f"Claude niche fit scoring failed: {e}")
+            return None
 
 
 def categorize_and_score(
