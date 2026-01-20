@@ -10,7 +10,7 @@
             theme: {
                 extend: {
                     colors: {
-                        primary: '#4F46E5',
+                        primary: '#6366F1',
                         secondary: '#10B981',
                     }
                 }
@@ -27,9 +27,9 @@
         }
     </style>
 </head>
-<body class="bg-gray-50 min-h-screen">
+<body class="bg-gray-950 min-h-screen text-gray-100">
     <!-- Navigation -->
-    <nav class="bg-white border-b border-gray-200">
+    <nav class="bg-gray-900 border-b border-gray-800">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between h-12">
                 <div class="flex items-center">
@@ -37,18 +37,18 @@
                         <span class="text-2xl font-bold text-primary">Newsletter Intel</span>
                     </a>
                     <div class="ml-10 flex space-x-4">
-                        <a href="/" class="px-3 py-2 text-sm font-medium text-gray-700 hover:text-primary">Dashboard</a>
-                        <a href="/advertisers" class="px-3 py-2 text-sm font-medium text-gray-700 hover:text-primary">Advertisers</a>
+                        <a href="/" class="px-3 py-2 text-sm font-medium text-gray-300 hover:text-primary">Dashboard</a>
+                        <a href="/advertisers" class="px-3 py-2 text-sm font-medium text-gray-300 hover:text-primary">Advertisers</a>
                     </div>
                 </div>
                 <div class="flex items-center space-x-4">
                     {% if scan_status.is_running %}
-                    <span class="flex items-center text-sm text-yellow-600">
+                    <span class="flex items-center text-sm text-yellow-400">
                         <span class="status-dot w-2 h-2 bg-yellow-500 rounded-full mr-2"></span>
                         Scanning: {{ scan_status.current_newsletter }}
                     </span>
                     {% else %}
-                    <span class="flex items-center text-sm text-green-600">
+                    <span class="flex items-center text-sm text-green-400">
                         <span class="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
                         Ready
                     </span>
@@ -64,7 +64,7 @@
     </main>
 
     <!-- Footer -->
-    <footer class="bg-white border-t border-gray-200 mt-auto">
+    <footer class="bg-gray-900 border-t border-gray-800 mt-auto">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
             <p class="text-center text-sm text-gray-500">
                 Newsletter Advertiser Intelligence System - Renewal Weekly
