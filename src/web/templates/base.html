@@ -73,8 +73,11 @@
     </footer>
 
     <script>
+        let logIndex = 0;
+        let pollInterval = null;
+        let logsMinimized = false;
+
         async function startScan() {
-            // Get limit from dropdown if it exists
             const limitSelect = document.getElementById('scanLimit');
             const limit = limitSelect ? limitSelect.value : '25';
             const limitText = limit ? `${limit} issues` : 'all issues';
@@ -82,7 +85,6 @@
             if (!confirm(`Start a new scan (${limitText})? This may take several minutes.`)) return;
 
             try {
-                // Build URL with limit parameter
                 let url = '/api/scan';
                 if (limit) {
                     url += `?limit=${limit}`;
@@ -92,14 +94,25 @@
                 const data = await res.json();
 
                 if (res.ok) {
-                    alert('Scan started! The page will refresh automatically when complete.');
+                    // Show progress panel
+                    const panel = document.getElementById('progressPanel');
+                    if (panel) {
+                        panel.classList.remove('hidden');
+                        // Clear old logs
+                        const logOutput = document.getElementById('logOutput');
+                        if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Starting scan...</div>';
+                    }
+
                     // Disable the button
                     const btn = document.getElementById('scanButton');
                     if (btn) {
                         btn.disabled = true;
                         btn.textContent = 'Scanning...';
                     }
-                    pollStatus();
+
+                    // Start polling for updates
+                    logIndex = 0;
+                    startPolling();
                 } else {
                     alert('Error: ' + data.detail);
                 }
@@ -108,25 +121,120 @@
             }
         }
 
-        async function pollStatus() {
-            const interval = setInterval(async () => {
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+
+            pollInterval = setInterval(async () => {
                 try {
                     const res = await fetch('/api/status');
                     const data = await res.json();
 
+                    // Update progress bar
+                    const progressBar = document.getElementById('progressBar');
+                    const progressPercent = document.getElementById('progressPercent');
+                    if (progressBar) progressBar.style.width = `${data.progress}%`;
+                    if (progressPercent) progressPercent.textContent = `${data.progress}%`;
+
+                    // Update stats
+                    const issuesCount = document.getElementById('issuesCount');
+                    const foundCount = document.getElementById('foundCount');
+                    if (issuesCount) issuesCount.textContent = `${data.issues_scanned}/${data.issues_total}`;
+                    if (foundCount) foundCount.textContent = data.advertisers_found;
+
+                    // Update current action
+                    const currentAction = document.getElementById('currentAction');
+                    if (currentAction && data.current_action) {
+                        currentAction.textContent = data.current_action;
+                    }
+
+                    // Update logs
+                    if (data.logs && data.logs.length > 0) {
+                        updateLogs(data.logs);
+                    }
+
+                    // Check if scan completed
                     if (data.status === 'idle') {
-                        clearInterval(interval);
-                        location.reload();
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+
+                        // Add completion message
+                        addLogEntry({
+                            time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
+                            level: 'info',
+                            message: '✨ Scan complete! Refreshing page in 3 seconds...'
+                        });
+
+                        setTimeout(() => location.reload(), 3000);
                     }
                 } catch (e) {
                     console.error('Poll error:', e);
                 }
-            }, 3000);
+            }, 1000);
+        }
+
+        function updateLogs(logs) {
+            const logOutput = document.getElementById('logOutput');
+            if (!logOutput) return;
+
+            // Only add new logs
+            const newLogs = logs.slice(logIndex);
+            logIndex = logs.length;
+
+            if (newLogs.length === 0) return;
+
+            // Clear initial message if this is the first real log
+            if (logOutput.children.length === 1 && logOutput.children[0].classList.contains('text-gray-500')) {
+                logOutput.innerHTML = '';
+            }
+
+            newLogs.forEach(log => addLogEntry(log));
+
+            // Auto-scroll to bottom
+            const container = document.getElementById('logsContainer');
+            if (container) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        function addLogEntry(log) {
+            const logOutput = document.getElementById('logOutput');
+            if (!logOutput) return;
+
+            const entry = document.createElement('div');
+            entry.className = 'flex';
+
+            // Color based on level
+            let textColor = 'text-gray-300';
+            if (log.level === 'error') textColor = 'text-red-400';
+            else if (log.message.includes('✅') || log.message.includes('🎉')) textColor = 'text-green-400';
+            else if (log.message.includes('📰') || log.message.includes('🔍')) textColor = 'text-blue-400';
+            else if (log.message.includes('Found:')) textColor = 'text-emerald-400';
+
+            entry.innerHTML = `
+                <span class="text-gray-500 mr-2 select-none">${log.time}</span>
+                <span class="${textColor}">${escapeHtml(log.message)}</span>
+            `;
+
+            logOutput.appendChild(entry);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function toggleLogs() {
+            const container = document.getElementById('logsContainer');
+            if (!container) return;
+
+            logsMinimized = !logsMinimized;
+            container.style.display = logsMinimized ? 'none' : 'block';
         }
 
         // Check if scan is running on page load
         {% if scan_status.is_running %}
-        pollStatus();
+        startPolling();
         {% endif %}
     </script>
 </body>

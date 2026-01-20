@@ -5,6 +5,7 @@ Provides:
 - Web dashboard to view and trigger scans
 - REST API for n8n/automation integration
 - Background job scheduling
+- Live progress logging
 """
 
 import os
@@ -15,10 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -38,6 +40,9 @@ DATA_FILE = OUTPUT_DIR / "latest_scan.json"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Thread pool for running sync Playwright code
+executor = ThreadPoolExecutor(max_workers=2)
+
 # Available scrapers
 SCRAPERS = {
     "healthcare_brew": {
@@ -52,17 +57,51 @@ SCRAPERS = {
     },
 }
 
-# Global state
+# Global state with live logs
 scan_status = {
     "is_running": False,
     "current_newsletter": None,
+    "current_action": None,
     "progress": 0,
+    "issues_total": 0,
+    "issues_scanned": 0,
+    "advertisers_found": 0,
     "last_scan": None,
     "last_error": None,
     "total_advertisers": 0,
+    "logs": [],  # Live log entries
 }
 
+# Lock for thread-safe status updates
+status_lock = threading.Lock()
+
 scheduler = AsyncIOScheduler()
+
+
+def add_log(message: str, level: str = "info"):
+    """Add a log entry to the live log."""
+    with status_lock:
+        entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+        }
+        scan_status["logs"].append(entry)
+        # Keep only last 100 log entries
+        if len(scan_status["logs"]) > 100:
+            scan_status["logs"] = scan_status["logs"][-100:]
+
+    # Also log to standard logger
+    if level == "error":
+        logger.error(message)
+    else:
+        logger.info(message)
+
+
+def update_status(**kwargs):
+    """Thread-safe status update."""
+    with status_lock:
+        scan_status.update(kwargs)
 
 
 @asynccontextmanager
@@ -94,6 +133,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if scheduler.running:
         scheduler.shutdown()
+    executor.shutdown(wait=False)
     logger.info("Application shutdown complete")
 
 
@@ -154,19 +194,25 @@ def get_advertisers() -> list[dict]:
         return []
 
 
-async def run_scan(newsletters: list[str] | None = None, limit: int | None = None):
-    """Run a newsletter scan."""
-    global scan_status
-
-    if scan_status["is_running"]:
-        raise HTTPException(400, "Scan already in progress")
-
-    scan_status["is_running"] = True
-    scan_status["progress"] = 0
-    scan_status["last_error"] = None
+def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None):
+    """
+    Run newsletter scan synchronously (called from thread pool).
+    This runs Playwright in a separate thread to avoid async conflicts.
+    """
+    # Clear logs and reset status
+    with status_lock:
+        scan_status["logs"] = []
+        scan_status["is_running"] = True
+        scan_status["progress"] = 0
+        scan_status["last_error"] = None
+        scan_status["advertisers_found"] = 0
+        scan_status["issues_scanned"] = 0
+        scan_status["issues_total"] = 0
 
     all_sponsors = []
     newsletters_to_scan = newsletters or [k for k, v in SCRAPERS.items() if v["enabled"]]
+
+    add_log(f"Starting scan of {len(newsletters_to_scan)} newsletter(s)...")
 
     try:
         categorizer = AdvertiserCategorizer()
@@ -175,21 +221,73 @@ async def run_scan(newsletters: list[str] | None = None, limit: int | None = Non
             if newsletter_id not in SCRAPERS:
                 continue
 
-            scan_status["current_newsletter"] = SCRAPERS[newsletter_id]["name"]
-            scan_status["progress"] = int((i / len(newsletters_to_scan)) * 100)
+            newsletter_name = SCRAPERS[newsletter_id]["name"]
+            update_status(
+                current_newsletter=newsletter_name,
+                current_action="Initializing browser",
+                progress=int((i / len(newsletters_to_scan)) * 100),
+            )
+
+            add_log(f"📰 Scanning {newsletter_name}...")
 
             scraper_class = SCRAPERS[newsletter_id]["class"]
 
-            # Run scraper (this is blocking, but we're in a background task)
-            with scraper_class(headless=True) as scraper:
-                sponsors = scraper.run_full_scan(limit=limit, show_progress=False)
+            try:
+                add_log("🌐 Starting browser...")
+                update_status(current_action="Starting browser")
 
-                for sponsor in sponsors:
-                    data = sponsor.to_dict()
-                    data = categorizer.enrich_sponsor(data)
-                    all_sponsors.append(data)
+                with scraper_class(headless=True) as scraper:
+                    # Discover issues
+                    add_log("🔍 Discovering newsletter issues...")
+                    update_status(current_action="Discovering issues")
+
+                    issues = scraper.discover_all_issues(limit=limit)
+
+                    update_status(issues_total=len(issues))
+                    add_log(f"📋 Found {len(issues)} issues to scan")
+
+                    if not issues:
+                        add_log("⚠️ No issues found", level="warning")
+                        continue
+
+                    # Scan each issue
+                    for j, issue_url in enumerate(issues):
+                        issue_num = j + 1
+                        update_status(
+                            current_action=f"Scanning issue {issue_num}/{len(issues)}",
+                            issues_scanned=issue_num,
+                            progress=int(((i + (j / len(issues))) / len(newsletters_to_scan)) * 100),
+                        )
+
+                        # Extract slug for display
+                        slug = issue_url.split("/")[-1][:30]
+                        add_log(f"  📄 [{issue_num}/{len(issues)}] {slug}...")
+
+                        try:
+                            sponsors = scraper.scrape_issue(issue_url)
+
+                            for sponsor in sponsors:
+                                data = sponsor.to_dict()
+                                data = categorizer.enrich_sponsor(data)
+                                all_sponsors.append(data)
+
+                                update_status(advertisers_found=len(all_sponsors))
+                                add_log(f"    ✅ Found: {sponsor.advertiser_name} ({data.get('niche_fit', 'Unknown')})")
+
+                        except Exception as e:
+                            add_log(f"    ❌ Error: {str(e)[:50]}", level="error")
+                            continue
+
+                add_log(f"✅ Finished {newsletter_name}")
+
+            except Exception as e:
+                add_log(f"❌ Error scanning {newsletter_name}: {e}", level="error")
+                continue
 
         # Deduplicate by domain
+        add_log("🔄 Deduplicating results...")
+        update_status(current_action="Deduplicating results")
+
         seen = set()
         unique = []
         for s in all_sponsors:
@@ -199,31 +297,54 @@ async def run_scan(newsletters: list[str] | None = None, limit: int | None = Non
                 unique.append(s)
 
         # Save results
+        add_log("💾 Saving results...")
+        update_status(current_action="Saving results")
         save_scan_data(unique)
 
-        scan_status["last_scan"] = datetime.now().isoformat()
-        scan_status["total_advertisers"] = len(unique)
-        scan_status["progress"] = 100
+        update_status(
+            last_scan=datetime.now().isoformat(),
+            total_advertisers=len(unique),
+            progress=100,
+        )
 
-        logger.info(f"Scan complete: found {len(unique)} unique advertisers")
+        add_log(f"🎉 Scan complete! Found {len(unique)} unique advertisers")
+
+        # Summary by fit
+        high = len([a for a in unique if "High" in a.get("niche_fit", "")])
+        medium = len([a for a in unique if "Medium" in a.get("niche_fit", "")])
+        low = len([a for a in unique if "Low" in a.get("niche_fit", "")])
+        add_log(f"   🟢 High fit: {high}  |  🟡 Medium: {medium}  |  🔴 Low: {low}")
 
     except Exception as e:
-        logger.error(f"Scan error: {e}")
-        scan_status["last_error"] = str(e)
+        add_log(f"❌ Scan failed: {e}", level="error")
+        update_status(last_error=str(e))
         raise
 
     finally:
-        scan_status["is_running"] = False
-        scan_status["current_newsletter"] = None
+        update_status(
+            is_running=False,
+            current_newsletter=None,
+            current_action=None,
+        )
+
+
+async def run_scan(newsletters: list[str] | None = None, limit: int | None = None):
+    """Run a newsletter scan in a thread pool to avoid async/sync conflicts."""
+    if scan_status["is_running"]:
+        raise HTTPException(400, "Scan already in progress")
+
+    # Run the synchronous scraper in a thread pool
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, run_scan_sync, newsletters, limit)
 
 
 async def run_scheduled_scan():
     """Run the scheduled daily scan."""
-    logger.info("Starting scheduled scan...")
+    add_log("⏰ Starting scheduled daily scan...")
     try:
         await run_scan(limit=50)  # Limit to 50 issues per newsletter for scheduled runs
     except Exception as e:
-        logger.error(f"Scheduled scan failed: {e}")
+        add_log(f"❌ Scheduled scan failed: {e}", level="error")
 
 
 # ============== Web Routes ==============
@@ -294,15 +415,33 @@ async def advertisers_page(request: Request, fit: str | None = None, category: s
 
 @app.get("/api/status")
 async def api_status():
-    """Get current scan status."""
-    return {
-        "status": "running" if scan_status["is_running"] else "idle",
-        "current_newsletter": scan_status["current_newsletter"],
-        "progress": scan_status["progress"],
-        "last_scan": scan_status["last_scan"],
-        "last_error": scan_status["last_error"],
-        "total_advertisers": scan_status["total_advertisers"],
-    }
+    """Get current scan status with live logs."""
+    with status_lock:
+        return {
+            "status": "running" if scan_status["is_running"] else "idle",
+            "current_newsletter": scan_status["current_newsletter"],
+            "current_action": scan_status["current_action"],
+            "progress": scan_status["progress"],
+            "issues_total": scan_status["issues_total"],
+            "issues_scanned": scan_status["issues_scanned"],
+            "advertisers_found": scan_status["advertisers_found"],
+            "last_scan": scan_status["last_scan"],
+            "last_error": scan_status["last_error"],
+            "total_advertisers": scan_status["total_advertisers"],
+            "logs": scan_status["logs"][-50:],  # Last 50 log entries
+        }
+
+
+@app.get("/api/logs")
+async def api_get_logs(since: int = 0):
+    """Get logs since a specific index (for polling)."""
+    with status_lock:
+        logs = scan_status["logs"][since:]
+        return {
+            "logs": logs,
+            "next_index": len(scan_status["logs"]),
+            "is_running": scan_status["is_running"],
+        }
 
 
 @app.post("/api/scan")
