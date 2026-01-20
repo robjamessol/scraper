@@ -73,6 +73,84 @@ class SponsorInfo:
 
 
 @dataclass
+class AffiliateLink:
+    """Information about an embedded affiliate/product link."""
+
+    advertiser_name: str
+    advertiser_domain: str | None
+    link_url: str
+    link_text: str
+    affiliate_network: str | None  # e.g., "Amazon", "ShareASale", "Impact"
+    issue_url: str
+    issue_date: str | None
+    source_newsletter: str
+    placement_type: str = "affiliate_link"
+    context_snippet: str = ""  # Text around the link for context
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for DataFrame/CSV export."""
+        return {
+            "advertiser_name": self.advertiser_name,
+            "advertiser_domain": self.advertiser_domain,
+            "placement_type": self.placement_type,
+            "ad_copy_snippet": self.context_snippet,
+            "full_ad_copy": self.context_snippet,
+            "ad_headline": self.link_text,
+            "product_service": None,
+            "call_to_action": self.link_text,
+            "landing_page_url": self.link_url,
+            "sponsor_url": self.link_url,
+            "issue_url": self.issue_url,
+            "issue_date": self.issue_date,
+            "source_newsletter": self.source_newsletter,
+            "category": "affiliate",
+            "niche_fit": "Unknown",
+            "confidence": "low",  # Affiliate links are less certain
+            "affiliate_network": self.affiliate_network,
+        }
+
+
+# Known affiliate network domains and their names
+AFFILIATE_NETWORKS = {
+    # Amazon
+    "amzn.to": "Amazon",
+    "amazon.com": "Amazon",
+    "amazon.co.uk": "Amazon",
+    # ShareASale
+    "shrsl.com": "ShareASale",
+    "shareasale.com": "ShareASale",
+    # CJ Affiliate (Commission Junction)
+    "dpbolvw.net": "CJ Affiliate",
+    "jdoqocy.com": "CJ Affiliate",
+    "tkqlhce.com": "CJ Affiliate",
+    "anrdoezrs.com": "CJ Affiliate",
+    "cj.com": "CJ Affiliate",
+    # Impact
+    "pntrs.com": "Impact",
+    "pntra.com": "Impact",
+    "prf.hn": "Impact",
+    "impactradius.com": "Impact",
+    # Rakuten
+    "linksynergy.com": "Rakuten",
+    "click.linksynergy.com": "Rakuten",
+    # Skimlinks
+    "go.redirectingat.com": "Skimlinks",
+    "go.skimresources.com": "Skimlinks",
+    # Awin
+    "awin1.com": "Awin",
+    "zenaps.com": "Awin",
+    # PartnerStack
+    "partnerstack.com": "PartnerStack",
+    # Refersion
+    "refersion.com": "Refersion",
+    # Other affiliate indicators
+    "pxf.io": "PartnerStack",
+    "geni.us": "Geniuslink",
+    "howl.me": "Howl",
+}
+
+
+@dataclass
 class NewsletterConfig:
     """Configuration for a newsletter source."""
 
@@ -650,3 +728,107 @@ class BaseScraper(ABC):
         )
 
         return unique_sponsors
+
+    def extract_affiliate_links(
+        self,
+        html: str,
+        issue_url: str,
+        issue_date: str | None = None,
+    ) -> list[AffiliateLink]:
+        """
+        Extract embedded affiliate/product links from newsletter content.
+
+        Finds links to known affiliate networks and product pages that may
+        indicate advertising relationships not captured by sponsor patterns.
+
+        Args:
+            html: Full HTML content of the newsletter
+            issue_url: URL of the newsletter issue
+            issue_date: Date of the issue
+
+        Returns:
+            List of AffiliateLink objects
+        """
+        soup = BeautifulSoup(html, "lxml")
+        affiliate_links = []
+        seen_domains = set()
+
+        # Skip newsletter's own domain and common non-affiliate links
+        skip_domains = {
+            "morningbrew.com", "healthcare-brew.com", "healthcarebrew.com",
+            "twitter.com", "x.com", "facebook.com", "linkedin.com",
+            "instagram.com", "youtube.com", "google.com", "apple.com",
+            "spotify.com", "mailto:", "tel:",
+        }
+
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            link_text = clean_text(a.get_text())
+
+            # Skip empty or internal links
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            # Extract domain
+            domain = extract_domain(href, strip_marketing=False)
+            if not domain:
+                continue
+
+            # Skip newsletter's own links
+            if any(skip in domain.lower() for skip in skip_domains):
+                continue
+
+            # Check if this is an affiliate network link
+            affiliate_network = None
+            for network_domain, network_name in AFFILIATE_NETWORKS.items():
+                if network_domain in domain.lower():
+                    affiliate_network = network_name
+                    break
+
+            # Also check for affiliate indicators in URL params
+            href_lower = href.lower()
+            if not affiliate_network:
+                if "tag=" in href_lower and "amazon" in href_lower:
+                    affiliate_network = "Amazon"
+                elif any(param in href_lower for param in ["?ref=", "&ref=", "affiliate", "partner_id", "aff_id"]):
+                    affiliate_network = "Unknown Affiliate"
+
+            # If it's an affiliate link, process it
+            if affiliate_network:
+                # Try to resolve to get actual advertiser domain
+                actual_domain = domain
+                if affiliate_network != "Amazon":  # Amazon links are the actual product
+                    try:
+                        resolved = resolve_redirect_url(href, timeout=2.0)
+                        if resolved:
+                            actual_domain = extract_domain(resolved, strip_marketing=True) or domain
+                    except Exception:
+                        pass
+
+                # Skip if we've already seen this domain
+                if actual_domain in seen_domains:
+                    continue
+                seen_domains.add(actual_domain)
+
+                # Extract context (text around the link)
+                parent = a.parent
+                context = ""
+                if parent:
+                    context = clean_text(parent.get_text())[:200]
+
+                # Try to determine advertiser name from link text or domain
+                advertiser_name = link_text if link_text and len(link_text) > 2 else actual_domain.split(".")[0].title()
+
+                affiliate_links.append(AffiliateLink(
+                    advertiser_name=advertiser_name,
+                    advertiser_domain=actual_domain,
+                    link_url=href,
+                    link_text=link_text,
+                    affiliate_network=affiliate_network,
+                    issue_url=issue_url,
+                    issue_date=issue_date,
+                    source_newsletter=self.config.name.lower().replace(" ", "_"),
+                    context_snippet=context,
+                ))
+
+        return affiliate_links

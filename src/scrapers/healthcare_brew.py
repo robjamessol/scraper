@@ -224,6 +224,29 @@ class HealthcareBrewScraper(BaseScraper):
                         sponsor.issue_date = issue_date
                         sponsors.append(sponsor)
 
+            # Also extract affiliate links embedded in the content
+            affiliate_links = self.extract_affiliate_links(content_html, issue_url, issue_date)
+            for aff in affiliate_links:
+                normalized = normalize_company_name(aff.advertiser_name)
+                if normalized not in seen_sponsors and aff.advertiser_domain:
+                    seen_sponsors.add(normalized)
+                    # Convert to SponsorInfo for consistent output
+                    sponsor = SponsorInfo(
+                        advertiser_name=aff.advertiser_name,
+                        advertiser_domain=aff.advertiser_domain,
+                        placement_type="affiliate_link",
+                        ad_copy_snippet=aff.context_snippet,
+                        issue_url=issue_url,
+                        issue_date=issue_date,
+                        source_newsletter=self.config.name.lower().replace(" ", "_"),
+                        confidence="low",
+                        sponsor_url=aff.link_url,
+                        landing_page_url=aff.link_url,
+                        full_ad_copy=aff.context_snippet,
+                    )
+                    sponsors.append(sponsor)
+                    logger.debug(f"Found affiliate link: {aff.advertiser_name} via {aff.affiliate_network}")
+
         except Exception as e:
             logger.error(f"Error scraping issue {issue_url}: {e}")
 
