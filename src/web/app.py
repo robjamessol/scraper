@@ -297,7 +297,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 unique.append(s)
 
         # Contact enrichment with Apollo.io (if configured)
-        apollo = ApolloEnricher()
+        def apollo_log(msg, level="info"):
+            add_log(f"      {msg}", level)
+
+        apollo = ApolloEnricher(log_callback=apollo_log)
         if apollo.is_configured:
             add_log("📇 Enriching contacts via Apollo.io...")
             update_status(current_action="Finding contacts")

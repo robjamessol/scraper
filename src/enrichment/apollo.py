@@ -123,12 +123,13 @@ class ApolloEnricher:
     # Seniority levels to prioritize
     SENIORITIES = ["director", "vp", "c_suite", "founder", "manager"]
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None, log_callback: callable = None):
         """
         Initialize Apollo enricher.
 
         Args:
             api_key: Apollo.io API key. If not provided, reads from APOLLO_API_KEY env var.
+            log_callback: Optional callback function for logging (e.g., for live UI updates)
         """
         self.api_key = api_key or os.getenv("APOLLO_API_KEY")
         if not self.api_key or self.api_key == "your_key_here":
@@ -139,6 +140,19 @@ class ApolloEnricher:
         self.stats = ApolloStats()
         self._last_request_time = 0
         self._min_request_interval = 0.5  # 500ms between requests for rate limiting
+        self._log_callback = log_callback
+
+    def _log(self, message: str, level: str = "info"):
+        """Log a message, optionally to callback."""
+        if level == "error":
+            logger.error(message)
+        elif level == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)
+
+        if self._log_callback:
+            self._log_callback(message, level)
 
     @property
     def is_configured(self) -> bool:
@@ -210,6 +224,7 @@ class ApolloEnricher:
         }
 
         try:
+            logger.debug(f"Apollo API request: {endpoint}")
             response = self.client.post(url, json=data, headers=headers)
 
             if response.status_code == 429:
@@ -217,8 +232,13 @@ class ApolloEnricher:
                 logger.warning("Apollo rate limit hit, backing off...")
                 raise RateLimitError("Rate limit exceeded")
 
-            response.raise_for_status()
-            return response.json()
+            if response.status_code != 200:
+                logger.error(f"Apollo API {endpoint} returned {response.status_code}: {response.text[:200]}")
+                return None
+
+            result = response.json()
+            logger.debug(f"Apollo API {endpoint} response keys: {list(result.keys()) if result else 'None'}")
+            return result
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
@@ -277,11 +297,18 @@ class ApolloEnricher:
         # Add seniority filter for better results
         search_data["person_seniorities"] = self.SENIORITIES
 
-        logger.info(f"Apollo search for domain: {domain}, titles: {titles[:2] if titles else 'any'}...")
+        self._log(f"Searching Apollo for {domain}...")
+
+        # Try the API search endpoint first (some API keys require this)
         result = self._api_request("mixed_people/search", search_data)
 
+        # If that fails, try the alternate endpoint
+        if not result or not result.get("people"):
+            self._log(f"Trying alternate endpoint for {domain}...")
+            result = self._api_request("mixed_people/api_search", search_data)
+
         if not result:
-            logger.warning(f"Apollo search returned no result for {domain}")
+            self._log(f"Apollo search returned no result for {domain}", "warning")
             return []
 
         self.stats.search_calls += 1
@@ -289,7 +316,7 @@ class ApolloEnricher:
         # Log what we got back
         people_count = len(result.get("people", []))
         total_count = result.get("pagination", {}).get("total_entries", 0)
-        logger.info(f"Apollo search for {domain}: found {people_count} people (total: {total_count})")
+        self._log(f"Found {people_count} people at {domain}")
 
         prospects = []
         for person in result.get("people", []):
@@ -404,10 +431,10 @@ class ApolloEnricher:
             List of Contact objects
         """
         if not self.is_configured or not prospects:
-            logger.warning(f"Bulk enrich skipped: configured={self.is_configured}, prospects={len(prospects) if prospects else 0}")
+            self._log(f"Bulk enrich skipped: configured={self.is_configured}, prospects={len(prospects) if prospects else 0}", "warning")
             return []
 
-        logger.info(f"Bulk enriching {len(prospects)} prospects...")
+        self._log(f"Enriching {len(prospects)} prospects...")
         contacts = []
 
         # Process in batches of 10
