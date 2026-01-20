@@ -208,7 +208,7 @@
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Niche Fit</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Placement</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
                 </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200">
@@ -239,8 +239,18 @@
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 capitalize">
                         {{ adv.source_newsletter.replace('_', ' ') }}
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 capitalize">
-                        {{ adv.placement_type.replace('_', ' ') }}
+                    <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        {% if adv.primary_email %}
+                        <div class="text-gray-900">{{ adv.primary_contact or 'Contact' }}</div>
+                        <div class="text-xs text-gray-500">
+                            {{ adv.primary_email }}
+                            {% if adv.primary_email_verified %}
+                            <span class="text-green-600 ml-1">✓</span>
+                            {% endif %}
+                        </div>
+                        {% else %}
+                        <span class="text-gray-400">No contact</span>
+                        {% endif %}
                     </td>
                 </tr>
                 {% else %}
