@@ -8,7 +8,24 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS
+
 logger = logging.getLogger(__name__)
+
+
+# Link services that should not be scraped (not actual company websites)
+LINK_SERVICE_DOMAINS = {
+    "linkby.com", "go.linkby.com",
+    "linktr.ee", "linktree.com",
+    "taplink.cc",
+    "stan.store",
+    "beacons.ai",
+    "hoo.be",
+    "snipfeed.co",
+    "plink.com",
+    "bit.ly",
+    "tinyurl.com",
+}
 
 
 @dataclass
@@ -111,14 +128,29 @@ class WebsiteScraper:
         Returns:
             WebsiteScrapeResult with found contacts
         """
+        # Clean up domain - strip protocol, www, marketing subdomains
+        if domain.startswith(("http://", "https://")):
+            domain = urlparse(domain).netloc
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        # Strip marketing subdomains (get.expertvoice.com -> expertvoice.com)
+        original_domain = domain
+        domain = strip_marketing_subdomain(domain)
+
+        if domain != original_domain:
+            self._log(f"Stripped subdomain: {original_domain} → {domain}")
+
         result = WebsiteScrapeResult(domain=domain)
 
-        # Ensure domain has protocol
-        if not domain.startswith(("http://", "https://")):
-            base_url = f"https://{domain}"
-        else:
-            base_url = domain
-            domain = urlparse(domain).netloc
+        # Skip link service domains (they're not actual company sites)
+        if domain.lower() in LINK_SERVICE_DOMAINS or any(domain.lower().endswith(f".{d}") for d in LINK_SERVICE_DOMAINS):
+            self._log(f"Skipping link service domain: {domain}", "warning")
+            result.errors.append(f"Link service domain, not company website: {domain}")
+            return result
+
+        # Build base URL
+        base_url = f"https://{domain}"
 
         self._log(f"Scraping {domain} for contacts...")
 

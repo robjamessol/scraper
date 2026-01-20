@@ -176,10 +176,24 @@ class ApolloEnricher:
             "rate_limit_hits": self.stats.rate_limit_hits,
         }
 
+    # Marketing/tracking subdomains to strip (get root domain instead)
+    STRIP_SUBDOMAINS = {
+        "get", "go", "info", "promo", "try", "start", "join", "buy", "shop",
+        "links", "link", "click", "track", "t", "l", "r", "email", "mail",
+        "news", "newsletter", "offers", "deals", "landing", "lp", "pages",
+        "invite", "signup", "register", "app", "web", "m", "mobile",
+        "partners", "partner", "affiliate", "ref", "campaign", "ads", "ad",
+        "learn", "discover", "explore", "hello", "hi", "meet", "connect",
+        "invest", "demo", "trial", "free", "www2", "secure", "my", "account",
+    }
+
     @staticmethod
     def clean_domain(domain: str | None) -> str | None:
         """
         Clean domain to just the domain name (no protocol, path, etc.)
+
+        Also strips common marketing subdomains like get.*, go.*, invest.*, etc.
+        to get the root company domain.
 
         IMPORTANT: Apollo expects domain only, not full URL.
         """
@@ -200,7 +214,22 @@ class ApolloEnricher:
         # Remove port if present
         domain = domain.split(":")[0]
 
-        return domain.lower().strip() if domain else None
+        domain = domain.lower().strip()
+
+        if not domain:
+            return None
+
+        # Strip marketing/tracking subdomains to get root domain
+        # e.g., get.expertvoice.com -> expertvoice.com
+        # e.g., invest.xtremeone.com -> xtremeone.com
+        parts = domain.split(".")
+        if len(parts) > 2:
+            # Check if first part is a marketing subdomain
+            if parts[0] in ApolloEnricher.STRIP_SUBDOMAINS:
+                # Return without the subdomain
+                domain = ".".join(parts[1:])
+
+        return domain
 
     def _rate_limit_wait(self):
         """Ensure minimum time between requests."""

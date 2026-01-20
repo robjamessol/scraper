@@ -10,19 +10,45 @@ logger = logging.getLogger(__name__)
 
 # Known tracking/redirect domains that should be resolved
 TRACKING_DOMAINS = {
+    # Morning Brew / Healthcare Brew
     "links.morningbrew.com",
     "link.morningbrew.com",
     "links.healthcare-brew.com",
     "link.healthcare-brew.com",
     "email.morningbrew.com",
+    # Link shorteners
     "t.co",
     "bit.ly",
     "tinyurl.com",
     "ow.ly",
     "buff.ly",
+    # Link/affiliate services (NOT the actual company)
+    "go.linkby.com",
+    "linkby.com",
+    "linktr.ee",
+    "taplink.cc",
+    "stan.store",
+    "beacons.ai",
+    "hoo.be",
+    "snipfeed.co",
+    "plink.com",
+    # Email tracking
     "mailtrack.io",
     "click.convertkit-mail.com",
     "click.convertkit-mail2.com",
+    "mailchimp.com",
+    "list-manage.com",
+}
+
+# Marketing/tracking subdomains to strip to get root company domain
+MARKETING_SUBDOMAINS = {
+    "get", "go", "info", "promo", "try", "start", "join", "buy", "shop",
+    "links", "link", "click", "track", "t", "l", "r", "email", "mail",
+    "news", "newsletter", "offers", "deals", "landing", "lp", "pages",
+    "invite", "signup", "register", "app", "web", "m", "mobile",
+    "partners", "partner", "affiliate", "ref", "campaign", "ads", "ad",
+    "learn", "discover", "explore", "hello", "hi", "meet", "connect",
+    "invest", "demo", "trial", "free", "www2", "secure", "my", "account",
 }
 
 
@@ -80,12 +106,43 @@ def is_tracking_domain(url: str) -> bool:
     return domain.lower() in TRACKING_DOMAINS
 
 
-def extract_domain(url: str) -> str | None:
+def strip_marketing_subdomain(domain: str) -> str:
+    """
+    Strip common marketing/tracking subdomains to get the root company domain.
+
+    Examples:
+        >>> strip_marketing_subdomain("get.expertvoice.com")
+        'expertvoice.com'
+        >>> strip_marketing_subdomain("invest.xtremeone.com")
+        'xtremeone.com'
+        >>> strip_marketing_subdomain("healthedge.com")
+        'healthedge.com'
+
+    Args:
+        domain: Domain that may have marketing subdomain
+
+    Returns:
+        Domain with marketing subdomain stripped
+    """
+    if not domain:
+        return domain
+
+    parts = domain.split(".")
+    if len(parts) > 2:
+        # Check if first part is a marketing subdomain
+        if parts[0].lower() in MARKETING_SUBDOMAINS:
+            return ".".join(parts[1:])
+
+    return domain
+
+
+def extract_domain(url: str, strip_marketing: bool = True) -> str | None:
     """
     Extract the base domain from a URL.
 
     Args:
         url: Full URL
+        strip_marketing: If True, also strips marketing subdomains like get.*, go.*, etc.
 
     Returns:
         Domain without www prefix, or None if invalid
@@ -93,6 +150,8 @@ def extract_domain(url: str) -> str | None:
     Examples:
         >>> extract_domain("https://www.healthedge.com/landing?utm=123")
         'healthedge.com'
+        >>> extract_domain("https://get.expertvoice.com/promo")
+        'expertvoice.com'
         >>> extract_domain("http://example.org/page")
         'example.org'
     """
@@ -115,7 +174,14 @@ def extract_domain(url: str) -> str | None:
         if ":" in domain:
             domain = domain.split(":")[0]
 
-        return domain if domain else None
+        if not domain:
+            return None
+
+        # Strip marketing subdomains
+        if strip_marketing:
+            domain = strip_marketing_subdomain(domain)
+
+        return domain
 
     except Exception:
         return None
