@@ -721,7 +721,7 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Quick website scrape (homepage + /advertise + /contact)
+        # Step 1: Website scrape (Claude suggests pages, fast regex extraction)
         self._log(f"Step 1: Scraping website {domain}...")
         website_contacts = self._scrape_website_contacts(domain, company_name=company_name)
 
@@ -1176,8 +1176,8 @@ class ApolloEnricher:
         """
         Scrape a company website for contact information.
 
-        Fast approach: check homepage + /advertise + /contact only.
-        No Claude, no browser - just quick HTTP + regex.
+        Uses Claude for ONE smart navigation call, then fast regex extraction.
+        SMTP verification is disabled (that was the bottleneck).
 
         Args:
             domain: Domain to scrape
@@ -1189,9 +1189,9 @@ class ApolloEnricher:
         try:
             scraper = WebsiteScraper(
                 timeout=5.0,
-                max_pages=3,  # Homepage + /advertise + /contact only
+                max_pages=6,  # Enough to find emails on most sites
                 use_browser=False,
-                use_claude=False,  # Disabled for speed
+                use_claude=True,  # ONE call to suggest best pages
                 log_callback=self._log_callback,
             )
             result = scraper.scrape_domain(domain, company_name=company_name)
