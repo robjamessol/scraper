@@ -53,7 +53,7 @@ SCRAPERS = {
     "morning_brew": {
         "name": "Morning Brew",
         "class": MorningBrewScraper,
-        "enabled": True,
+        "enabled": False,  # Disabled for now - focus on Healthcare Brew
     },
 }
 
@@ -296,46 +296,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 seen.add(key)
                 unique.append(s)
 
-        # Contact enrichment with Apollo.io (if configured)
-        def apollo_log(msg, level="info"):
-            add_log(f"      {msg}", level)
-
-        apollo = ApolloEnricher(log_callback=apollo_log)
-        if apollo.is_configured:
-            add_log("📇 Enriching contacts via Apollo.io...")
-            update_status(current_action="Finding contacts")
-
-            enriched = []
-            for idx, adv in enumerate(unique):
-                name = adv.get("advertiser_name", "Unknown")
-                domain = adv.get("advertiser_domain", "")
-
-                add_log(f"  👤 [{idx+1}/{len(unique)}] {name} @ {domain or '(no domain)'}...")
-
-                try:
-                    enriched_adv = apollo.enrich_advertiser(adv, max_contacts=3)
-                    contacts_found = enriched_adv.get("contacts_found", 0)
-                    verified_count = enriched_adv.get("verified_emails", 0)
-
-                    if contacts_found > 0:
-                        primary = enriched_adv.get("primary_contact", "")
-                        title = enriched_adv.get("primary_title", "")
-                        verified_badge = "✓" if enriched_adv.get("primary_email_verified") else ""
-                        add_log(f"    ✅ Found {contacts_found} contact(s), {verified_count} verified: {primary} ({title}) {verified_badge}")
-                    else:
-                        add_log(f"    ⚪ No contacts found")
-
-                    enriched.append(enriched_adv)
-                except Exception as e:
-                    add_log(f"    ❌ Error: {str(e)[:40]}", level="error")
-                    enriched.append(adv)
-
-            unique = enriched
-            stats = apollo.get_stats()
-            add_log(f"📇 Enrichment complete. {stats['contacts_found']} contacts, {stats['emails_verified']} verified emails, {stats['total_credits_used']} credits used")
-        else:
-            add_log("ℹ️ Apollo.io not configured - skipping contact enrichment")
-            add_log("   Set APOLLO_API_KEY in Railway to enable")
+        # Contact enrichment DISABLED - just get company info from newsletters
+        # User will create separate email finder later
+        add_log("ℹ️ Contact enrichment disabled - outputting company info only")
 
         # Save results
         add_log("💾 Saving results...")
