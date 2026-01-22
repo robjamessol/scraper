@@ -23,7 +23,6 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .website_scraper import WebsiteScraper, WebsiteContact
-from .email_finder import EmailFinder, FoundEmail
 
 logger = logging.getLogger(__name__)
 
@@ -721,7 +720,7 @@ class ApolloEnricher:
         contacts = []
         seen_emails = set()
 
-        # Step 1: Website scrape (Claude suggests pages, fast regex extraction)
+        # Step 1: Fast website scrape (key pages only, no Claude)
         self._log(f"Step 1: Scraping website {domain}...")
         website_contacts = self._scrape_website_contacts(domain, company_name=company_name)
 
@@ -741,51 +740,12 @@ class ApolloEnricher:
                 seen_emails.add(wc.email.lower())
 
         # Step 1b removed for speed - Claude extraction is slow
-        # Website scraping + email patterns are sufficient
+        # Website scraping + Apollo are sufficient - no fake pattern guesses
 
-        # Step 2: Generate email patterns (no SMTP - too slow, just guesses)
-        if len(contacts) < max_contacts:
-            self._log(f"Step 2: Generating email patterns for {domain}...")
-
-            email_finder = EmailFinder(
-                verify_smtp=False,  # Disabled - too slow
-                timeout=3.0,
-                max_workers=3,
-                log_callback=self._log_callback,
-            )
-            # Just generate top patterns, no verification
-            found_emails = email_finder.find_emails(domain, max_results=max_contacts, max_verify=0)
-
-            added_count = 0
-            verified_count = 0
-            for fe in found_emails:
-                if len(contacts) >= max_contacts:
-                    break
-                if fe.email and fe.email.lower() not in seen_emails:
-                    # Don't use email prefix as contact name - it's misleading
-                    # Mark as pattern-generated so it's clear this isn't a real person
-                    contact = Contact(
-                        name=None,  # No real name available for pattern-generated emails
-                        email=fe.email,
-                        email_status="smtp_verified" if fe.verified else "pattern_guess",
-                        title=f"General ({fe.email_type})" if fe.email_type else None,
-                        phone=None,
-                        linkedin_url=None,
-                        confidence="high" if fe.verified else "low",
-                    )
-                    contacts.append(contact)
-                    seen_emails.add(fe.email.lower())
-                    added_count += 1
-                    if fe.verified:
-                        verified_count += 1
-
-            if added_count > 0:
-                self._log(f"Email finder: Added {added_count} contact(s) ({verified_count} SMTP verified)")
-
-        # Step 3: Use Apollo to find additional contacts (FREE search)
+        # Step 2: Use Apollo to find contacts (verified data)
         if self.is_configured and len(contacts) < max_contacts:
             remaining = max_contacts - len(contacts)
-            self._log(f"Step 3: Searching Apollo for {remaining} more contact(s)...")
+            self._log(f"Step 2: Searching Apollo for {remaining} more contact(s)...")
             apollo_contacts = self.search_and_enrich(domain, remaining + 2)
 
             if apollo_contacts:
@@ -1176,8 +1136,8 @@ class ApolloEnricher:
         """
         Scrape a company website for contact information.
 
-        Uses Claude for ONE smart navigation call, then fast regex extraction.
-        SMTP verification is disabled (that was the bottleneck).
+        Fast approach: checks key pages directly (no Claude API calls).
+        Pages: homepage, /contact, /advertise, /about, /team
 
         Args:
             domain: Domain to scrape
@@ -1189,9 +1149,9 @@ class ApolloEnricher:
         try:
             scraper = WebsiteScraper(
                 timeout=5.0,
-                max_pages=6,  # Enough to find emails on most sites
+                max_pages=5,  # Homepage + 4 key pages
                 use_browser=False,
-                use_claude=True,  # ONE call to suggest best pages
+                use_claude=False,  # Disabled for speed - just check key pages
                 log_callback=self._log_callback,
             )
             result = scraper.scrape_domain(domain, company_name=company_name)
