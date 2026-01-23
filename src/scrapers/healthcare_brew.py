@@ -142,7 +142,9 @@ class HealthcareBrewScraper(BaseScraper):
 
             # Apply limit if specified
             if limit:
+                logger.info(f"Applying limit: {limit} (from {len(issue_urls)} total)")
                 issue_urls = issue_urls[:limit]
+                logger.info(f"After limit: {len(issue_urls)} issues")
 
         except Exception as e:
             logger.error(f"Error discovering issues: {e}")

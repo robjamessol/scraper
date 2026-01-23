@@ -213,7 +213,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
     all_sponsors = []
     newsletters_to_scan = newsletters or [k for k, v in SCRAPERS.items() if v["enabled"]]
 
-    add_log(f"Starting scan of {len(newsletters_to_scan)} newsletter(s)...")
+    add_log(f"Starting scan of {len(newsletters_to_scan)} newsletter(s), limit={limit} issues...")
 
     try:
         categorizer = AdvertiserCategorizer()
@@ -302,69 +302,83 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
         add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
 
-        # ===== PHASE 2: Scrape company websites for contacts =====
+        # ===== PHASE 2: Scrape company websites for contacts (PARALLEL) =====
         if unique:
-            add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies...")
+            add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies (parallel)...")
             update_status(current_action="Finding contacts")
 
-            # Create ONE scraper instance and reuse it (MUCH faster)
-            scraper = WebsiteScraper(
-                timeout=5.0,  # Reduced for speed
-                max_pages=12,  # Enough to check all contact page patterns
-                use_browser=True,  # Enable browser fallback for JS sites
-                use_claude=True,   # Claude finds contact pages
-                log_callback=add_log,
-            )
-
             total = len(unique)
-            for idx, company in enumerate(unique):
+            completed = [0]  # Use list to allow mutation in nested function
+            results_lock = threading.Lock()
+
+            def scrape_company(idx_company):
+                """Scrape a single company - runs in thread pool."""
+                idx, company = idx_company
                 domain = company.get("domain")
                 name = company.get("company_name", "Unknown")
 
                 if not domain:
                     add_log(f"  ⚪ [{idx+1}/{total}] {name} - no domain, skipping")
-                    company["emails"] = ""
-                    company["phones"] = ""
-                    continue
-
-                update_status(
-                    current_action=f"Scraping {idx+1}/{total}: {domain}",
-                    progress=50 + int((idx / max(total, 1)) * 50),
-                )
+                    for i in range(5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
+                    return
 
                 add_log(f"  🌐 [{idx+1}/{total}] {domain}...")
 
                 try:
+                    # Each thread gets its own scraper (thread-safe)
+                    scraper = WebsiteScraper(
+                        timeout=5.0,
+                        max_pages=12,
+                        use_browser=True,
+                        use_claude=True,
+                        log_callback=add_log,
+                    )
                     result = scraper.scrape_domain(domain)
+                    scraper.close()
 
-                    # Store contacts in separate columns (email_1, title_1, email_2, title_2, etc.)
-                    # This makes CSV easier to work with
+                    # Store contacts in separate columns
                     contact_count = 0
                     if result and result.contacts:
-                        for i, contact in enumerate(result.contacts[:5]):  # Max 5 contacts
+                        for i, contact in enumerate(result.contacts[:5]):
                             if contact.email:
                                 company[f"email_{i+1}"] = contact.email
                                 company[f"title_{i+1}"] = contact.title or ""
                                 company[f"name_{i+1}"] = contact.name or ""
                                 contact_count += 1
 
-                    # Fill empty columns for consistent CSV structure
+                    # Fill empty columns
                     for i in range(contact_count, 5):
                         company[f"email_{i+1}"] = ""
                         company[f"title_{i+1}"] = ""
                         company[f"name_{i+1}"] = ""
 
                     if contact_count > 0:
-                        add_log(f"    ✅ Found {contact_count} relevant contact(s)")
+                        add_log(f"    ✅ {domain}: Found {contact_count} contact(s)")
                     else:
-                        add_log(f"    ⚪ No contacts found")
+                        add_log(f"    ⚪ {domain}: No contacts found")
 
                 except Exception as e:
-                    add_log(f"    ❌ Error: {str(e)[:50]}", level="error")
+                    add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
                     for i in range(5):
                         company[f"email_{i+1}"] = ""
                         company[f"title_{i+1}"] = ""
                         company[f"name_{i+1}"] = ""
+                finally:
+                    with results_lock:
+                        completed[0] += 1
+                        update_status(
+                            current_action=f"Finding contacts ({completed[0]}/{total})",
+                            progress=50 + int((completed[0] / max(total, 1)) * 50),
+                        )
+
+            # Run in parallel with 3 workers (balance speed vs resource usage)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                list(executor.map(scrape_company, enumerate(unique)))
+
+            add_log(f"📊 Phase 2 complete: processed {total} companies")
         else:
             add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
 
