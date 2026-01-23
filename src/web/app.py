@@ -307,6 +307,15 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies...")
             update_status(current_action="Finding contacts")
 
+            # Create ONE scraper instance and reuse it (MUCH faster)
+            scraper = WebsiteScraper(
+                timeout=5.0,  # Reduced for speed
+                max_pages=5,  # Fewer pages per site for speed
+                use_browser=True,  # Enable browser fallback for JS sites
+                use_claude=True,   # Claude finds contact pages
+                log_callback=add_log,
+            )
+
             total = len(unique)
             for idx, company in enumerate(unique):
                 domain = company.get("domain")
@@ -326,12 +335,6 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 add_log(f"  🌐 [{idx+1}/{total}] {domain}...")
 
                 try:
-                    scraper = WebsiteScraper(
-                        timeout=6.0,  # Reduced for speed
-                        max_pages=6,
-                        use_browser=True,  # Enable browser fallback for JS sites
-                        use_claude=True,   # Claude finds contact pages
-                    )
                     result = scraper.scrape_domain(domain)
 
                     # Collect all emails and phones

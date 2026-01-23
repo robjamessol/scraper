@@ -130,8 +130,8 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 8.0,  # Increased for reliability
-        max_pages: int = 10,   # Increased for more thorough scraping
+        timeout: float = 5.0,  # Reduced for speed
+        max_pages: int = 6,    # Balanced - enough to find contacts
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
@@ -165,7 +165,7 @@ class WebsiteScraper:
         }
 
     def _get_claude_agent(self):
-        """Get or create Claude agent (lazy initialization)."""
+        """Get or create Claude agent (lazy initialization, reused across calls)."""
         if self._claude_agent is None and self.use_claude:
             try:
                 from .claude_agent import ClaudeAgent
@@ -177,6 +177,15 @@ class WebsiteScraper:
                 self._log("Claude agent not available", "warning")
                 self._claude_agent = None
         return self._claude_agent
+
+    def close(self):
+        """Clean up resources (call when done with all scraping)."""
+        if self._claude_agent:
+            try:
+                self._claude_agent.close()
+            except Exception:
+                pass
+            self._claude_agent = None
 
     def _log(self, message: str, level: str = "info"):
         """Log a message, optionally to callback."""
@@ -249,10 +258,10 @@ class WebsiteScraper:
                 for url in urls[:self.max_pages]:
                     try:
                         self._log(f"Browser loading: {url}")
-                        page.goto(url, wait_until="networkidle", timeout=12000)
+                        page.goto(url, wait_until="domcontentloaded", timeout=8000)
 
-                        # Wait a bit for any dynamic content
-                        page.wait_for_timeout(1000)
+                        # Brief wait for dynamic content (reduced for speed)
+                        page.wait_for_timeout(500)
 
                         # Get rendered HTML
                         html = page.content()
@@ -499,13 +508,8 @@ class WebsiteScraper:
         # Phase 3 removed for speed - Claude extraction is too slow
         # Email patterns will be generated and verified via SMTP in apollo.py instead
 
-        # Clean up Claude agent
-        if self._claude_agent:
-            try:
-                self._claude_agent.close()
-            except Exception:
-                pass
-            self._claude_agent = None
+        # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
+        # Call scraper.close() when done with all scraping to clean up
 
         result.contacts = self._prioritize_contacts(list(all_emails.values()))
 
