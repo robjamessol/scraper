@@ -28,6 +28,7 @@ import pandas as pd
 
 from ..scrapers import HealthcareBrewScraper, MorningBrewScraper, SponsorInfo
 from ..enrichment import AdvertiserCategorizer, ApolloEnricher, get_apollo_signup_instructions
+from ..enrichment.website_scraper import WebsiteScraper
 
 
 logger = logging.getLogger(__name__)
@@ -304,8 +305,6 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         # ===== PHASE 2: Scrape company websites for contacts =====
         add_log("🔍 Phase 2: Finding contact info on company websites...")
         update_status(current_action="Finding contacts")
-
-        from ..enrichment.website_scraper import WebsiteScraper
 
         for idx, company in enumerate(unique):
             domain = company.get("domain")
