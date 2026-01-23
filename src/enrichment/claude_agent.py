@@ -18,6 +18,9 @@ from typing import Any
 
 import httpx
 
+# Import HTML cleaning and few-shot examples from website_scraper
+from .website_scraper import html_to_clean_text, EMAIL_CLASSIFICATION_EXAMPLES
+
 logger = logging.getLogger(__name__)
 
 
@@ -788,10 +791,21 @@ Respond ONLY with valid JSON:
     "contact_form_url": "URL if contact form found for advertising, else null"
 }
 
-Return {"contacts": []} if no suitable emails found. DO NOT make up emails."""
+Return {"contacts": []} if no suitable emails found. DO NOT make up emails.
 
-        # Get text content + important HTML for email detection
-        html_sample = html[:20000]
+**Few-Shot Classification Examples:**
+{EMAIL_CLASSIFICATION_EXAMPLES}"""
+
+        # Convert HTML to clean text (removes scripts, styles, reduces tokens significantly)
+        # This typically reduces 20KB of HTML to ~3-5KB of relevant text
+        clean_text = html_to_clean_text(html, preserve_links=True)
+
+        # If clean text extraction failed or is too short, fall back to raw HTML
+        if not clean_text or len(clean_text) < 100:
+            html_sample = html[:20000]
+        else:
+            # Use clean text (much more efficient) - can include more content
+            html_sample = clean_text[:15000]
 
         user_prompt = f"""Analyze this page from {company_name} and extract contact information for ad sales outreach:
 
