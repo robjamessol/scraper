@@ -38,7 +38,7 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS, resolve_domain_redirect, guess_alternative_domains
+from ..utils.helpers import strip_marketing_subdomain, resolve_domain_redirect, guess_alternative_domains
 
 logger = logging.getLogger(__name__)
 
@@ -682,19 +682,27 @@ def verify_email_smtp(email: str, timeout: float = 5.0) -> bool:
         True if email appears valid, False otherwise
     """
     import socket
-    import dns.resolver
+
+    # Try to import dnspython (optional dependency)
+    try:
+        import dns.resolver
+        DNS_AVAILABLE = True
+    except ImportError:
+        DNS_AVAILABLE = False
 
     try:
         # Extract domain
         domain = email.split("@")[-1]
 
-        # Get MX records
-        try:
-            mx_records = dns.resolver.resolve(domain, "MX")
-            mx_host = str(sorted(mx_records, key=lambda x: x.preference)[0].exchange).rstrip(".")
-        except Exception:
-            # No MX records - try A record as fallback
-            mx_host = domain
+        # Get MX records (if dnspython available)
+        mx_host = domain  # Default fallback
+        if DNS_AVAILABLE:
+            try:
+                mx_records = dns.resolver.resolve(domain, "MX")
+                mx_host = str(sorted(mx_records, key=lambda x: x.preference)[0].exchange).rstrip(".")
+            except Exception:
+                # No MX records - use domain directly
+                pass
 
         # Connect to SMTP server
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -754,8 +762,7 @@ def extract_contacts_from_screenshot(
         return []
 
     try:
-        import httpx
-
+        # httpx already imported at module level
         headers = {
             "Content-Type": "application/json",
             "X-API-Key": api_key,
@@ -908,8 +915,9 @@ class WebsiteScraper:
         self._playwright = None
 
         # Common headers to avoid being blocked
+        # NOTE: User-Agent is set dynamically via get_random_user_agent() for rotation
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": get_random_user_agent(),  # Rotated per instance
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
