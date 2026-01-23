@@ -470,6 +470,7 @@ async def advertisers_page(request: Request, fit: str | None = None, category: s
             "advertisers": advertisers,
             "filter_fit": fit,
             "filter_category": category,
+            "filter_has_email": has_email,
             "scan_status": scan_status,
         },
     )

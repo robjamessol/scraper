@@ -22,11 +22,11 @@
     <div class="bg-gray-900 rounded p-4 border border-gray-800">
         <div class="flex items-center justify-between">
             <div>
-                <p class="text-sm font-medium text-gray-400">High Fit</p>
-                <p class="text-3xl font-bold text-green-400 mt-1">{{ stats.high_fit }}</p>
+                <p class="text-sm font-medium text-gray-400">With Emails</p>
+                <p class="text-3xl font-bold text-green-400 mt-1">{{ stats.with_emails }}</p>
             </div>
             <div class="bg-green-900/50 rounded-full p-3">
-                <span class="text-2xl">&#x1F7E2;</span>
+                <span class="text-2xl">&#x2709;</span>
             </div>
         </div>
     </div>
@@ -34,11 +34,11 @@
     <div class="bg-gray-900 rounded p-4 border border-gray-800">
         <div class="flex items-center justify-between">
             <div>
-                <p class="text-sm font-medium text-gray-400">Medium Fit</p>
-                <p class="text-3xl font-bold text-yellow-400 mt-1">{{ stats.medium_fit }}</p>
+                <p class="text-sm font-medium text-gray-400">Without Emails</p>
+                <p class="text-3xl font-bold text-yellow-400 mt-1">{{ stats.without_emails }}</p>
             </div>
             <div class="bg-yellow-900/50 rounded-full p-3">
-                <span class="text-2xl">&#x1F7E1;</span>
+                <span class="text-2xl">&#x2753;</span>
             </div>
         </div>
     </div>
@@ -46,11 +46,11 @@
     <div class="bg-gray-900 rounded p-4 border border-gray-800">
         <div class="flex items-center justify-between">
             <div>
-                <p class="text-sm font-medium text-gray-400">Low Fit</p>
-                <p class="text-3xl font-bold text-red-400 mt-1">{{ stats.low_fit }}</p>
+                <p class="text-sm font-medium text-gray-400">Issues Scanned</p>
+                <p class="text-3xl font-bold text-indigo-400 mt-1">{{ scan_status.issues_scanned or 0 }}</p>
             </div>
-            <div class="bg-red-900/50 rounded-full p-3">
-                <span class="text-2xl">&#x1F534;</span>
+            <div class="bg-indigo-900/50 rounded-full p-3">
+                <span class="text-2xl">&#x1F4C4;</span>
             </div>
         </div>
     </div>
@@ -179,8 +179,8 @@
     <div class="bg-gray-900 rounded p-4 border border-gray-800">
         <h2 class="text-lg font-semibold text-gray-100 mb-3">Quick Actions</h2>
         <div class="space-y-2">
-            <a href="/advertisers?fit=high" class="block w-full text-left px-3 py-2 bg-green-900/30 text-green-400 rounded hover:bg-green-900/50 transition text-sm border border-green-800/50">
-                View High-Fit Advertisers ({{ stats.high_fit }})
+            <a href="/advertisers?has_email=yes" class="block w-full text-left px-3 py-2 bg-green-900/30 text-green-400 rounded hover:bg-green-900/50 transition text-sm border border-green-800/50">
+                View With Emails ({{ stats.with_emails }})
             </a>
             <a href="/api/advertisers/export" class="block w-full text-left px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition text-sm border border-gray-700">
                 Download Full CSV
@@ -205,9 +205,8 @@
             <thead class="bg-gray-800/50">
                 <tr>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Company</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Category</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Niche Fit</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Source</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Sector</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Sponsor Type</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Contact</th>
                 </tr>
             </thead>
@@ -217,37 +216,25 @@
                     <td class="px-6 py-4 whitespace-nowrap">
                         <div class="flex items-center">
                             <div>
-                                <div class="text-sm font-medium text-gray-100">{{ adv.advertiser_name }}</div>
-                                <div class="text-sm text-gray-500">{{ adv.advertiser_domain or 'N/A' }}</div>
+                                <div class="text-sm font-medium text-gray-100">{{ adv.company_name or adv.advertiser_name or 'Unknown' }}</div>
+                                <div class="text-sm text-gray-500">{{ adv.domain or adv.advertiser_domain or 'N/A' }}</div>
                             </div>
                         </div>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-800 text-gray-300 capitalize">
-                            {{ adv.category.replace('_', ' ') }}
+                            {{ (adv.sector or adv.category or 'other').replace('_', ' ') }}
                         </span>
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        {% if 'High' in adv.niche_fit %}
-                        <span class="text-green-400 font-medium">{{ adv.niche_fit }}</span>
-                        {% elif 'Medium' in adv.niche_fit %}
-                        <span class="text-yellow-400 font-medium">{{ adv.niche_fit }}</span>
-                        {% else %}
-                        <span class="text-red-400 font-medium">{{ adv.niche_fit }}</span>
-                        {% endif %}
-                    </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400 capitalize">
-                        {{ adv.source_newsletter.replace('_', ' ') }}
+                        {{ (adv.sponsor_type or 'unknown').replace('_', ' ') }}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        {% if adv.primary_email %}
-                        <div class="text-gray-100">{{ adv.primary_contact or 'Contact' }}</div>
-                        <div class="text-xs text-gray-500">
-                            {{ adv.primary_email }}
-                            {% if adv.primary_email_verified %}
-                            <span class="text-green-400 ml-1">✓</span>
-                            {% endif %}
-                        </div>
+                        {% if adv.emails %}
+                        <div class="text-gray-100">{{ adv.emails.split(';')[0] }}</div>
+                        {% if adv.phones %}
+                        <div class="text-xs text-gray-500">{{ adv.phones.split(';')[0] }}</div>
+                        {% endif %}
                         {% else %}
                         <span class="text-gray-600">No contact</span>
                         {% endif %}
@@ -255,7 +242,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                    <td colspan="4" class="px-6 py-12 text-center text-gray-500">
                         No advertisers yet. Run a scan to discover advertisers from competitor newsletters.
                     </td>
                 </tr>
