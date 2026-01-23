@@ -76,6 +76,35 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
+# Job titles that are relevant for advertising/partnership outreach
+RELEVANT_JOB_TITLES = [
+    # Advertising/Media
+    "advertising", "media", "ad sales", "ad ops", "media sales",
+    # Marketing
+    "marketing", "growth", "brand", "content", "digital marketing",
+    # Partnerships/Business Development
+    "partnership", "affiliate", "business development", "bd", "strategic",
+    # Communications/PR
+    "communications", "pr", "public relations", "press", "corporate communications",
+    # Sales/Commercial
+    "sales", "commercial", "revenue", "account",
+    # Leadership with relevant focus
+    "cmo", "chief marketing", "vp marketing", "vp media", "head of marketing",
+    "director of marketing", "director of media", "director of partnerships",
+]
+
+# Job titles to EXCLUDE (not relevant for advertising outreach)
+EXCLUDED_JOB_TITLES = [
+    "engineer", "developer", "software", "technical", "tech",
+    "legal", "counsel", "attorney", "lawyer",
+    "hr", "human resources", "recruiting", "talent",
+    "finance", "accounting", "cfo", "controller",
+    "it ", "information technology", "security", "devops",
+    "product manager", "product owner", "ux", "design",
+    "customer support", "customer service", "support",
+    "operations", "logistics", "supply chain",
+]
+
 # Default pages to check for contact info (balanced for coverage AND speed)
 CONTACT_PAGE_PATTERNS = [
     # Advertising/sales - highest priority
@@ -865,11 +894,66 @@ class WebsiteScraper:
 
         return list(dict.fromkeys(contact_urls))  # Deduplicate
 
+    def _is_relevant_title(self, title: str | None) -> bool:
+        """Check if a job title is relevant for advertising/partnership outreach."""
+        if not title:
+            return True  # No title = can't exclude, keep it
+
+        title_lower = title.lower()
+
+        # Check for excluded titles first
+        for excluded in EXCLUDED_JOB_TITLES:
+            if excluded in title_lower:
+                return False
+
+        # Check if it matches relevant titles
+        for relevant in RELEVANT_JOB_TITLES:
+            if relevant in title_lower:
+                return True
+
+        # If we have a title but it doesn't match relevant ones,
+        # only keep if it's a generic/department email
+        return False
+
     def _prioritize_contacts(
         self,
         contacts: list[WebsiteContact],
     ) -> list[WebsiteContact]:
-        """Sort contacts by priority for ad sales outreach."""
+        """
+        Filter and sort contacts for ad sales outreach.
+
+        Only keeps:
+        - Contacts with relevant job titles (marketing, media, partnerships, etc.)
+        - Generic department emails (info@, contact@, advertising@)
+        - Removes irrelevant roles (engineering, legal, HR, etc.)
+        """
+        filtered = []
+
+        for contact in contacts:
+            email_prefix = contact.email.lower().split("@")[0]
+
+            # Always keep advertising/partnership specific emails
+            if contact.email_type == "advertising":
+                filtered.append(contact)
+                continue
+
+            # Always keep generic contact emails (info@, contact@, hello@)
+            generic_prefixes = ["info", "contact", "hello", "inquiries", "enquiries",
+                              "advertising", "ads", "partnerships", "media", "press",
+                              "marketing", "sales", "business"]
+            if any(email_prefix.startswith(p) for p in generic_prefixes):
+                filtered.append(contact)
+                continue
+
+            # For personal emails, check if the job title is relevant
+            if contact.title:
+                if self._is_relevant_title(contact.title):
+                    filtered.append(contact)
+                else:
+                    self._log(f"    Filtered out: {contact.email} ({contact.title}) - not relevant role")
+            else:
+                # No title - keep it but lower priority
+                filtered.append(contact)
 
         def priority_score(contact: WebsiteContact) -> int:
             score = 0
@@ -890,21 +974,23 @@ class WebsiteScraper:
                 score += 15
                 # Extra bonus for relevant titles
                 title_lower = contact.title.lower()
-                if any(kw in title_lower for kw in ["marketing", "sales", "partner", "business"]):
-                    score += 30
+                for relevant in RELEVANT_JOB_TITLES:
+                    if relevant in title_lower:
+                        score += 30
+                        break
             if contact.phone:
                 score += 10
             if contact.linkedin_url:
                 score += 10
 
             # Specific prefix bonuses
-            priority_prefixes = ["advertising", "ads", "partnerships", "marketing", "sales"]
+            priority_prefixes = ["advertising", "ads", "partnerships", "marketing", "sales", "media"]
             if any(prefix in email_prefix for prefix in priority_prefixes):
                 score += 40
 
             return score
 
-        return sorted(contacts, key=priority_score, reverse=True)
+        return sorted(filtered, key=priority_score, reverse=True)
 
 
 def scrape_website_for_contacts(

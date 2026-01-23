@@ -230,10 +230,10 @@
                         {{ (adv.sponsor_type or 'unknown').replace('_', ' ') }}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        {% if adv.emails %}
-                        <div class="text-gray-100">{{ adv.emails.split(';')[0] }}</div>
-                        {% if adv.phones %}
-                        <div class="text-xs text-gray-500">{{ adv.phones.split(';')[0] }}</div>
+                        {% if adv.email_1 %}
+                        <div class="text-gray-100">{{ adv.email_1 }}</div>
+                        {% if adv.title_1 %}
+                        <div class="text-xs text-gray-500">{{ adv.title_1 }}</div>
                         {% endif %}
                         {% else %}
                         <span class="text-gray-600">No contact</span>

@@ -337,28 +337,34 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 try:
                     result = scraper.scrape_domain(domain)
 
-                    # Collect all emails and phones
-                    emails = []
-                    phones = []
+                    # Store contacts in separate columns (email_1, title_1, email_2, title_2, etc.)
+                    # This makes CSV easier to work with
+                    contact_count = 0
                     if result and result.contacts:
-                        for contact in result.contacts:
-                            if contact.email and contact.email not in emails:
-                                emails.append(contact.email)
-                            if contact.phone and contact.phone not in phones:
-                                phones.append(contact.phone)
+                        for i, contact in enumerate(result.contacts[:5]):  # Max 5 contacts
+                            if contact.email:
+                                company[f"email_{i+1}"] = contact.email
+                                company[f"title_{i+1}"] = contact.title or ""
+                                company[f"name_{i+1}"] = contact.name or ""
+                                contact_count += 1
 
-                    company["emails"] = "; ".join(emails[:5])  # Max 5 emails
-                    company["phones"] = "; ".join(phones[:3])  # Max 3 phones
+                    # Fill empty columns for consistent CSV structure
+                    for i in range(contact_count, 5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
 
-                    if emails:
-                        add_log(f"    ✅ Found {len(emails)} email(s), {len(phones)} phone(s)")
+                    if contact_count > 0:
+                        add_log(f"    ✅ Found {contact_count} relevant contact(s)")
                     else:
                         add_log(f"    ⚪ No contacts found")
 
                 except Exception as e:
                     add_log(f"    ❌ Error: {str(e)[:50]}", level="error")
-                    company["emails"] = ""
-                    company["phones"] = ""
+                    for i in range(5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
         else:
             add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
 
@@ -374,7 +380,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         )
 
         # Summary
-        with_emails = len([c for c in unique if c.get("emails")])
+        with_emails = len([c for c in unique if c.get("email_1")])
         add_log(f"🎉 Complete! {len(unique)} companies, {with_emails} with contact info")
 
     except Exception as e:
@@ -417,7 +423,7 @@ async def dashboard(request: Request):
     advertisers = get_advertisers()
 
     # Calculate stats
-    with_emails = len([a for a in advertisers if a.get("emails")])
+    with_emails = len([a for a in advertisers if a.get("email_1")])
     stats = {
         "total": len(advertisers),
         "with_emails": with_emails,
@@ -460,9 +466,9 @@ async def advertisers_page(request: Request, fit: str | None = None, category: s
 
     # Apply filters
     if has_email == "yes":
-        advertisers = [a for a in advertisers if a.get("emails")]
+        advertisers = [a for a in advertisers if a.get("email_1")]
     elif has_email == "no":
-        advertisers = [a for a in advertisers if not a.get("emails")]
+        advertisers = [a for a in advertisers if not a.get("email_1")]
     if category:
         advertisers = [a for a in advertisers if a.get("sector") == category or a.get("category") == category]
 
@@ -559,9 +565,9 @@ async def api_get_advertisers(
     # Apply filters
     if has_email is not None:
         if has_email:
-            advertisers = [a for a in advertisers if a.get("emails")]
+            advertisers = [a for a in advertisers if a.get("email_1")]
         else:
-            advertisers = [a for a in advertisers if not a.get("emails")]
+            advertisers = [a for a in advertisers if not a.get("email_1")]
     if category:
         advertisers = [a for a in advertisers if a.get("sector") == category]
     if sponsor_type:

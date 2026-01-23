@@ -56,8 +56,8 @@
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Company</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Sector</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Sponsor Type</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Emails</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Phones</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Contacts (Email + Title)</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Count</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Links</th>
                 </tr>
             </thead>
@@ -76,24 +76,42 @@
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-400 capitalize">
                         {{ (adv.sponsor_type or 'unknown').replace('_', ' ') }}
                     </td>
-                    <td class="px-6 py-4 text-sm text-gray-300 max-w-xs">
-                        {% if adv.emails %}
-                        <div class="space-y-1">
-                            {% for email in adv.emails.split(';')[:3] %}
-                            <div class="text-xs">{{ email.strip() }}</div>
-                            {% endfor %}
+                    <td class="px-6 py-4 text-sm text-gray-300 max-w-md">
+                        {% if adv.email_1 %}
+                        <div class="space-y-2">
+                            {% if adv.email_1 %}
+                            <div>
+                                <div class="text-xs text-gray-100">{{ adv.email_1 }}</div>
+                                {% if adv.title_1 %}<div class="text-xs text-gray-500">{{ adv.title_1 }}</div>{% endif %}
+                            </div>
+                            {% endif %}
+                            {% if adv.email_2 %}
+                            <div>
+                                <div class="text-xs text-gray-100">{{ adv.email_2 }}</div>
+                                {% if adv.title_2 %}<div class="text-xs text-gray-500">{{ adv.title_2 }}</div>{% endif %}
+                            </div>
+                            {% endif %}
+                            {% if adv.email_3 %}
+                            <div>
+                                <div class="text-xs text-gray-100">{{ adv.email_3 }}</div>
+                                {% if adv.title_3 %}<div class="text-xs text-gray-500">{{ adv.title_3 }}</div>{% endif %}
+                            </div>
+                            {% endif %}
                         </div>
                         {% else %}
                         <span class="text-gray-600">-</span>
                         {% endif %}
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-300">
-                        {% if adv.phones %}
-                        <div class="space-y-1">
-                            {% for phone in adv.phones.split(';')[:2] %}
-                            <div class="text-xs">{{ phone.strip() }}</div>
-                            {% endfor %}
-                        </div>
+                        {# Contact count indicator #}
+                        {% set contact_count = 0 %}
+                        {% if adv.email_1 %}{% set contact_count = contact_count + 1 %}{% endif %}
+                        {% if adv.email_2 %}{% set contact_count = contact_count + 1 %}{% endif %}
+                        {% if adv.email_3 %}{% set contact_count = contact_count + 1 %}{% endif %}
+                        {% if adv.email_4 %}{% set contact_count = contact_count + 1 %}{% endif %}
+                        {% if adv.email_5 %}{% set contact_count = contact_count + 1 %}{% endif %}
+                        {% if contact_count > 0 %}
+                        <span class="text-green-400">{{ contact_count }} contact(s)</span>
                         {% else %}
                         <span class="text-gray-600">-</span>
                         {% endif %}
