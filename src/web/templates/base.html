@@ -161,10 +161,11 @@
                         addLogEntry({
                             time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
                             level: 'info',
-                            message: '✨ Scan complete! Refreshing page in 3 seconds...'
+                            message: '✨ Scan complete!'
                         });
 
-                        setTimeout(() => location.reload(), 3000);
+                        // Show completion buttons instead of auto-reload
+                        showScanComplete();
                     }
                 } catch (e) {
                     console.error('Poll error:', e);
@@ -267,6 +268,37 @@
             } catch (e) {
                 alert('Error clearing data: ' + e.message);
             }
+        }
+
+        function showScanComplete() {
+            // Update scan button to show completion state
+            const btn = document.getElementById('scanButton');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Start New Scan';
+            }
+
+            // Show completion actions in the progress panel
+            const currentAction = document.getElementById('currentAction');
+            if (currentAction) {
+                currentAction.innerHTML = `
+                    <span class="text-green-400 font-medium">✅ Scan Complete!</span>
+                    <div class="flex gap-2 mt-2">
+                        <button onclick="copyLogs()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs">
+                            📋 Copy Logs
+                        </button>
+                        <button onclick="location.reload()" class="bg-primary hover:bg-indigo-500 text-white px-3 py-1 rounded text-xs">
+                            🔄 View Results
+                        </button>
+                    </div>
+                `;
+            }
+
+            // Also update progress to 100%
+            const progressBar = document.getElementById('progressBar');
+            const progressPercent = document.getElementById('progressPercent');
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressPercent) progressPercent.textContent = '100%';
         }
 
         // Check if scan is running on page load
