@@ -328,9 +328,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 try:
                     scraper = WebsiteScraper(
                         timeout=10.0,
-                        max_pages=6,
+                        max_pages=8,
                         use_browser=False,
-                        use_claude=False,
+                        use_claude=True,  # Claude analyzes homepage to find contact pages
                     )
                     result = scraper.scrape_domain(domain)
 
