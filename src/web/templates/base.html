@@ -252,6 +252,23 @@
             }
         }
 
+        async function clearData() {
+            if (!confirm('Clear all advertiser data? This cannot be undone.')) return;
+
+            try {
+                const res = await fetch('/api/advertisers/clear', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    alert('Data cleared! ' + data.message);
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Error clearing data: ' + e.message);
+            }
+        }
+
         // Check if scan is running on page load
         {% if scan_status.is_running %}
         startPolling();

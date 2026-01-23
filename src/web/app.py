@@ -540,6 +540,25 @@ async def api_clear_logs():
     return {"status": "cleared"}
 
 
+@app.post("/api/advertisers/clear")
+async def api_clear_advertisers():
+    """Clear all advertiser data."""
+    try:
+        data_file = DATA_DIR / "scan_results.json"
+        if data_file.exists():
+            data_file.unlink()
+
+        # Also clear logs
+        with status_lock:
+            scan_status["logs"] = []
+            scan_status["total_advertisers"] = 0
+            scan_status["advertisers_found"] = 0
+
+        return {"status": "cleared", "message": "All advertiser data cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/scan")
 async def api_start_scan(
     background_tasks: BackgroundTasks,
