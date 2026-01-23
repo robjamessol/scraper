@@ -112,7 +112,8 @@ class HealthcareBrewScraper(BaseScraper):
             page.wait_for_timeout(2000)
 
             # Scroll to load all issues (they may lazy-load)
-            self._scroll_to_load_all(page, max_scrolls=30)
+            # More scrolls + longer wait for archives with many issues
+            self._scroll_to_load_all(page, max_scrolls=50, wait_ms=1000)
 
             # Get page content
             html = page.content()

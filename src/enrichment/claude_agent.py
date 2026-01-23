@@ -21,6 +21,58 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def extract_json_from_response(text: str) -> dict | list | None:
+    """
+    Extract JSON from Claude's response, handling extra text before/after.
+
+    Claude sometimes adds explanation text before or after the JSON.
+    This function finds and extracts the JSON portion.
+    """
+    if not text:
+        return None
+
+    text = text.strip()
+
+    # Try direct parsing first (fastest path)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find JSON object (starts with { ends with })
+    obj_start = text.find('{')
+    if obj_start != -1:
+        # Find matching closing brace
+        depth = 0
+        for i, char in enumerate(text[obj_start:], obj_start):
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[obj_start:i+1])
+                    except json.JSONDecodeError:
+                        break
+
+    # Find JSON array (starts with [ ends with ])
+    arr_start = text.find('[')
+    if arr_start != -1:
+        depth = 0
+        for i, char in enumerate(text[arr_start:], arr_start):
+            if char == '[':
+                depth += 1
+            elif char == ']':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[arr_start:i+1])
+                    except json.JSONDecodeError:
+                        break
+
+    return None
+
+
 @dataclass
 class AdAnalysis:
     """Structured analysis of ad copy."""
@@ -660,12 +712,10 @@ Look for nested navigation (e.g., About Us containing Press & Media submenu)."""
         if not response:
             return None
 
-        try:
-            result = json.loads(response)
-            return result
-        except json.JSONDecodeError:
+        result = extract_json_from_response(response)
+        if result is None:
             self._log(f"Failed to parse navigation analysis JSON", "warning")
-            return None
+        return result
 
     def extract_contacts_from_page(
         self,
@@ -820,14 +870,11 @@ Return JSON array of paths to visit."""
         if not response:
             return []
 
-        try:
-            paths = json.loads(response)
-            if isinstance(paths, list):
-                from urllib.parse import urljoin
-                return [urljoin(base_url, p) for p in paths if isinstance(p, str)]
-            return []
-        except json.JSONDecodeError:
-            return []
+        paths = extract_json_from_response(response)
+        if isinstance(paths, list):
+            from urllib.parse import urljoin
+            return [urljoin(base_url, p) for p in paths if isinstance(p, str)]
+        return []
 
     def prioritize_contacts(
         self,

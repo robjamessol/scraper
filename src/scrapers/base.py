@@ -266,20 +266,21 @@ class BaseScraper(ABC):
             logger.error(f"Error loading {url}: {e}")
             raise
 
-    def _scroll_to_load_all(self, page: Page, max_scrolls: int = 50):
+    def _scroll_to_load_all(self, page: Page, max_scrolls: int = 50, wait_ms: int = 500):
         """
         Scroll page to trigger lazy loading of all content.
 
         Args:
             page: Playwright page instance
             max_scrolls: Maximum number of scroll attempts
+            wait_ms: Milliseconds to wait between scrolls (longer = more content loads)
         """
         previous_height = 0
 
         for i in range(max_scrolls):
             # Scroll to bottom
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(wait_ms)
 
             # Check if we've reached the end
             current_height = page.evaluate("document.body.scrollHeight")

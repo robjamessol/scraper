@@ -313,6 +313,85 @@ class WebsiteScraper:
             if playwright:
                 playwright.stop()
 
+    def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
+        """
+        Load homepage in browser and find REAL contact-related links.
+
+        Instead of guessing URLs like /contact, /press etc, this reads the
+        actual links from the JS-rendered page.
+
+        Returns:
+            List of URLs to contact-related pages (found on the actual page)
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return []
+
+        browser = self._get_browser()
+        if not browser:
+            return []
+
+        contact_urls = []
+        contact_keywords = [
+            # High priority for advertising/partnerships
+            "advertise", "advertising", "partnerships", "partner", "sponsor",
+            "media kit", "mediakit", "media-kit",
+            # Contact pages
+            "contact", "connect", "get in touch", "reach us",
+            # Press/media (often has contacts)
+            "press", "media", "newsroom", "news room", "press room",
+            "media relations", "press & media", "press and media",
+            # About/team
+            "about", "team", "leadership", "company",
+        ]
+
+        context = browser.new_context(
+            user_agent=self.headers["User-Agent"],
+            viewport={"width": 1280, "height": 720},
+        )
+
+        try:
+            page = context.new_page()
+            self._log(f"Browser reading links from: {base_url}")
+            page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+            page.wait_for_timeout(1000)  # Wait for JS to render
+
+            # Find all links on the page
+            links = page.query_selector_all('a[href]')
+            base_domain = urlparse(base_url).netloc
+
+            for link in links:
+                try:
+                    href = link.get_attribute("href") or ""
+                    text = (link.inner_text() or "").lower().strip()
+
+                    # Skip empty/external/js links
+                    if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                        continue
+
+                    # Build full URL
+                    full_url = urljoin(base_url, href)
+
+                    # Only same-domain links
+                    if urlparse(full_url).netloc != base_domain:
+                        continue
+
+                    # Check if text or href contains contact keywords
+                    href_lower = href.lower()
+                    if any(kw in text or kw.replace(" ", "-") in href_lower or kw.replace(" ", "") in href_lower
+                           for kw in contact_keywords):
+                        if full_url not in contact_urls:
+                            contact_urls.append(full_url)
+
+                except Exception:
+                    continue
+
+        except Exception as e:
+            self._log(f"Browser link discovery failed: {e}", "warning")
+        finally:
+            context.close()
+
+        return contact_urls[:15]  # Limit to 15 most relevant links
+
     def _scrape_with_browser(self, domain: str, urls: list[str]) -> list[WebsiteContact]:
         """
         Scrape URLs using Playwright for JavaScript-rendered content.
@@ -752,15 +831,23 @@ class WebsiteScraper:
 
         if len(all_emails) < 2 and self.use_browser:
             self._log(f"Few emails via HTTP, trying browser for JS-rendered content...")
-            # Extended URL list for browser - include press/media pages!
-            priority_urls = [base_url]
+
+            # First, load homepage in browser and find REAL links (not guessing)
+            real_links = self._find_links_with_browser(base_url, domain)
+            if real_links:
+                self._log(f"Browser found {len(real_links)} contact-related links")
+
+            # Combine real links with fallback patterns (real links first)
+            priority_urls = [base_url] + real_links
             browser_patterns = [
                 "/advertise", "/contact", "/contact-us", "/about", "/about-us",
-                "/press", "/media", "/press-media", "/newsroom",  # ADDED press/media
+                "/press", "/media", "/press-media", "/newsroom",
                 "/team", "/partnerships", "/media-kit",
             ]
             for pattern in browser_patterns:
-                priority_urls.append(urljoin(base_url, pattern))
+                url = urljoin(base_url, pattern)
+                if url not in priority_urls:
+                    priority_urls.append(url)
 
             browser_contacts = self._scrape_with_browser(domain, priority_urls)
             for contact in browser_contacts:
