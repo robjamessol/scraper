@@ -479,24 +479,42 @@ class WebsiteScraper:
                         if new_url not in visited_urls and new_url not in urls_to_visit:
                             urls_to_visit.append(new_url)
 
-                    # ONE Claude call to analyze homepage and suggest pages
+                    # ONE Claude call to analyze homepage - Claude "clicks through" like a human
                     agent = self._get_claude_agent()
                     if agent:
-                        self._log(f"Asking Claude to analyze {domain} structure...")
+                        self._log(f"Claude analyzing {domain} navigation...")
                         nav_analysis = agent.analyze_website_navigation(
                             html, domain, "find advertising/marketing contact information"
                         )
-                        if nav_analysis and nav_analysis.get("suggested_paths"):
-                            suggested = nav_analysis["suggested_paths"]
-                            self._log(f"Claude suggested pages: {suggested[:5]}")
-                            # Add Claude's suggestions to the front of the queue
-                            for path in reversed(suggested[:8]):
-                                full_url = urljoin(base_url, path)
-                                if full_url not in visited_urls and full_url not in urls_to_visit:
-                                    urls_to_visit.insert(1, full_url)  # After current position
+
+                        if nav_analysis:
+                            # Get suggested paths (already prioritized by Claude)
+                            suggested = nav_analysis.get("suggested_paths", [])
+
+                            # Also get nested navigation paths (e.g., About → Press)
+                            nested = nav_analysis.get("nested_navigation", [])
+                            for nested_item in nested:
+                                for child_path in nested_item.get("likely_children", []):
+                                    if child_path not in suggested:
+                                        suggested.append(child_path)
+
+                            # Get priority-specific paths
+                            priorities = nav_analysis.get("priorities", {})
+                            for priority_type in ["advertising_media", "press_communications", "general_contact"]:
+                                for path in priorities.get(priority_type, []):
+                                    if path not in suggested:
+                                        suggested.append(path)
+
+                            if suggested:
+                                self._log(f"Claude suggested {len(suggested)} paths: {suggested[:5]}")
+                                # Add Claude's suggestions to the front of the queue (high priority)
+                                for path in reversed(suggested[:12]):
+                                    full_url = urljoin(base_url, path)
+                                    if full_url not in visited_urls and full_url not in urls_to_visit:
+                                        urls_to_visit.insert(1, full_url)
 
                             if nav_analysis.get("navigation_notes"):
-                                self._log(f"Navigation: {nav_analysis['navigation_notes']}")
+                                self._log(f"  {nav_analysis['navigation_notes'][:100]}")
             except Exception as e:
                 self._log(f"Homepage/Claude analysis failed: {e}", "warning")
 

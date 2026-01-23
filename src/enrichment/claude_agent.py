@@ -58,10 +58,17 @@ class ClaudeAgent:
 
     Uses Claude API for tasks where AI understanding provides significant
     value over rule-based extraction.
+
+    Model selection:
+    - Haiku: Fast & cheap - used for navigation, link finding, simple tasks
+    - Sonnet: Balanced - used for contact extraction, complex analysis
     """
 
     API_URL = "https://api.anthropic.com/v1/messages"
-    DEFAULT_MODEL = "claude-sonnet-4-20250514"  # Fast and capable
+    # Use Haiku by default (cheapest & fastest) - good for navigation tasks
+    MODEL_HAIKU = "claude-3-5-haiku-20241022"
+    MODEL_SONNET = "claude-sonnet-4-20250514"
+    DEFAULT_MODEL = MODEL_HAIKU  # Use Haiku for speed/cost
 
     def __init__(
         self,
@@ -74,7 +81,7 @@ class ClaudeAgent:
 
         Args:
             api_key: Anthropic API key. If not provided, reads from ANTHROPIC_API_KEY env var.
-            model: Model to use. Defaults to claude-sonnet-4-20250514.
+            model: Model to use. Defaults to claude-3-5-haiku (fastest/cheapest).
             log_callback: Optional callback for logging.
         """
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -84,7 +91,7 @@ class ClaudeAgent:
         if not self.api_key:
             logger.warning("Claude API key not configured. AI extraction disabled.")
 
-        self.client = httpx.Client(timeout=15.0)  # Reduced for speed
+        self.client = httpx.Client(timeout=12.0)  # Reduced for speed
         self._request_count = 0
         self._total_tokens = 0
 
@@ -586,52 +593,69 @@ Return structured email data."""
         goal: str = "find advertising/marketing contact information",
     ) -> dict | None:
         """
-        Use Claude to analyze a website's homepage and suggest which pages to visit.
+        Use Claude to analyze a website and suggest navigation paths like a human would.
 
-        Much smarter than keyword matching - understands site structure and context.
+        This is the "click through" intelligence - Claude identifies the best paths
+        to find contacts, including nested navigation (e.g., About Us → Press & Media).
 
         Args:
-            html: Homepage HTML content
+            html: Page HTML content
             domain: Domain being scraped
             goal: What we're looking for
 
         Returns:
-            Dict with suggested_paths, priority_links, and navigation_notes
+            Dict with prioritized navigation paths and tips
         """
         if not self.is_configured or not html:
             return None
 
-        system_prompt = """You are an expert at navigating company websites to find contact information.
+        # Expert web navigator prompt (inspired by user's suggestion)
+        system_prompt = """You are an expert web navigator specializing in finding business contact information.
 
-Analyze the HTML and identify the BEST pages to visit to find advertising, marketing, or partnership contacts.
+Your task: Analyze the HTML and suggest the BEST navigation paths to find contact details, prioritizing:
+1. Advertising/media buying contacts (ads@, advertising@, media@)
+2. Press/media relations (press@, pr@, communications@)
+3. Partnerships/sponsorships (partnerships@, sponsors@)
+4. General business inboxes (info@, business@, hello@)
 
-Respond ONLY with valid JSON:
+**Common patterns to look for:**
+- Direct: /contact, /contact-us, /advertise, /advertising, /media-kit, /partnerships
+- Nested: /about → /about/press, /company → /company/contact, /about-us → /press-media
+- Footer links: Often contain Contact, Press, Media Kit links
+- Subdomains: newsroom.domain.com, press.domain.com, ads.domain.com
+
+**Respond ONLY with valid JSON:**
 {
-    "suggested_paths": ["/advertise", "/contact", "/about/team"],
-    "priority_links": ["text to look for in links"],
-    "navigation_notes": "brief observation about site structure",
-    "has_contact_form": true/false,
-    "has_email_visible": true/false
+    "priorities": {
+        "advertising_media": ["/advertise", "/media-kit", "/partnerships"],
+        "press_communications": ["/press", "/newsroom", "/about/media"],
+        "general_contact": ["/contact", "/about-us", "/team"]
+    },
+    "suggested_paths": ["/advertise", "/about/press", "/contact"],
+    "nested_navigation": [
+        {"parent": "/about", "likely_children": ["/about/press", "/about/team", "/about/contact"]}
+    ],
+    "navigation_notes": "Site has mega menu with nested About section containing Press & Media link",
+    "subdomains_to_check": ["newsroom", "press", "ads"],
+    "has_email_visible": false,
+    "has_contact_form": true
 }
 
-Focus on:
-- /advertise, /partnerships, /media-kit pages (highest priority)
-- Contact pages with email addresses
-- Team/about pages that list people
-- Footer links that might have contact info
-- Look for patterns like /company/team, /about-us/leadership"""
+Return maximum 10 paths in suggested_paths, ordered by priority.
+Only suggest paths that appear to exist based on the HTML (links, navigation, sitemap)."""
 
-        # Truncate HTML - just need nav/header/footer links
-        html_sample = html[:8000]  # Reduced for speed
+        # Extract key navigation areas (header, nav, footer, sitemap links)
+        html_sample = html[:10000]
 
-        user_prompt = f"""Analyze {domain} for: {goal}
+        user_prompt = f"""Analyze {domain} to find: {goal}
 
-HTML:
+HTML content:
 {html_sample}
 
-List the best paths to visit."""
+Identify the best navigation paths to find advertising/partnership contacts.
+Look for nested navigation (e.g., About Us containing Press & Media submenu)."""
 
-        response = self._call_api(system_prompt, user_prompt, max_tokens=300)
+        response = self._call_api(system_prompt, user_prompt, max_tokens=500)
 
         if not response:
             return None
@@ -640,6 +664,7 @@ List the best paths to visit."""
             result = json.loads(response)
             return result
         except json.JSONDecodeError:
+            self._log(f"Failed to parse navigation analysis JSON", "warning")
             return None
 
     def extract_contacts_from_page(
