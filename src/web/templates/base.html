@@ -123,10 +123,19 @@
 
         function startPolling() {
             if (pollInterval) clearInterval(pollInterval);
+            let isPolling = false;  // Prevent request pileup
 
             pollInterval = setInterval(async () => {
+                if (isPolling) return;  // Skip if previous request still pending
+                isPolling = true;
+
                 try {
-                    const res = await fetch('/api/status');
+                    // Add timeout to prevent hanging
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+                    const res = await fetch('/api/status', { signal: controller.signal });
+                    clearTimeout(timeoutId);
                     const data = await res.json();
 
                     // Update progress bar
@@ -169,8 +178,11 @@
                     }
                 } catch (e) {
                     console.error('Poll error:', e);
+                    // Don't stop polling on error - keep trying
+                } finally {
+                    isPolling = false;
                 }
-            }, 1000);
+            }, 1500);  // Poll every 1.5s (was 1s) to reduce load
         }
 
         function updateLogs(logs) {

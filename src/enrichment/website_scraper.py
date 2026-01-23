@@ -145,6 +145,45 @@ LINKEDIN_PATTERN = re.compile(
     r'https?://(?:www\.)?linkedin\.com/in/[A-Za-z0-9_-]+/?'
 )
 
+# URL patterns to SKIP (irrelevant for contact discovery)
+SKIP_URL_PATTERNS = [
+    # Job/career pages (not useful for advertising contacts)
+    "/jobs", "/careers", "/career", "/hiring", "/job-", "-jobs",
+    "/q-", "/l-",  # Indeed job search URLs
+    # Blog/news content (rarely has contacts)
+    "/blog/", "/article/", "/post/", "/news/20", "/insights/",
+    "/expert-insights/", "/resources/",
+    # Product/feature pages
+    "/products/", "/product/", "/solutions/", "/features/", "/pricing",
+    "/demo", "/trial", "/signup", "/sign-up", "/register",
+    # Legal/compliance
+    "/privacy", "/terms", "/legal", "/cookie", "/gdpr", "/compliance/",
+    # Support/help
+    "/support", "/help", "/faq", "/knowledge", "/docs/",
+    # Auth pages
+    "/login", "/signin", "/auth", "/account",
+    # E-commerce
+    "/cart", "/checkout", "/shop/", "/store/",
+    # Localization (usually same content)
+    "/en-us/", "/en-gb/", "/de/", "/fr/", "/es/",
+]
+
+
+def is_url_worth_visiting(url: str) -> bool:
+    """Check if a URL is likely to have contact information."""
+    url_lower = url.lower()
+
+    # Skip URLs matching skip patterns
+    for pattern in SKIP_URL_PATTERNS:
+        if pattern in url_lower:
+            return False
+
+    # Skip very long URLs (usually dynamic/generated content)
+    if len(url) > 150:
+        return False
+
+    return True
+
 
 class WebsiteScraper:
     """Scrapes company websites to find contact information.
@@ -379,7 +418,7 @@ class WebsiteScraper:
                     href_lower = href.lower()
                     if any(kw in text or kw.replace(" ", "-") in href_lower or kw.replace(" ", "") in href_lower
                            for kw in contact_keywords):
-                        if full_url not in contact_urls:
+                        if full_url not in contact_urls and is_url_worth_visiting(full_url):
                             contact_urls.append(full_url)
 
                 except Exception:
@@ -422,7 +461,10 @@ class WebsiteScraper:
             page = context.new_page()
             crash_count = 0  # Track consecutive crashes
 
-            for url in urls[:self.max_pages]:
+            # Filter URLs and limit to 8 max for speed
+            filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:8]
+
+            for url in filtered_urls:
                 # Skip if too many crashes (browser is unstable)
                 if crash_count >= 3:
                     self._log(f"Stopping browser - too many crashes", "warning")
@@ -525,6 +567,15 @@ class WebsiteScraper:
                 "press room", "media room", "communications",
             ]
 
+            # Keywords to EXCLUDE from clicking (irrelevant links)
+            exclude_keywords = [
+                "sign in", "login", "register", "sign up", "signup",
+                "job", "career", "hiring", "apply", "cart", "checkout",
+                "shop", "buy", "subscribe", "trial", "demo", "pricing",
+                "facebook", "twitter", "linkedin", "instagram", "youtube",
+                "privacy", "terms", "cookie", "legal",
+            ]
+
             for start_url in start_urls:
                 if len(all_emails) >= 2:
                     break  # Found enough
@@ -563,12 +614,20 @@ class WebsiteScraper:
                             text = (link.inner_text() or "").lower().strip()
                             href = (link.get_attribute("href") or "").lower()
 
+                            # Skip empty text links or excluded keywords
+                            if not text or len(text) < 2:
+                                continue
+                            if any(excl in text or excl in href for excl in exclude_keywords):
+                                continue
+
                             # Check if this link looks like it leads to press/contact
                             for keyword in click_keywords:
                                 if keyword in text or keyword.replace(" ", "-") in href or keyword.replace(" ", "") in href:
                                     full_href = link.get_attribute("href")
                                     if full_href and not full_href.startswith(("javascript:", "#", "mailto:", "tel:")):
-                                        links_to_click.append((link, text, full_href))
+                                        # Also check URL is worth visiting
+                                        if is_url_worth_visiting(urljoin(start_url, full_href)):
+                                            links_to_click.append((link, text, full_href))
                                         break
                         except Exception:
                             continue
