@@ -775,48 +775,32 @@ class WebsiteScraper:
                         if contact.email not in all_emails:
                             all_emails[contact.email] = contact
 
-                    # Find links on homepage
-                    new_urls = self._find_contact_links(html, base_url)
-                    for new_url in new_urls:
+                    # Find ALL internal links on homepage (real links, not guesses)
+                    all_internal_links = self._extract_all_internal_links(html, base_url)
+
+                    # Also get keyword-filtered links
+                    keyword_links = self._find_contact_links(html, base_url)
+                    for new_url in keyword_links:
                         if new_url not in visited_urls and new_url not in urls_to_visit:
                             urls_to_visit.append(new_url)
 
-                    # ONE Claude call to analyze homepage - Claude "clicks through" like a human
+                    # Use Claude to pick the BEST links from actual links on the page
+                    # This is more accurate than Claude guessing paths from raw HTML
                     agent = self._get_claude_agent()
-                    if agent:
-                        self._log(f"Claude analyzing {domain} navigation...")
-                        nav_analysis = agent.analyze_website_navigation(
-                            html, domain, "find advertising/marketing contact information"
+                    if agent and all_internal_links:
+                        self._log(f"Claude selecting from {len(all_internal_links)} real links...")
+
+                        # Pass real links to Claude for intelligent selection
+                        best_urls = agent.select_best_urls_from_list(
+                            all_internal_links, domain, "find advertising/marketing contact information"
                         )
 
-                        if nav_analysis:
-                            # Get suggested paths (already prioritized by Claude)
-                            suggested = nav_analysis.get("suggested_paths", [])
-
-                            # Also get nested navigation paths (e.g., About → Press)
-                            nested = nav_analysis.get("nested_navigation", [])
-                            for nested_item in nested:
-                                for child_path in nested_item.get("likely_children", []):
-                                    if child_path not in suggested:
-                                        suggested.append(child_path)
-
-                            # Get priority-specific paths
-                            priorities = nav_analysis.get("priorities", {})
-                            for priority_type in ["advertising_media", "press_communications", "general_contact"]:
-                                for path in priorities.get(priority_type, []):
-                                    if path not in suggested:
-                                        suggested.append(path)
-
-                            if suggested:
-                                self._log(f"Claude suggested {len(suggested)} paths: {suggested[:5]}")
-                                # Add Claude's suggestions to the front of the queue (high priority)
-                                for path in reversed(suggested[:12]):
-                                    full_url = urljoin(base_url, path)
-                                    if full_url not in visited_urls and full_url not in urls_to_visit:
-                                        urls_to_visit.insert(1, full_url)
-
-                            if nav_analysis.get("navigation_notes"):
-                                self._log(f"  {nav_analysis['navigation_notes'][:100]}")
+                        if best_urls:
+                            self._log(f"Claude selected {len(best_urls)} priority URLs: {[u.split('/')[-1] or u.split('/')[-2] for u in best_urls[:5]]}")
+                            # Add Claude's selections to the FRONT of the queue (highest priority)
+                            for url in reversed(best_urls):
+                                if url not in visited_urls and url not in urls_to_visit:
+                                    urls_to_visit.insert(1, url)
             except Exception as e:
                 self._log(f"Homepage/Claude analysis failed: {e}", "warning")
 
@@ -1261,6 +1245,62 @@ class WebsiteScraper:
                 break
 
         return name, title
+
+    def _extract_all_internal_links(self, html: str, base_url: str) -> list[str]:
+        """
+        Extract ALL internal links from HTML page.
+
+        Used to give Claude real links to choose from instead of guessing paths.
+
+        Args:
+            html: Page HTML content
+            base_url: Base URL for resolving relative links
+
+        Returns:
+            List of unique internal URLs found on the page
+        """
+        soup = BeautifulSoup(html, "lxml")
+        links = []
+        base_domain = urlparse(base_url).netloc
+
+        # Skip patterns - these are never useful for contact discovery
+        skip_patterns = [
+            "#", "javascript:", "mailto:", "tel:",
+            ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js",
+            "/wp-content/", "/wp-includes/", "/assets/",
+        ]
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+
+            # Skip empty or problematic links
+            if not href or any(href.startswith(p) or p in href.lower() for p in skip_patterns):
+                continue
+
+            # Build full URL
+            try:
+                full_url = urljoin(base_url, href)
+                parsed = urlparse(full_url)
+
+                # Only internal links (same domain)
+                if parsed.netloc != base_domain:
+                    continue
+
+                # Clean up URL (remove fragments, normalize)
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if parsed.query:
+                    # Keep simple query params, skip tracking params
+                    if not any(p in parsed.query.lower() for p in ["utm_", "ref=", "source="]):
+                        clean_url += f"?{parsed.query}"
+
+                # Skip if already in list
+                if clean_url not in links:
+                    links.append(clean_url)
+
+            except Exception:
+                continue
+
+        return links[:50]  # Limit to 50 links to avoid overwhelming Claude
 
     def _find_contact_links(self, html: str, base_url: str) -> list[str]:
         """Find links to contact-related pages."""

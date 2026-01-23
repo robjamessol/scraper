@@ -819,6 +819,78 @@ Find every relevant email, especially advertising/partnership contacts."""
         except json.JSONDecodeError:
             return []
 
+    def select_best_urls_from_list(
+        self,
+        urls: list[str],
+        domain: str,
+        goal: str = "find advertising/marketing contact information",
+    ) -> list[str]:
+        """
+        Given a list of REAL URLs found on a page, select the best ones for contact discovery.
+
+        This is more accurate than guessing paths - Claude sees actual links that exist.
+
+        Args:
+            urls: List of real URLs extracted from the page
+            domain: Domain being scraped
+            goal: What we're looking for
+
+        Returns:
+            Prioritized list of URLs to visit (max 5)
+        """
+        if not self.is_configured or not urls:
+            return []
+
+        # Limit input to avoid token bloat
+        urls = urls[:30]
+
+        system_prompt = """You are an expert at finding business contact information on websites.
+
+Given a list of REAL URLs from a website, select the TOP 5 most likely to have advertising/partnership contact info.
+
+**Priority order (most to least valuable):**
+1. Advertising/media pages (/advertise, /media-kit, /advertising, /partnerships)
+2. Press/PR/newsroom (/press, /newsroom, /media, /news, /media-relations)
+3. Contact pages (/contact, /contact-us, /get-in-touch)
+4. About/team pages (/about, /team, /leadership, /about-us)
+5. Company info (/company, /corporate)
+
+**Skip these (low value for contact finding):**
+- Blog/article pages (/blog/, /news/2024, /article/)
+- Product pages (/products, /solutions, /features, /pricing)
+- Career/job pages (/careers, /jobs, /hiring)
+- Legal pages (/privacy, /terms, /legal)
+- Login/auth pages (/login, /signin, /register)
+- Support pages (/help, /support, /faq)
+
+Respond ONLY with a JSON array of the best URLs (maximum 5):
+["/advertise", "/about/press", "/contact-us"]
+
+Return paths only (not full URLs). Order by priority."""
+
+        urls_text = "\n".join(f"- {url}" for url in urls)
+
+        user_prompt = f"""Select the best URLs for finding contacts on {domain}:
+
+{urls_text}
+
+Goal: {goal}
+
+Return the top 5 URLs most likely to have advertising/partnership contact information."""
+
+        response = self._call_api(system_prompt, user_prompt, max_tokens=300)
+
+        if not response:
+            return []
+
+        result = extract_json_from_response(response)
+        if isinstance(result, list):
+            # Return the selected URLs (Claude returns paths, we may need to resolve)
+            from urllib.parse import urljoin
+            base = f"https://{domain}"
+            return [urljoin(base, p) if not p.startswith("http") else p for p in result[:5]]
+        return []
+
     def identify_best_contact_links(
         self,
         html: str,
