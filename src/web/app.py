@@ -327,10 +327,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                 try:
                     scraper = WebsiteScraper(
-                        timeout=10.0,
-                        max_pages=8,
-                        use_browser=False,
-                        use_claude=True,  # Claude analyzes homepage to find contact pages
+                        timeout=6.0,  # Reduced for speed
+                        max_pages=6,
+                        use_browser=True,  # Enable browser fallback for JS sites
+                        use_claude=True,   # Claude finds contact pages
                     )
                     result = scraper.scrape_domain(domain)
 
@@ -414,23 +414,26 @@ async def dashboard(request: Request):
     advertisers = get_advertisers()
 
     # Calculate stats
+    with_emails = len([a for a in advertisers if a.get("emails")])
     stats = {
         "total": len(advertisers),
-        "high_fit": len([a for a in advertisers if "High" in a.get("niche_fit", "")]),
-        "medium_fit": len([a for a in advertisers if "Medium" in a.get("niche_fit", "")]),
-        "low_fit": len([a for a in advertisers if "Low" in a.get("niche_fit", "")]),
+        "with_emails": with_emails,
+        "without_emails": len(advertisers) - with_emails,
+        "high_fit": 0,  # Deprecated
+        "medium_fit": 0,
+        "low_fit": 0,
     }
 
-    # Group by category
+    # Group by sector
     categories = {}
     for a in advertisers:
-        cat = a.get("category", "other")
+        cat = a.get("sector") or a.get("category", "other")
         categories[cat] = categories.get(cat, 0) + 1
 
-    # Group by source
+    # Group by sponsor type
     sources = {}
     for a in advertisers:
-        src = a.get("source_newsletter", "unknown")
+        src = a.get("sponsor_type") or a.get("source_newsletter", "unknown")
         sources[src] = sources.get(src, 0) + 1
 
     return templates.TemplateResponse(
@@ -448,15 +451,17 @@ async def dashboard(request: Request):
 
 
 @app.get("/advertisers", response_class=HTMLResponse)
-async def advertisers_page(request: Request, fit: str | None = None, category: str | None = None):
+async def advertisers_page(request: Request, fit: str | None = None, category: str | None = None, has_email: str | None = None):
     """Full advertisers list with filtering."""
     advertisers = get_advertisers()
 
     # Apply filters
-    if fit:
-        advertisers = [a for a in advertisers if fit.lower() in a.get("niche_fit", "").lower()]
+    if has_email == "yes":
+        advertisers = [a for a in advertisers if a.get("emails")]
+    elif has_email == "no":
+        advertisers = [a for a in advertisers if not a.get("emails")]
     if category:
-        advertisers = [a for a in advertisers if a.get("category") == category]
+        advertisers = [a for a in advertisers if a.get("sector") == category or a.get("category") == category]
 
     return templates.TemplateResponse(
         "advertisers.html",
@@ -530,30 +535,33 @@ async def api_start_scan(
 
 @app.get("/api/advertisers")
 async def api_get_advertisers(
-    fit: str | None = None,
     category: str | None = None,
-    source: str | None = None,
+    sponsor_type: str | None = None,
+    has_email: bool | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
     """
     Get advertisers with optional filtering.
 
-    - **fit**: Filter by niche fit (high, medium, low)
-    - **category**: Filter by category
-    - **source**: Filter by source newsletter
+    - **category**: Filter by sector/category
+    - **sponsor_type**: Filter by sponsor type
+    - **has_email**: Filter by whether has email (true/false)
     - **limit**: Max results (default 100)
     - **offset**: Pagination offset
     """
     advertisers = get_advertisers()
 
     # Apply filters
-    if fit:
-        advertisers = [a for a in advertisers if fit.lower() in a.get("niche_fit", "").lower()]
+    if has_email is not None:
+        if has_email:
+            advertisers = [a for a in advertisers if a.get("emails")]
+        else:
+            advertisers = [a for a in advertisers if not a.get("emails")]
     if category:
-        advertisers = [a for a in advertisers if a.get("category") == category]
-    if source:
-        advertisers = [a for a in advertisers if a.get("source_newsletter") == source]
+        advertisers = [a for a in advertisers if a.get("sector") == category]
+    if sponsor_type:
+        advertisers = [a for a in advertisers if a.get("sponsor_type") == sponsor_type]
 
     total = len(advertisers)
     advertisers = advertisers[offset:offset + limit]

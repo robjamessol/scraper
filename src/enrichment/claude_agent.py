@@ -84,7 +84,7 @@ class ClaudeAgent:
         if not self.api_key:
             logger.warning("Claude API key not configured. AI extraction disabled.")
 
-        self.client = httpx.Client(timeout=30.0)
+        self.client = httpx.Client(timeout=15.0)  # Reduced for speed
         self._request_count = 0
         self._total_tokens = 0
 
@@ -621,17 +621,17 @@ Focus on:
 - Footer links that might have contact info
 - Look for patterns like /company/team, /about-us/leadership"""
 
-        # Truncate HTML but keep important parts (head, nav, footer)
-        html_sample = html[:15000]  # First 15k chars should include nav/header
+        # Truncate HTML - just need nav/header/footer links
+        html_sample = html[:8000]  # Reduced for speed
 
-        user_prompt = f"""Analyze this website ({domain}) to find the best pages for: {goal}
+        user_prompt = f"""Analyze {domain} for: {goal}
 
 HTML:
 {html_sample}
 
-Suggest specific paths to visit and what to look for."""
+List the best paths to visit."""
 
-        response = self._call_api(system_prompt, user_prompt, max_tokens=500)
+        response = self._call_api(system_prompt, user_prompt, max_tokens=300)
 
         if not response:
             return None
