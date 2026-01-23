@@ -1272,6 +1272,10 @@ class WebsiteScraper:
         if not PLAYWRIGHT_AVAILABLE:
             return []
 
+        import time
+        browser_start = time.time()
+        max_browser_time = 30  # Max 30 seconds for browser phase
+
         all_emails: dict[str, WebsiteContact] = {}
 
         # Use reusable browser (MUCH faster than starting fresh each time)
@@ -1327,6 +1331,11 @@ class WebsiteScraper:
                 # Skip if too many crashes (browser is unstable)
                 if crash_count >= 3:
                     self._log(f"Stopping browser - too many crashes", "warning")
+                    break
+
+                # TIME CHECK: Don't let browser phase run too long
+                if (time.time() - browser_start) > max_browser_time:
+                    self._log(f"Browser time limit reached", "warning")
                     break
 
                 try:
@@ -1427,6 +1436,10 @@ class WebsiteScraper:
         if not PLAYWRIGHT_AVAILABLE:
             return []
 
+        import time
+        nav_start = time.time()
+        max_nav_time = 20  # Max 20 seconds for click-through navigation
+
         all_emails: dict[str, WebsiteContact] = {}
 
         browser = self._get_browser()
@@ -1463,6 +1476,11 @@ class WebsiteScraper:
             for start_url in start_urls:
                 if len(all_emails) >= 2:
                     break  # Found enough
+
+                # TIME CHECK: Don't exceed nav time limit
+                if (time.time() - nav_start) > max_nav_time:
+                    self._log(f"Navigation time limit reached ({max_nav_time}s)", "warning")
+                    break
 
                 try:
                     self._log(f"Browser navigating: {start_url}")
@@ -1519,6 +1537,11 @@ class WebsiteScraper:
                     # Click through found links (max 2 for speed)
                     for link, text, href in links_to_click[:2]:
                         if len(all_emails) >= 2:
+                            break
+
+                        # TIME CHECK: Don't exceed nav time limit
+                        if (time.time() - nav_start) > max_nav_time:
+                            self._log(f"Navigation time limit reached during click-through", "warning")
                             break
 
                         try:
@@ -1624,6 +1647,15 @@ class WebsiteScraper:
 
         self._log(f"Scraping {domain} for contacts...")
 
+        # Track timing - prevent any single domain from taking too long
+        import time
+        domain_start_time = time.time()
+        max_domain_time = 60  # Max 60 seconds per domain
+
+        def is_time_exceeded() -> bool:
+            """Check if we've spent too long on this domain."""
+            return (time.time() - domain_start_time) > max_domain_time
+
         # Track visited URLs to avoid duplicates
         visited_urls: set[str] = set()
         urls_to_visit: list[str] = [base_url]
@@ -1713,6 +1745,10 @@ class WebsiteScraper:
                 break
             # Early exit only if we have high-quality contacts
             if has_good_contacts():
+                break
+            # TIME CHECK: Don't spend more than max_domain_time on one domain
+            if is_time_exceeded():
+                self._log(f"Time limit exceeded for {domain}, moving on", "warning")
                 break
 
             if url in visited_urls:
@@ -1882,7 +1918,7 @@ class WebsiteScraper:
             result.errors.append(f"Domain unreachable (tried alternatives): {domain}")
             return result
 
-        if len(all_emails) < 2 and self.use_browser:
+        if len(all_emails) < 2 and self.use_browser and not is_time_exceeded():
             self._log(f"Few emails via HTTP, trying browser for JS-rendered content...")
 
             # First, load homepage in browser and find REAL links (not guessing)
@@ -1901,6 +1937,9 @@ class WebsiteScraper:
                 url = urljoin(base_url, pattern)
                 if url not in priority_urls:
                     priority_urls.append(url)
+
+            # Limit URLs to prevent browser phase from taking too long
+            priority_urls = priority_urls[:10]
 
             browser_contacts = self._scrape_with_browser(domain, priority_urls)
             for contact in browser_contacts:
@@ -2077,7 +2116,8 @@ class WebsiteScraper:
         # Phase N: Vision fallback - take screenshot if no contacts found
         # This uses Claude Vision to OCR contact info that might be rendered
         # in canvas, shadow DOM, or image-based text
-        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE:
+        # SKIP if site was heavily blocked (Vision won't help either)
+        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5:
             self._log("No contacts found via text. Trying Vision/screenshot fallback...")
             try:
                 screenshot_contacts = self._try_vision_fallback(base_url, domain)
@@ -2638,6 +2678,8 @@ class WebsiteScraper:
         we suspect contact info is present (e.g., rendered in canvas,
         shadow DOM, or image-based text).
 
+        NOTE: This is expensive (API call + screenshot). Only use as last resort.
+
         Args:
             base_url: Homepage URL to screenshot
             domain: Domain being scraped
@@ -2660,14 +2702,11 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
-            page.goto(base_url, wait_until="networkidle", timeout=15000)
-            page.wait_for_timeout(2000)  # Wait for any animations/lazy loading
+            # Use domcontentloaded instead of networkidle (much faster)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=8000)
+            page.wait_for_timeout(1000)  # Brief wait for JS rendering
 
-            # Try to scroll to footer (contact info often there)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-            page.wait_for_timeout(500)
-
-            # Take full page screenshot
+            # Take screenshot (skip scrolling to save time)
             screenshot_bytes = page.screenshot(full_page=False)  # Just visible viewport
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
