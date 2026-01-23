@@ -516,7 +516,7 @@ async def api_status():
             "last_scan": scan_status["last_scan"],
             "last_error": scan_status["last_error"],
             "total_advertisers": scan_status["total_advertisers"],
-            "logs": scan_status["logs"][-50:],  # Last 50 log entries
+            "logs": scan_status["logs"],  # Return ALL logs (up to 500)
         }
 
 

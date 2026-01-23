@@ -420,8 +420,14 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+            crash_count = 0  # Track consecutive crashes
 
             for url in urls[:self.max_pages]:
+                # Skip if too many crashes (browser is unstable)
+                if crash_count >= 3:
+                    self._log(f"Stopping browser - too many crashes", "warning")
+                    break
+
                 try:
                     self._log(f"Browser loading: {url}")
                     page.goto(url, wait_until="domcontentloaded", timeout=8000)
@@ -431,6 +437,7 @@ class WebsiteScraper:
 
                     # Get rendered HTML
                     html = page.content()
+                    crash_count = 0  # Reset on success
 
                     # Extract contacts
                     contacts = self._extract_contacts_from_html(html, url, domain)
@@ -458,7 +465,20 @@ class WebsiteScraper:
                 except PlaywrightTimeout:
                     self._log(f"Browser timeout: {url}", "warning")
                 except Exception as e:
-                    self._log(f"Browser error on {url}: {e}", "warning")
+                    error_str = str(e).lower()
+                    if "crash" in error_str or "detach" in error_str:
+                        crash_count += 1
+                        self._log(f"Browser crash ({crash_count}/3): {url}", "warning")
+                        # Try to create new page after crash
+                        try:
+                            page = context.new_page()
+                        except Exception:
+                            break  # Context is dead, exit
+                    elif "err_name_not_resolved" in error_str:
+                        self._log(f"Domain unreachable: {url}", "warning")
+                        break  # Skip entire domain
+                    else:
+                        self._log(f"Browser error on {url}: {e}", "warning")
 
         finally:
             context.close()
@@ -561,8 +581,8 @@ class WebsiteScraper:
                         try:
                             self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
 
-                            # Navigate to the link
-                            link.click()
+                            # Navigate to the link (8s timeout, not 30s default)
+                            link.click(timeout=8000)
                             page.wait_for_load_state("domcontentloaded", timeout=8000)
                             page.wait_for_timeout(500)
 
@@ -664,6 +684,7 @@ class WebsiteScraper:
 
         pages_scraped = 0
         consecutive_errors = 0
+        domain_unreachable = False  # DNS failure = skip everything
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
 
         def has_good_contacts() -> bool:
@@ -816,9 +837,20 @@ class WebsiteScraper:
             except httpx.TimeoutException:
                 consecutive_errors += 1
                 self._log(f"Timeout fetching {url}", "warning")
-            except httpx.ConnectError:
+            except httpx.ConnectError as e:
                 consecutive_errors += 1
-                self._log(f"Connection failed: {url}", "warning")
+                # Check if this is a DNS failure (domain doesn't exist)
+                error_str = str(e).lower()
+                if "name" in error_str and "not" in error_str and "resolve" in error_str:
+                    self._log(f"Domain unreachable (DNS): {domain}", "warning")
+                    domain_unreachable = True
+                    break  # Skip ALL further attempts
+                elif "no address" in error_str:
+                    self._log(f"Domain unreachable (no address): {domain}", "warning")
+                    domain_unreachable = True
+                    break
+                else:
+                    self._log(f"Connection failed: {url}", "warning")
             except Exception as e:
                 consecutive_errors += 1
                 result.errors.append(f"Error fetching {url}: {str(e)}")
@@ -828,6 +860,12 @@ class WebsiteScraper:
         # Phase 2: If httpx found nothing or few results, try Playwright for JS-rendered sites
         # Check if site appears to block HTTP requests (many errors = likely anti-bot)
         site_blocks_http = consecutive_errors >= 2 and pages_scraped == 0
+
+        # Skip browser if domain is completely unreachable (DNS failure)
+        if domain_unreachable:
+            self._log(f"Skipping browser - domain unreachable: {domain}", "warning")
+            result.errors.append(f"Domain unreachable: {domain}")
+            return result
 
         if len(all_emails) < 2 and self.use_browser:
             self._log(f"Few emails via HTTP, trying browser for JS-rendered content...")
