@@ -329,6 +329,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             completed = [0]  # Use list to allow mutation in nested function
             results_lock = threading.Lock()
 
+            # Per-domain timeout (90 seconds max per domain to prevent hanging)
+            DOMAIN_TIMEOUT = 90
+
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
                 # Check for cancellation
@@ -349,17 +352,18 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                 add_log(f"  🌐 [{idx+1}/{total}] {domain}...")
 
+                # Use a nested function with timeout tracking
+                scraper = None
                 try:
                     # Each thread gets its own scraper (thread-safe)
                     scraper = WebsiteScraper(
                         timeout=5.0,
-                        max_pages=12,
+                        max_pages=10,  # Reduced from 12 for speed
                         use_browser=True,
                         use_claude=True,
                         log_callback=add_log,
                     )
                     result = scraper.scrape_domain(domain)
-                    scraper.close()
 
                     # Store contacts in separate columns
                     contact_count = 0
@@ -389,6 +393,13 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         company[f"title_{i+1}"] = ""
                         company[f"name_{i+1}"] = ""
                 finally:
+                    # Always close scraper to release browser resources
+                    if scraper:
+                        try:
+                            scraper.close()
+                        except Exception:
+                            pass
+
                     with results_lock:
                         completed[0] += 1
                         update_status(
@@ -396,9 +407,32 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                             progress=50 + int((completed[0] / max(total, 1)) * 50),
                         )
 
-            # Run in parallel with 3 workers (balance speed vs resource usage)
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                list(executor.map(scrape_company, enumerate(unique)))
+            # Run in parallel with 3 workers, with per-domain timeout
+            from concurrent.futures import as_completed, TimeoutError as FuturesTimeoutError
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                # Submit all tasks
+                futures = {
+                    pool.submit(scrape_company, (idx, company)): (idx, company)
+                    for idx, company in enumerate(unique)
+                }
+
+                # Wait for completion with per-task timeout
+                for future in as_completed(futures, timeout=DOMAIN_TIMEOUT * total):
+                    idx, company = futures[future]
+                    try:
+                        future.result(timeout=DOMAIN_TIMEOUT)
+                    except FuturesTimeoutError:
+                        domain = company.get("domain", "unknown")
+                        add_log(f"    ⏰ {domain}: Timed out after {DOMAIN_TIMEOUT}s", level="warning")
+                        # Fill empty columns for timed-out domain
+                        for i in range(5):
+                            company[f"email_{i+1}"] = ""
+                            company[f"title_{i+1}"] = ""
+                            company[f"name_{i+1}"] = ""
+                    except Exception as e:
+                        domain = company.get("domain", "unknown")
+                        add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
 
             add_log(f"📊 Phase 2 complete: processed {total} companies")
         else:

@@ -632,8 +632,8 @@ class WebsiteScraper:
                         except Exception:
                             continue
 
-                    # Click through found links (max 3)
-                    for link, text, href in links_to_click[:3]:
+                    # Click through found links (max 2 for speed)
+                    for link, text, href in links_to_click[:2]:
                         if len(all_emails) >= 2:
                             break
 
@@ -991,13 +991,12 @@ class WebsiteScraper:
                         continue
 
             # If STILL nothing, use browser to navigate About page and find links (CLICK THROUGH)
+            # Reduced to 2 URLs max to prevent hanging
             if len(all_emails) == 0 and self.use_browser:
                 self._log(f"Trying browser click-through navigation...")
                 about_urls = [
                     urljoin(base_url, "/about"),
                     urljoin(base_url, "/about-us"),
-                    urljoin(base_url, "/company"),
-                    base_url,  # Also try homepage for click-through
                 ]
                 browser_contacts = self._scrape_with_browser_and_navigate(domain, about_urls)
                 for contact in browser_contacts:
@@ -1045,13 +1044,38 @@ class WebsiteScraper:
                     if EMAIL_PATTERN.match(decoded):
                         emails.add(decoded)
 
-        # Also check mailto: links
+        # Also check mailto: links - enhanced to find more mailto patterns
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if href.startswith("mailto:"):
                 email = href[7:].split("?")[0].strip()
                 if EMAIL_PATTERN.match(email):
                     emails.add(email)
+
+        # Check buttons and other elements that might have mailto (forms, etc.)
+        for element in soup.find_all(href=True):
+            href = element.get("href", "")
+            if "mailto:" in href:
+                # Extract email from mailto: link
+                email_part = href.split("mailto:")[-1].split("?")[0].strip()
+                if EMAIL_PATTERN.match(email_part):
+                    emails.add(email_part)
+
+        # Check form actions for mailto (some contact forms use mailto: action)
+        for form in soup.find_all("form", action=True):
+            action = form.get("action", "")
+            if action.startswith("mailto:"):
+                email = action[7:].split("?")[0].strip()
+                if EMAIL_PATTERN.match(email):
+                    emails.add(email)
+
+        # Check for emails in any href attribute (spans, divs with href, etc.)
+        for element in soup.find_all(attrs={"href": True}):
+            href = element.get("href", "")
+            if "mailto:" in href.lower():
+                email_part = href.lower().split("mailto:")[-1].split("?")[0].strip()
+                if EMAIL_PATTERN.match(email_part):
+                    emails.add(email_part)
 
         # Check onclick handlers for emails (some sites use JS to build email)
         for element in soup.find_all(onclick=True):
