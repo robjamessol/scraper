@@ -22,7 +22,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     PlaywrightTimeout = Exception  # Fallback
 
-from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS
+from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS, resolve_domain_redirect, guess_alternative_domains
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +109,15 @@ EXCLUDED_JOB_TITLES = [
 CONTACT_PAGE_PATTERNS = [
     # Advertising/sales - highest priority
     "/advertise", "/advertising", "/partnerships", "/media-kit", "/mediakit",
-    # Contact pages
+    # Contact pages - including language-prefixed versions
     "/contact", "/contact-us", "/connect", "/connect-with-us",
+    "/en/contact", "/en/contact-us",  # Language-prefixed (wolterskluwer, etc.)
     # Press/Media - CRITICAL: often has PR/media contact emails
     "/press", "/media", "/press-media", "/newsroom", "/news",
-    # About pages
-    "/about", "/about-us", "/team",
+    "/en/press", "/en/news", "/en/newsroom",  # Language-prefixed press
+    # About pages - often link to press/media subpages
+    "/about", "/about-us", "/team", "/about/press", "/about/press-media",
+    "/about/contact", "/about/media",
     # Business pages
     "/sponsors", "/sponsorship", "/partners", "/for-business",
 ]
@@ -150,7 +153,7 @@ SKIP_URL_PATTERNS = [
     # Job/career pages (not useful for advertising contacts)
     "/jobs", "/careers", "/career", "/hiring", "/job-", "-jobs",
     "/q-", "/l-",  # Indeed job search URLs
-    # Blog/news content (rarely has contacts)
+    # Blog/news content (rarely has contacts) - but NOT /news or /newsroom itself
     "/blog/", "/article/", "/post/", "/news/20", "/insights/",
     "/expert-insights/", "/resources/",
     # Product/feature pages
@@ -164,8 +167,10 @@ SKIP_URL_PATTERNS = [
     "/login", "/signin", "/auth", "/account",
     # E-commerce
     "/cart", "/checkout", "/shop/", "/store/",
-    # Localization (usually same content)
-    "/en-us/", "/en-gb/", "/de/", "/fr/", "/es/",
+    # NOTE: We intentionally do NOT skip /en/, /en-us/, etc. for contact/press pages
+    # as many international sites have contacts only at /en/contact-us
+    # Only skip deep localized content pages (not top-level contact/press)
+    "/de/blog/", "/fr/blog/", "/es/blog/",  # Localized blog content only
 ]
 
 
@@ -375,12 +380,14 @@ class WebsiteScraper:
             "advertise", "advertising", "partnerships", "partner", "sponsor",
             "media kit", "mediakit", "media-kit",
             # Contact pages
-            "contact", "connect", "get in touch", "reach us",
-            # Press/media (often has contacts)
-            "press", "media", "newsroom", "news room", "press room",
+            "contact", "contact us", "connect", "get in touch", "reach us",
+            # Press/media (often has contacts) - EXPANDED
+            "press", "media", "newsroom", "news room", "press room", "news",
             "media relations", "press & media", "press and media",
+            "media inquiries", "press inquiries", "press releases",
+            "press contacts", "media contacts", "communications",
             # About/team
-            "about", "team", "leadership", "company",
+            "about", "about us", "team", "leadership", "company", "who we are",
         ]
 
         context = browser.new_context(
@@ -560,11 +567,13 @@ class WebsiteScraper:
         try:
             page = context.new_page()
 
-            # Keywords to look for in links (for clicking through)
+            # Keywords to look for in links (for clicking through) - EXPANDED
             click_keywords = [
-                "press", "media", "newsroom", "news", "contact",
+                "press", "media", "newsroom", "news", "contact", "contact us",
                 "press & media", "press and media", "media relations",
                 "press room", "media room", "communications",
+                "press releases", "media inquiries", "press inquiries",
+                "press contacts", "media contacts", "about", "about us",
             ]
 
             # Keywords to EXCLUDE from clicking (irrelevant links)
@@ -715,6 +724,16 @@ class WebsiteScraper:
 
         if domain != original_domain:
             self._log(f"Stripped subdomain: {original_domain} → {domain}")
+
+        # Check if domain redirects to a different domain
+        # E.g., projectmanagementinstitute.com → pmi.org
+        try:
+            resolved_domain = resolve_domain_redirect(domain)
+            if resolved_domain and resolved_domain != domain:
+                self._log(f"Domain redirects: {domain} → {resolved_domain}")
+                domain = resolved_domain
+        except Exception:
+            pass  # Continue with original domain if resolution fails
 
         result = WebsiteScrapeResult(domain=domain)
         company_name = company_name or domain.split('.')[0].title()  # Fallback to domain name
@@ -935,6 +954,47 @@ class WebsiteScraper:
                 if contact.email not in all_emails:
                     all_emails[contact.email] = contact
 
+        # Phase 2.5: If we have a contact form but no emails, try press/media pages
+        # Sites like floqast.com have contact forms but emails are on press pages
+        if len(all_emails) == 0:
+            # Check if we visited a contact page with a form
+            contact_page_visited = any(
+                "/contact" in url.lower() or "contact-us" in url.lower()
+                for url in visited_urls
+            )
+
+            if contact_page_visited:
+                self._log(f"Contact page had form but no email, trying press/media pages...")
+
+                # Priority pages to try when contact form has no email
+                press_fallback_patterns = [
+                    "/press", "/press-media", "/press-room", "/newsroom",
+                    "/media", "/media-room", "/about/press", "/about/press-media",
+                    "/about/media", "/news", "/company/press", "/en/press",
+                    "/about/newsroom", "/corporate/press",
+                ]
+
+                for pattern in press_fallback_patterns:
+                    if len(all_emails) > 0:
+                        break
+
+                    url = urljoin(base_url, pattern)
+                    if url in visited_urls:
+                        continue
+
+                    try:
+                        response = client.get(url)
+                        if response.status_code == 200:
+                            visited_urls.add(url)
+                            html = response.text
+                            page_contacts = self._extract_contacts_from_html(html, url, domain)
+                            for contact in page_contacts:
+                                if contact.email not in all_emails:
+                                    all_emails[contact.email] = contact
+                                    self._log(f"  Found contact on press page: {pattern}")
+                    except Exception:
+                        continue
+
         # Phase 3: THOROUGH SEARCH - if still no contacts, try nested/uncommon paths
         if len(all_emails) == 0:
             self._log(f"No contacts found, trying thorough nested search...")
@@ -944,19 +1004,26 @@ class WebsiteScraper:
                 # About section nested pages
                 "/about/press", "/about/media", "/about/press-media", "/about/contact",
                 "/about/team", "/about/leadership", "/about-us/press", "/about-us/media",
-                "/about-us/contact", "/about-us/team",
+                "/about-us/contact", "/about-us/team", "/about/news", "/about/newsroom",
                 # Company section nested pages
                 "/company/press", "/company/media", "/company/contact", "/company/team",
                 "/company/about", "/company/newsroom",
-                # Press/News variations
+                # Press/News variations - EXPANDED (for sites like indeed.com)
                 "/press-room", "/press-releases", "/media-room", "/media-center",
                 "/news/press", "/news/media", "/newsroom/contact", "/newsroom/press",
+                "/press/contact", "/media/contact", "/news/contact",
                 # Corporate pages
                 "/corporate/press", "/corporate/media", "/corporate/contact",
                 # Other common patterns
                 "/info/press", "/info/contact", "/resources/press", "/resources/media",
-                "/en/press", "/en/contact", "/en/about/press",  # Multilingual
+                # Language-prefixed pages - EXPANDED (for sites like wolterskluwer.com)
+                "/en/press", "/en/contact", "/en/contact-us", "/en/about/press",
+                "/en/about/press-media", "/en/newsroom", "/en/media",
+                "/en-us/press", "/en-us/contact", "/en-us/contact-us",
+                "/en-gb/contact", "/en-gb/press",
                 "/us/press", "/us/contact",  # Regional
+                # Partners/Advertise nested
+                "/partners/contact", "/partnerships/contact", "/advertise/contact",
             ]
 
             # If site blocks HTTP, skip straight to browser for nested patterns
@@ -1002,6 +1069,54 @@ class WebsiteScraper:
                 for contact in browser_contacts:
                     if contact.email not in all_emails:
                         all_emails[contact.email] = contact
+
+        # Phase 4: If STILL no contacts and domain is long, try alternative domains
+        # E.g., projectmanagementinstitute.com → pmi.org
+        if len(all_emails) == 0 and len(domain.split('.')[0]) > 15:
+            self._log(f"Long domain with no results, trying alternatives...")
+            alternative_domains = guess_alternative_domains(domain)
+
+            for alt_domain in alternative_domains[:3]:  # Limit to 3 alternatives
+                if len(all_emails) > 0:
+                    break
+
+                alt_base_url = f"https://{alt_domain}"
+                try:
+                    response = client.get(alt_base_url)
+                    if response.status_code == 200:
+                        self._log(f"  Trying alternative domain: {alt_domain}")
+                        html = response.text
+
+                        # Extract contacts from homepage
+                        page_contacts = self._extract_contacts_from_html(html, alt_base_url, alt_domain)
+                        for contact in page_contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+
+                        # Also try /contact and /press on alternative domain
+                        for pattern in ["/contact", "/contact-us", "/press", "/about/press-media"]:
+                            if len(all_emails) > 0:
+                                break
+                            alt_url = urljoin(alt_base_url, pattern)
+                            try:
+                                response = client.get(alt_url)
+                                if response.status_code == 200:
+                                    html = response.text
+                                    page_contacts = self._extract_contacts_from_html(html, alt_url, alt_domain)
+                                    for contact in page_contacts:
+                                        if contact.email not in all_emails:
+                                            all_emails[contact.email] = contact
+                                            self._log(f"  Found contact on {alt_domain}: {contact.email}")
+                            except Exception:
+                                continue
+
+                        if all_emails:
+                            # Update result domain to the working alternative
+                            result.domain = alt_domain
+                            self._log(f"  Using alternative domain: {alt_domain}")
+                            break
+                except Exception:
+                    continue
 
         # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
         # Call scraper.close() when done with all scraping to clean up
@@ -1082,6 +1197,29 @@ class WebsiteScraper:
             onclick = element.get("onclick", "")
             email_matches = EMAIL_PATTERN.findall(onclick)
             emails.update(email_matches)
+
+        # Check for emails in JavaScript code blocks (common for obfuscation)
+        for script in soup.find_all("script"):
+            script_text = script.get_text() or ""
+            # Look for email patterns in JS (often concatenated or in variables)
+            email_matches = EMAIL_PATTERN.findall(script_text)
+            # Also check for obfuscated patterns
+            for pattern, replacement in EMAIL_OBFUSCATION_PATTERNS:
+                obfuscated = re.findall(pattern, script_text, re.IGNORECASE)
+                for match in obfuscated:
+                    if isinstance(match, tuple):
+                        decoded = f"{match[0]}@{match[1]}.{match[2]}"
+                        if EMAIL_PATTERN.match(decoded):
+                            email_matches.append(decoded)
+            emails.update(email_matches)
+
+        # Check for emails in input field placeholders/values (contact forms sometimes show example)
+        for input_elem in soup.find_all("input"):
+            placeholder = input_elem.get("placeholder", "")
+            value = input_elem.get("value", "")
+            for text in [placeholder, value]:
+                email_matches = EMAIL_PATTERN.findall(text)
+                emails.update(email_matches)
 
         # Check data attributes that might contain emails
         for element in soup.find_all(attrs={"data-email": True}):
@@ -1191,6 +1329,50 @@ class WebsiteScraper:
                         break
 
         return contacts
+
+    def _has_contact_form(self, html: str) -> bool:
+        """
+        Check if a page has a contact form (without a mailto: email).
+
+        This is used to detect form-only contact pages where we should look
+        for alternative pages that might have actual email addresses.
+        """
+        soup = BeautifulSoup(html, "lxml")
+
+        # Look for forms that appear to be contact forms
+        for form in soup.find_all("form"):
+            form_html = str(form).lower()
+            action = form.get("action", "").lower()
+
+            # Skip if it's a mailto: form (we can extract email from those)
+            if "mailto:" in action:
+                return False
+
+            # Check if form looks like a contact form
+            contact_indicators = [
+                "contact", "message", "inquiry", "enquiry", "get in touch",
+                "name", "email", "phone", "subject", "send",
+            ]
+            form_text = form.get_text().lower()
+
+            # Count how many indicators are present
+            matches = sum(1 for ind in contact_indicators if ind in form_text or ind in form_html)
+
+            # If form has multiple contact indicators, it's likely a contact form
+            if matches >= 3:
+                return True
+
+        # Also check for common contact form containers
+        contact_containers = [
+            '[class*="contact-form"]', '[class*="contact_form"]',
+            '[id*="contact-form"]', '[id*="contact_form"]',
+            '[class*="inquiry"]', '[class*="enquiry"]',
+        ]
+        for selector in contact_containers:
+            if soup.select(selector):
+                return True
+
+        return False
 
     def _find_name_near_email(
         self,
@@ -1350,6 +1532,15 @@ class WebsiteScraper:
             "for-business", "business", "enterprise", "commercial",
         ]
 
+        # Footer-specific keywords (text that often appears in footer links)
+        footer_link_texts = [
+            "press", "press room", "press releases", "newsroom", "news room",
+            "media", "media room", "media relations", "media inquiries",
+            "contact", "contact us", "get in touch", "reach us",
+            "about", "about us", "our company", "who we are",
+            "partnerships", "partner with us", "advertise", "advertising",
+        ]
+
         base_domain = urlparse(base_url).netloc
 
         for a in soup.find_all("a", href=True):
@@ -1371,21 +1562,50 @@ class WebsiteScraper:
                 except Exception:
                     continue
 
-        # Also look specifically in footer and nav sections
+        # Also look specifically in footer and nav sections - ENHANCED
         for section in soup.find_all(["footer", "nav"]):
             for a in section.find_all("a", href=True):
                 href = a["href"]
+                text = a.get_text().lower().strip()
                 if not href or href.startswith(("javascript:", "#")):
                     continue
                 full_url = urljoin(base_url, href)
                 try:
                     if urlparse(full_url).netloc == base_domain:
-                        # Add footer/nav links that might be contact pages
                         href_lower = href.lower()
-                        if any(kw in href_lower for kw in ["contact", "about", "team", "advertise"]):
-                            contact_urls.append(full_url)
+                        # Check both href and link text for footer keywords
+                        if any(kw in href_lower or kw in text for kw in ["contact", "about", "team", "advertise", "press", "media", "news", "newsroom"]):
+                            if full_url not in contact_urls:
+                                contact_urls.append(full_url)
+                        # Also check for exact footer text matches
+                        if any(text == ft or text.startswith(ft) for ft in footer_link_texts):
+                            if full_url not in contact_urls:
+                                contact_urls.append(full_url)
                 except Exception:
                     continue
+
+        # Look for links in elements with footer-like class/id names
+        footer_selectors = [
+            '[class*="footer"]', '[id*="footer"]',
+            '[class*="bottom-nav"]', '[class*="site-footer"]',
+            '[role="contentinfo"]',  # Accessibility role for footer
+        ]
+        for selector in footer_selectors:
+            for container in soup.select(selector):
+                for a in container.find_all("a", href=True):
+                    href = a["href"]
+                    text = a.get_text().lower().strip()
+                    if not href or href.startswith(("javascript:", "#")):
+                        continue
+                    full_url = urljoin(base_url, href)
+                    try:
+                        if urlparse(full_url).netloc == base_domain:
+                            # Any link with press/contact keywords in footer areas
+                            if any(kw in text or kw in href.lower() for kw in ["press", "media", "contact", "news", "about"]):
+                                if full_url not in contact_urls:
+                                    contact_urls.append(full_url)
+                    except Exception:
+                        continue
 
         return list(dict.fromkeys(contact_urls))  # Deduplicate
 

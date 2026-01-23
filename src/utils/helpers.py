@@ -533,6 +533,143 @@ def guess_domain_from_name(company_name: str) -> str | None:
     return f"{domain_name}.com"
 
 
+def guess_alternative_domains(domain: str) -> list[str]:
+    """
+    Generate alternative domain variations to try.
+
+    Useful when main domain doesn't work or is wrong.
+    E.g., projectmanagementinstitute.com → [pmi.org, pmi.com, ...]
+
+    Args:
+        domain: Original domain to generate alternatives for
+
+    Returns:
+        List of alternative domains to try
+    """
+    alternatives = []
+
+    if not domain:
+        return alternatives
+
+    # Strip TLD to get base name
+    parts = domain.lower().split(".")
+    if len(parts) < 2:
+        return alternatives
+
+    base_name = parts[0]
+    original_tld = ".".join(parts[1:])
+
+    # Try different TLDs
+    tlds_to_try = ["com", "org", "io", "co", "net"]
+    for tld in tlds_to_try:
+        if tld != original_tld:
+            alternatives.append(f"{base_name}.{tld}")
+
+    # For long company names, try common abbreviations
+    # E.g., "projectmanagementinstitute" → "pmi"
+    if len(base_name) > 10:
+        # Try extracting initials from known words
+        # Common word patterns in company names
+        known_words = [
+            "project", "management", "institute", "international", "association",
+            "american", "national", "global", "world", "united", "society",
+            "health", "heart", "care", "healthcare", "medical", "financial", "technology",
+            "tech", "software", "solutions", "services", "systems", "group",
+            "enterprise", "business", "company", "corporation", "corp", "inc",
+            "digital", "media", "marketing", "consulting", "network", "online",
+        ]
+
+        # Find words in order of their position in the domain name
+        found_words_with_pos = []
+        name_lower = base_name.lower()
+        for word in known_words:
+            pos = name_lower.find(word)
+            if pos != -1:
+                found_words_with_pos.append((pos, word))
+
+        # Sort by position to get words in correct order
+        found_words_with_pos.sort(key=lambda x: x[0])
+        found_words = [w for _, w in found_words_with_pos]
+
+        # If we found multiple words, generate initials
+        if len(found_words) >= 2:
+            initials = "".join(w[0] for w in found_words)
+            if len(initials) >= 2 and len(initials) <= 5:
+                for tld in tlds_to_try:
+                    alternatives.append(f"{initials}.{tld}")
+
+        # Also try splitting on common patterns (CamelCase or word boundaries)
+        # E.g., "healthEdge" or hyphenated names
+        camel_words = re.findall(r'[A-Z][a-z]*|[a-z]+', base_name)
+        if len(camel_words) >= 2:
+            initials = "".join(w[0].lower() for w in camel_words)
+            if len(initials) >= 2 and len(initials) <= 5 and initials != base_name:
+                for tld in tlds_to_try:
+                    alt = f"{initials}.{tld}"
+                    if alt not in alternatives:
+                        alternatives.append(alt)
+
+    return alternatives
+
+
+def verify_domain_accessible(domain: str, timeout: float = 3.0) -> bool:
+    """
+    Check if a domain is accessible (returns 200 or redirects).
+
+    Args:
+        domain: Domain to check
+        timeout: Request timeout
+
+    Returns:
+        True if domain is accessible
+    """
+    if not domain:
+        return False
+
+    try:
+        client = get_http_client()
+        url = f"https://{domain}"
+        response = client.head(url, timeout=timeout)
+        return response.status_code < 400
+    except Exception:
+        return False
+
+
+def resolve_domain_redirect(domain: str, timeout: float = 3.0) -> str | None:
+    """
+    Check if a domain redirects to a different domain.
+
+    E.g., projectmanagementinstitute.com might redirect to pmi.org
+
+    Args:
+        domain: Domain to check
+        timeout: Request timeout
+
+    Returns:
+        Final domain after redirects, or None if error
+    """
+    if not domain:
+        return None
+
+    try:
+        client = get_http_client()
+        url = f"https://{domain}"
+        response = client.head(url, timeout=timeout)
+        final_url = str(response.url)
+
+        # Extract domain from final URL
+        final_domain = extract_domain(final_url, strip_marketing=True)
+
+        if final_domain and final_domain != domain:
+            logger.info(f"Domain redirect detected: {domain} → {final_domain}")
+            return final_domain
+
+        return domain
+    except Exception as e:
+        logger.debug(f"Error checking domain redirect for {domain}: {e}")
+        return domain
+
+
 def resolve_sponsor_domain(
     tracking_url: str | None,
     company_name: str | None,
