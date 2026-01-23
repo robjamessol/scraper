@@ -544,9 +544,10 @@ def guess_alternative_domains(domain: str) -> list[str]:
         domain: Original domain to generate alternatives for
 
     Returns:
-        List of alternative domains to try
+        List of alternative domains to try (INITIALS FIRST for long names)
     """
     alternatives = []
+    initials_alternatives = []  # Higher priority for long names
 
     if not domain:
         return alternatives
@@ -559,13 +560,10 @@ def guess_alternative_domains(domain: str) -> list[str]:
     base_name = parts[0]
     original_tld = ".".join(parts[1:])
 
-    # Try different TLDs
-    tlds_to_try = ["com", "org", "io", "co", "net"]
-    for tld in tlds_to_try:
-        if tld != original_tld:
-            alternatives.append(f"{base_name}.{tld}")
+    # TLDs to try - org first since many institutes use .org
+    tlds_to_try = ["org", "com", "io", "co", "net"]
 
-    # For long company names, try common abbreviations
+    # For long company names, try common abbreviations FIRST
     # E.g., "projectmanagementinstitute" → "pmi"
     if len(base_name) > 10:
         # Try extracting initials from known words
@@ -595,8 +593,9 @@ def guess_alternative_domains(domain: str) -> list[str]:
         if len(found_words) >= 2:
             initials = "".join(w[0] for w in found_words)
             if len(initials) >= 2 and len(initials) <= 5:
+                # Add initials alternatives FIRST (highest priority)
                 for tld in tlds_to_try:
-                    alternatives.append(f"{initials}.{tld}")
+                    initials_alternatives.append(f"{initials}.{tld}")
 
         # Also try splitting on common patterns (CamelCase or word boundaries)
         # E.g., "healthEdge" or hyphenated names
@@ -606,10 +605,16 @@ def guess_alternative_domains(domain: str) -> list[str]:
             if len(initials) >= 2 and len(initials) <= 5 and initials != base_name:
                 for tld in tlds_to_try:
                     alt = f"{initials}.{tld}"
-                    if alt not in alternatives:
-                        alternatives.append(alt)
+                    if alt not in initials_alternatives:
+                        initials_alternatives.append(alt)
 
-    return alternatives
+    # Try different TLDs for original name (lower priority)
+    for tld in tlds_to_try:
+        if tld != original_tld:
+            alternatives.append(f"{base_name}.{tld}")
+
+    # Return initials first (most likely to work), then TLD variations
+    return initials_alternatives + alternatives
 
 
 def verify_domain_accessible(domain: str, timeout: float = 3.0) -> bool:

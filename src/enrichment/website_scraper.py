@@ -329,14 +329,28 @@ def is_url_worth_visiting(url: str) -> bool:
 
 # Block page indicators (soft 403s that return 200 status)
 # These sites appear to load but are actually bot challenges
+# NOTE: Be careful not to include phrases that appear on legitimate pages
 BLOCK_PAGE_INDICATORS = [
-    "cloudflare", "captcha", "recaptcha", "hcaptcha",
+    # Cloudflare/DDoS protection - STRONG indicators
+    "cf-browser-verification", "cf_chl_opt", "cf-challenge",
+    "ddos protection by", "ddos-guard",
+    # CAPTCHA challenges - STRONG indicators
+    "recaptcha", "hcaptcha", "g-recaptcha",
+    # Explicit block messages - STRONG indicators
+    "access denied", "access to this page has been denied",
     "pardon our interruption", "please verify you are human",
-    "access denied", "please complete the security check",
-    "enable javascript", "browser check", "ddos protection",
-    "checking your browser", "ray id", "attention required",
-    "just a moment", "please wait while we verify",
-    "bot detection", "security challenge",
+    "please complete the security check", "security challenge",
+    "bot detection", "suspected bot",
+    # Waiting/verification pages - MODERATE indicators
+    "checking your browser", "please wait while we verify",
+    "attention required!", "one more step",
+]
+
+# Phrases that look like block indicators but appear on legitimate pages
+BLOCK_PAGE_FALSE_POSITIVES = [
+    "just a moment",  # Common phrase in content
+    "enable javascript",  # Often a fallback note, not a block
+    "captcha" + " ",  # Word "captcha" in articles about captchas
 ]
 
 
@@ -346,24 +360,37 @@ def is_block_page(html: str) -> bool:
 
     Many anti-bot systems return 200 OK but serve a challenge page.
     This wastes scraping effort and confuses contact extraction.
+
+    IMPORTANT: This should have LOW false positive rate. Better to
+    process a block page than skip a legitimate contact page.
     """
     if not html or len(html) < 100:
         return True  # Suspiciously short content
 
     html_lower = html.lower()
 
-    # Check for block page indicators
+    # Check for strong block page indicators
     indicator_count = sum(1 for ind in BLOCK_PAGE_INDICATORS if ind in html_lower)
 
-    # If multiple indicators or page is very short with one indicator
-    if indicator_count >= 2:
+    # Require multiple indicators OR very short page with indicator
+    # Increased thresholds to reduce false positives
+    if indicator_count >= 3:
         return True
-    if indicator_count >= 1 and len(html) < 5000:
+    if indicator_count >= 2 and len(html) < 3000:
         return True
 
-    # Check for Cloudflare-specific patterns
+    # Cloudflare-specific patterns (very reliable)
     if "cf-browser-verification" in html_lower or "cf_chl_opt" in html_lower:
         return True
+
+    # Check for challenge page title patterns
+    if "<title>" in html_lower:
+        title_start = html_lower.find("<title>") + 7
+        title_end = html_lower.find("</title>", title_start)
+        if title_end > title_start:
+            title = html_lower[title_start:title_end]
+            if any(t in title for t in ["just a moment", "attention required", "security check", "access denied"]):
+                return True
 
     return False
 
@@ -1912,7 +1939,7 @@ class WebsiteScraper:
             self._log(f"Long domain with no results, trying alternatives...")
             alternative_domains = guess_alternative_domains(domain)
 
-            for alt_domain in alternative_domains[:3]:  # Limit to 3 alternatives
+            for alt_domain in alternative_domains[:5]:  # Try top 5 alternatives (initials first)
                 if len(all_emails) > 0:
                     break
 
@@ -2080,6 +2107,25 @@ class WebsiteScraper:
                             email_matches.append(decoded)
             emails.update(email_matches)
 
+            # Try to parse JSON configs embedded in scripts
+            # Look for patterns like: {"email": "contact@example.com"}
+            try:
+                import json
+                # Find JSON-like structures
+                json_patterns = re.findall(r'\{[^{}]*"(?:email|to|recipient|contact)"[^{}]*\}', script_text, re.IGNORECASE)
+                for json_str in json_patterns:
+                    try:
+                        data = json.loads(json_str)
+                        for key in ["email", "to", "recipient", "contact", "mailto"]:
+                            if key in data:
+                                val = data[key]
+                                if isinstance(val, str) and EMAIL_PATTERN.match(val):
+                                    emails.add(val)
+                    except json.JSONDecodeError:
+                        pass
+            except Exception:
+                pass
+
         # Check for emails in input field placeholders/values (contact forms sometimes show example)
         for input_elem in soup.find_all("input"):
             placeholder = input_elem.get("placeholder", "")
@@ -2088,15 +2134,60 @@ class WebsiteScraper:
                 email_matches = EMAIL_PATTERN.findall(text)
                 emails.update(email_matches)
 
-        # Check data attributes that might contain emails
-        for element in soup.find_all(attrs={"data-email": True}):
-            email = element.get("data-email", "")
-            if EMAIL_PATTERN.match(email):
-                emails.add(email)
-        for element in soup.find_all(attrs={"data-contact": True}):
-            email = element.get("data-contact", "")
-            if EMAIL_PATTERN.match(email):
-                emails.add(email)
+        # Check data attributes that might contain emails (EXPANDED)
+        # Many forms hide emails in various data-* attributes
+        email_data_attrs = [
+            "data-email", "data-contact", "data-to", "data-recipient",
+            "data-address", "data-mail", "data-mailto", "data-target",
+            "data-form-email", "data-submit-email", "data-contact-email",
+        ]
+        for attr in email_data_attrs:
+            for element in soup.find_all(attrs={attr: True}):
+                value = element.get(attr, "")
+                if EMAIL_PATTERN.match(value):
+                    emails.add(value)
+                # Also check for Base64 encoded emails
+                if value and len(value) > 15:
+                    try:
+                        import base64
+                        decoded = base64.b64decode(value).decode('utf-8', errors='ignore')
+                        email_match = EMAIL_PATTERN.search(decoded)
+                        if email_match:
+                            emails.add(email_match.group())
+                    except Exception:
+                        pass
+
+        # Check ALL data-* attributes for email patterns (catch-all)
+        for element in soup.find_all():
+            for attr, value in element.attrs.items():
+                if attr.startswith("data-") and isinstance(value, str):
+                    email_matches = EMAIL_PATTERN.findall(value)
+                    emails.update(email_matches)
+
+        # Check hidden form inputs (forms often store recipient in hidden field)
+        for input_elem in soup.find_all("input", type="hidden"):
+            name = (input_elem.get("name") or "").lower()
+            value = input_elem.get("value") or ""
+            # Look for hidden fields that might contain email
+            if any(hint in name for hint in ["email", "to", "recipient", "contact", "mail"]):
+                if EMAIL_PATTERN.match(value):
+                    emails.add(value)
+            # Also just check if value is an email
+            email_matches = EMAIL_PATTERN.findall(value)
+            emails.update(email_matches)
+
+        # Check for form service URLs that contain encoded email (Formspree, etc.)
+        for form in soup.find_all("form", action=True):
+            action = form.get("action", "")
+            # Formspree: https://formspree.io/f/xyzabc or /email@domain.com
+            # Look for emails in the action URL path
+            email_matches = EMAIL_PATTERN.findall(action)
+            emails.update(email_matches)
+            # Check URL encoded emails
+            if "%40" in action:  # URL encoded @
+                decoded_action = action.replace("%40", "@")
+                email_matches = EMAIL_PATTERN.findall(decoded_action)
+                emails.update(email_matches)
 
         # Filter out emails from the same domain (internal emails only)
         # and skip obvious non-contact emails
