@@ -97,6 +97,11 @@
                 Run Scan
                 {% endif %}
             </button>
+            <button onclick="cancelScan()"
+                    id="cancelButton"
+                    class="bg-red-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-red-500 {% if not scan_status.is_running %}hidden{% endif %}">
+                Stop Scan
+            </button>
         </div>
     </div>
     {% if scan_status.last_error %}

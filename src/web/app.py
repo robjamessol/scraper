@@ -61,6 +61,7 @@ SCRAPERS = {
 # Global state with live logs
 scan_status = {
     "is_running": False,
+    "cancelled": False,  # Flag to signal scan cancellation
     "current_newsletter": None,
     "current_action": None,
     "progress": 0,
@@ -103,6 +104,12 @@ def update_status(**kwargs):
     """Thread-safe status update."""
     with status_lock:
         scan_status.update(kwargs)
+
+
+def is_scan_cancelled() -> bool:
+    """Check if scan has been cancelled (thread-safe)."""
+    with status_lock:
+        return scan_status.get("cancelled", False)
 
 
 @asynccontextmanager
@@ -204,6 +211,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
     with status_lock:
         scan_status["logs"] = []
         scan_status["is_running"] = True
+        scan_status["cancelled"] = False  # Reset cancellation flag
         scan_status["progress"] = 0
         scan_status["last_error"] = None
         scan_status["advertisers_found"] = 0
@@ -253,6 +261,11 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                     # Scan each issue
                     for j, issue_url in enumerate(issues):
+                        # Check for cancellation
+                        if is_scan_cancelled():
+                            add_log("⛔ Scan cancelled by user")
+                            break
+
                         issue_num = j + 1
                         update_status(
                             current_action=f"Scanning issue {issue_num}/{len(issues)}",
@@ -288,6 +301,11 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 add_log(f"❌ Error scanning {newsletter_name}: {e}", level="error")
                 continue
 
+            # Check for cancellation between newsletters
+            if is_scan_cancelled():
+                add_log("⛔ Scan cancelled by user")
+                break
+
         # ===== PHASE 1 COMPLETE: Deduplicate sponsors =====
         add_log("🔄 Deduplicating sponsors...")
         update_status(current_action="Deduplicating")
@@ -313,6 +331,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
+                # Check for cancellation
+                if is_scan_cancelled():
+                    return
+
                 idx, company = idx_company
                 domain = company.get("domain")
                 name = company.get("company_name", "Unknown")
@@ -596,6 +618,26 @@ async def api_start_scan(
         "message": "Scan started",
         "newsletters": newsletters or list(SCRAPERS.keys()),
     }
+
+
+@app.post("/api/scan/cancel")
+async def api_cancel_scan():
+    """
+    Cancel the currently running scan.
+
+    Sets a flag that the scan loop checks periodically.
+    The scan will stop gracefully at the next check point.
+    """
+    with status_lock:
+        if not scan_status["is_running"]:
+            raise HTTPException(400, detail="No scan is currently running")
+
+        scan_status["cancelled"] = True
+        scan_status["current_action"] = "Cancelling..."
+
+    add_log("⛔ Cancel requested - stopping scan...")
+
+    return {"message": "Cancel requested. Scan will stop shortly."}
 
 
 @app.get("/api/advertisers")

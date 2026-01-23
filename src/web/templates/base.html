@@ -103,11 +103,17 @@
                         if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Starting scan...</div>';
                     }
 
-                    // Disable the button
+                    // Disable the scan button and show cancel button
                     const btn = document.getElementById('scanButton');
                     if (btn) {
                         btn.disabled = true;
                         btn.textContent = 'Scanning...';
+                    }
+                    const cancelBtn = document.getElementById('cancelButton');
+                    if (cancelBtn) {
+                        cancelBtn.classList.remove('hidden');
+                        cancelBtn.disabled = false;
+                        cancelBtn.textContent = 'Stop Scan';
                     }
 
                     // Start polling for updates
@@ -282,12 +288,44 @@
             }
         }
 
+        async function cancelScan() {
+            if (!confirm('Stop the current scan? Progress will be saved.')) return;
+
+            try {
+                const res = await fetch('/api/scan/cancel', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    // Update UI to show cancelling
+                    const cancelBtn = document.getElementById('cancelButton');
+                    if (cancelBtn) {
+                        cancelBtn.disabled = true;
+                        cancelBtn.textContent = 'Stopping...';
+                    }
+                    addLogEntry({
+                        time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
+                        level: 'warning',
+                        message: '⛔ Cancel requested - stopping scan...'
+                    });
+                } else {
+                    alert('Error: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Error cancelling scan: ' + e.message);
+            }
+        }
+
         function showScanComplete() {
             // Update scan button to show completion state
             const btn = document.getElementById('scanButton');
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = 'Start New Scan';
+            }
+
+            // Hide the cancel button
+            const cancelBtn = document.getElementById('cancelButton');
+            if (cancelBtn) {
+                cancelBtn.classList.add('hidden');
             }
 
             // Show completion actions in the progress panel
