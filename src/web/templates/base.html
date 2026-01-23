@@ -232,6 +232,26 @@
             container.style.display = logsMinimized ? 'none' : 'block';
         }
 
+        async function copyLogs() {
+            try {
+                const res = await fetch('/api/logs/text');
+                const text = await res.text();
+                await navigator.clipboard.writeText(text);
+                alert('Logs copied to clipboard! (' + text.split('\n').length + ' lines)');
+            } catch (e) {
+                // Fallback for browsers that don't support clipboard API
+                const res = await fetch('/api/logs/text');
+                const text = await res.text();
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('Logs copied to clipboard!');
+            }
+        }
+
         // Check if scan is running on page load
         {% if scan_status.is_running %}
         startPolling();

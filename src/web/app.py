@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -88,9 +88,9 @@ def add_log(message: str, level: str = "info"):
             "message": message,
         }
         scan_status["logs"].append(entry)
-        # Keep only last 100 log entries
-        if len(scan_status["logs"]) > 100:
-            scan_status["logs"] = scan_status["logs"][-100:]
+        # Keep last 500 log entries (increased for debugging)
+        if len(scan_status["logs"]) > 500:
+            scan_status["logs"] = scan_status["logs"][-500:]
 
     # Also log to standard logger
     if level == "error":
@@ -516,6 +516,28 @@ async def api_get_logs(since: int = 0):
             "next_index": len(scan_status["logs"]),
             "is_running": scan_status["is_running"],
         }
+
+
+@app.get("/api/logs/text")
+async def api_get_logs_text():
+    """Get all logs as plain text (for copying/debugging)."""
+    with status_lock:
+        lines = []
+        for entry in scan_status["logs"]:
+            level_marker = "❌" if entry["level"] == "error" else "⚠️" if entry["level"] == "warning" else ""
+            lines.append(f"[{entry['time']}] {level_marker} {entry['message']}")
+        return Response(
+            content="\n".join(lines),
+            media_type="text/plain",
+        )
+
+
+@app.get("/api/logs/clear")
+async def api_clear_logs():
+    """Clear all logs."""
+    with status_lock:
+        scan_status["logs"] = []
+    return {"status": "cleared"}
 
 
 @app.post("/api/scan")

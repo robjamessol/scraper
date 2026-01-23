@@ -747,11 +747,19 @@ class WebsiteScraper:
         result.pages_scraped = pages_scraped
 
         # Phase 2: If httpx found nothing or few results, try Playwright for JS-rendered sites
+        # Check if site appears to block HTTP requests (many errors = likely anti-bot)
+        site_blocks_http = consecutive_errors >= 2 and pages_scraped == 0
+
         if len(all_emails) < 2 and self.use_browser:
             self._log(f"Few emails via HTTP, trying browser for JS-rendered content...")
-            # Prioritize advertising/contact pages for browser scraping
+            # Extended URL list for browser - include press/media pages!
             priority_urls = [base_url]
-            for pattern in ["/advertise", "/contact", "/contact-us", "/about", "/team"]:
+            browser_patterns = [
+                "/advertise", "/contact", "/contact-us", "/about", "/about-us",
+                "/press", "/media", "/press-media", "/newsroom",  # ADDED press/media
+                "/team", "/partnerships", "/media-kit",
+            ]
+            for pattern in browser_patterns:
                 priority_urls.append(urljoin(base_url, pattern))
 
             browser_contacts = self._scrape_with_browser(domain, priority_urls)
@@ -783,35 +791,45 @@ class WebsiteScraper:
                 "/us/press", "/us/contact",  # Regional
             ]
 
-            # Try these patterns with HTTP first (fast)
-            for pattern in nested_patterns:
-                if len(all_emails) > 0:
-                    break  # Found something, stop
+            # If site blocks HTTP, skip straight to browser for nested patterns
+            if site_blocks_http and self.use_browser:
+                self._log(f"Site blocks HTTP, using browser for nested search...")
+                nested_urls = [urljoin(base_url, p) for p in nested_patterns[:15]]  # Try first 15
+                browser_contacts = self._scrape_with_browser(domain, nested_urls)
+                for contact in browser_contacts:
+                    if contact.email not in all_emails:
+                        all_emails[contact.email] = contact
+            else:
+                # Try these patterns with HTTP first (fast)
+                for pattern in nested_patterns:
+                    if len(all_emails) > 0:
+                        break  # Found something, stop
 
-                url = urljoin(base_url, pattern)
-                if url in visited_urls:
-                    continue
+                    url = urljoin(base_url, pattern)
+                    if url in visited_urls:
+                        continue
 
-                try:
-                    response = client.get(url)
-                    if response.status_code == 200:
-                        visited_urls.add(url)
-                        html = response.text
-                        page_contacts = self._extract_contacts_from_html(html, url, domain)
-                        for contact in page_contacts:
-                            if contact.email not in all_emails:
-                                all_emails[contact.email] = contact
-                                self._log(f"  Found contact on nested page: {pattern}")
-                except Exception:
-                    continue
+                    try:
+                        response = client.get(url)
+                        if response.status_code == 200:
+                            visited_urls.add(url)
+                            html = response.text
+                            page_contacts = self._extract_contacts_from_html(html, url, domain)
+                            for contact in page_contacts:
+                                if contact.email not in all_emails:
+                                    all_emails[contact.email] = contact
+                                    self._log(f"  Found contact on nested page: {pattern}")
+                    except Exception:
+                        continue
 
-            # If STILL nothing, use browser to navigate About page and find links
+            # If STILL nothing, use browser to navigate About page and find links (CLICK THROUGH)
             if len(all_emails) == 0 and self.use_browser:
-                self._log(f"Trying browser navigation on About page...")
+                self._log(f"Trying browser click-through navigation...")
                 about_urls = [
                     urljoin(base_url, "/about"),
                     urljoin(base_url, "/about-us"),
                     urljoin(base_url, "/company"),
+                    base_url,  # Also try homepage for click-through
                 ]
                 browser_contacts = self._scrape_with_browser_and_navigate(domain, about_urls)
                 for contact in browser_contacts:
