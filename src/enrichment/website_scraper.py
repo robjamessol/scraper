@@ -331,26 +331,19 @@ def is_url_worth_visiting(url: str) -> bool:
 # These sites appear to load but are actually bot challenges
 # NOTE: Be careful not to include phrases that appear on legitimate pages
 BLOCK_PAGE_INDICATORS = [
-    # Cloudflare/DDoS protection - STRONG indicators
-    "cf-browser-verification", "cf_chl_opt", "cf-challenge",
+    # Cloudflare/DDoS protection - STRONG indicators (only in isolation)
+    "cf-browser-verification", "cf_chl_opt", "cf-challenge-running",
     "ddos protection by", "ddos-guard",
     # CAPTCHA challenges - STRONG indicators
-    "recaptcha", "hcaptcha", "g-recaptcha",
+    "g-recaptcha", "h-captcha",  # Specific element IDs, not just words
     # Explicit block messages - STRONG indicators
     "access denied", "access to this page has been denied",
     "pardon our interruption", "please verify you are human",
     "please complete the security check", "security challenge",
-    "bot detection", "suspected bot",
+    "bot detection", "suspected bot", "unusual traffic",
     # Waiting/verification pages - MODERATE indicators
     "checking your browser", "please wait while we verify",
     "attention required!", "one more step",
-]
-
-# Phrases that look like block indicators but appear on legitimate pages
-BLOCK_PAGE_FALSE_POSITIVES = [
-    "just a moment",  # Common phrase in content
-    "enable javascript",  # Often a fallback note, not a block
-    "captcha" + " ",  # Word "captcha" in articles about captchas
 ]
 
 
@@ -363,25 +356,63 @@ def is_block_page(html: str) -> bool:
 
     IMPORTANT: This should have LOW false positive rate. Better to
     process a block page than skip a legitimate contact page.
+
+    Key insight: Many sites (like Indeed) use Cloudflare but still serve
+    real content. We must check for ACTUAL content, not just block indicators.
     """
     if not html or len(html) < 100:
         return True  # Suspiciously short content
 
     html_lower = html.lower()
 
-    # Check for strong block page indicators
+    # FIRST: Check for signs of REAL content
+    # If page has substantial content, it's probably not a block page
+    # even if it has some Cloudflare elements
+
+    # Count meaningful HTML elements
+    has_real_content = False
+
+    # Check for substantial links (more than 5 internal links usually means real page)
+    link_count = html_lower.count('<a href')
+    if link_count > 10:
+        has_real_content = True
+
+    # Check for forms (contact pages have forms)
+    if '<form' in html_lower and ('email' in html_lower or 'contact' in html_lower):
+        has_real_content = True
+
+    # Check for substantial text content (real pages have paragraphs)
+    p_count = html_lower.count('<p')
+    if p_count > 5:
+        has_real_content = True
+
+    # Check for navigation/header elements (real pages have these)
+    if '<nav' in html_lower or '<header' in html_lower:
+        if link_count > 5:
+            has_real_content = True
+
+    # Check page length - very short pages with few elements are suspicious
+    if len(html) > 15000 and link_count > 5:
+        has_real_content = True
+
+    # If page has real content, DON'T flag as block page
+    # (even if it has some Cloudflare/protection elements)
+    if has_real_content:
+        return False
+
+    # NOW check for block page indicators (only if no real content detected)
     indicator_count = sum(1 for ind in BLOCK_PAGE_INDICATORS if ind in html_lower)
 
     # Require multiple indicators OR very short page with indicator
-    # Increased thresholds to reduce false positives
-    if indicator_count >= 3:
+    if indicator_count >= 2:
         return True
-    if indicator_count >= 2 and len(html) < 3000:
+    if indicator_count >= 1 and len(html) < 5000:
         return True
 
-    # Cloudflare-specific patterns (very reliable)
-    if "cf-browser-verification" in html_lower or "cf_chl_opt" in html_lower:
-        return True
+    # Cloudflare-specific patterns - only block if page is small
+    if len(html) < 10000:
+        if "cf-browser-verification" in html_lower or "cf_chl_opt" in html_lower:
+            return True
 
     # Check for challenge page title patterns
     if "<title>" in html_lower:
@@ -389,7 +420,10 @@ def is_block_page(html: str) -> bool:
         title_end = html_lower.find("</title>", title_start)
         if title_end > title_start:
             title = html_lower[title_start:title_end]
-            if any(t in title for t in ["just a moment", "attention required", "security check", "access denied"]):
+            # Only flag if title is EXACTLY a challenge title
+            challenge_titles = ["just a moment", "attention required", "security check",
+                              "access denied", "please wait", "checking your browser"]
+            if any(title.strip() == t or title.strip().startswith(t) for t in challenge_titles):
                 return True
 
     return False
