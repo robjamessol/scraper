@@ -310,7 +310,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             # Create ONE scraper instance and reuse it (MUCH faster)
             scraper = WebsiteScraper(
                 timeout=5.0,  # Reduced for speed
-                max_pages=5,  # Fewer pages per site for speed
+                max_pages=12,  # Enough to check all contact page patterns
                 use_browser=True,  # Enable browser fallback for JS sites
                 use_claude=True,   # Claude finds contact pages
                 log_callback=add_log,

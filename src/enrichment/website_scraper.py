@@ -76,21 +76,18 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
-# Default pages to check for contact info (REDUCED for speed - prioritized list)
+# Default pages to check for contact info (balanced for coverage AND speed)
 CONTACT_PAGE_PATTERNS = [
-    # Highest priority - advertising/sales related
-    "/advertise", "/advertising", "/partnerships", "/media-kit",
-    # Contact pages - most common patterns only
-    "/contact", "/contact-us",
+    # Advertising/sales - highest priority
+    "/advertise", "/advertising", "/partnerships", "/media-kit", "/mediakit",
+    # Contact pages
+    "/contact", "/contact-us", "/connect", "/connect-with-us",
+    # Press/Media - CRITICAL: often has PR/media contact emails
+    "/press", "/media", "/press-media", "/newsroom", "/news",
     # About pages
-    "/about", "/about-us",
-]
-
-# Extended patterns - used only if Claude is disabled or we need more options
-EXTENDED_CONTACT_PATTERNS = [
-    "/partners", "/mediakit", "/sponsorship", "/sponsors",
-    "/connect", "/connect-with-us", "/get-in-touch",
-    "/team", "/our-team", "/for-business",
+    "/about", "/about-us", "/team",
+    # Business pages
+    "/sponsors", "/sponsorship", "/partners", "/for-business",
 ]
 
 # Email obfuscation patterns to decode
@@ -133,7 +130,7 @@ class WebsiteScraper:
     def __init__(
         self,
         timeout: float = 5.0,  # Reduced for speed
-        max_pages: int = 6,    # Balanced - enough to find contacts
+        max_pages: int = 12,   # Enough to check all important contact pages
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
