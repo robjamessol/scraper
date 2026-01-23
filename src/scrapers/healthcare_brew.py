@@ -122,6 +122,77 @@ class HealthcareBrewScraper(BaseScraper):
 
         return clicked
 
+    def _click_pagination(self, page, max_pages: int = 50, target_count: int = 300) -> bool:
+        """
+        Handle pagination (Next button or page number links).
+
+        Args:
+            page: Playwright page instance
+            max_pages: Maximum pages to navigate
+            target_count: Stop when this many issues are loaded
+
+        Returns:
+            True if pagination was found and used
+        """
+        # Selectors for "Next" buttons/links
+        next_selectors = [
+            'a:has-text("Next")',
+            'a:has-text("next")',
+            'a:has-text("→")',
+            'a:has-text(">")',
+            '[class*="next"]',
+            '[aria-label="Next"]',
+            '[aria-label="next page"]',
+            'a[rel="next"]',
+            '.pagination a:last-child',
+        ]
+
+        clicked = False
+        all_issue_urls = set()
+
+        for page_num in range(max_pages):
+            # Collect issues from current page
+            issue_links = page.query_selector_all('a[href*="/issues/"]')
+            for link in issue_links:
+                try:
+                    href = link.get_attribute("href")
+                    if href:
+                        all_issue_urls.add(href)
+                except Exception:
+                    continue
+
+            current_count = len(all_issue_urls)
+
+            if current_count >= target_count:
+                logger.info(f"Pagination reached target: {current_count} issues")
+                break
+
+            # Try to find and click Next
+            next_found = False
+            for selector in next_selectors:
+                try:
+                    next_btn = page.query_selector(selector)
+                    if next_btn and next_btn.is_visible():
+                        # Check if it's not disabled
+                        is_disabled = next_btn.get_attribute("disabled") or \
+                                     "disabled" in (next_btn.get_attribute("class") or "")
+                        if not is_disabled:
+                            logger.info(f"Clicking next page ({current_count} issues, page {page_num + 1})...")
+                            next_btn.click()
+                            clicked = True
+                            next_found = True
+                            page.wait_for_timeout(2000)  # Wait for page to load
+                            break
+                except Exception:
+                    continue
+
+            if not next_found:
+                if clicked:
+                    logger.info(f"No more pages, collected {current_count} issues from {page_num + 1} pages")
+                break
+
+        return clicked
+
     @staticmethod
     def _default_config() -> dict[str, Any]:
         """Return default configuration for Healthcare Brew."""
@@ -179,13 +250,25 @@ class HealthcareBrewScraper(BaseScraper):
             # Wait for content to render
             page.wait_for_timeout(2000)
 
-            # Try to load more issues - some archives use buttons, some use scroll
-            # First, try clicking "Load More" / "Show More" buttons repeatedly
-            load_more_clicked = self._click_load_more_buttons(page, max_clicks=50, target_count=limit or 300)
+            # Try multiple methods to load all issues (different archives use different approaches)
+            target = limit or 300
 
-            # If no load more button, try scrolling for infinite scroll archives
-            if not load_more_clicked:
+            # Method 1: Try "Load More" buttons (common on modern sites)
+            load_more_worked = self._click_load_more_buttons(page, max_clicks=50, target_count=target)
+
+            # Method 2: If no load more button, try infinite scroll
+            if not load_more_worked:
+                logger.info("No load more button found, trying infinite scroll...")
                 self._scroll_to_load_all(page, max_scrolls=100, wait_ms=800)
+
+            # Check how many we found so far
+            current_issues = page.query_selector_all('a[href*="/issues/"]')
+            logger.info(f"After scroll/load-more: found {len(current_issues)} issue links")
+
+            # Method 3: If still not enough, try pagination (Next button)
+            if len(current_issues) < target:
+                logger.info("Trying pagination...")
+                self._click_pagination(page, max_pages=50, target_count=target)
 
             # Get page content
             html = page.content()
