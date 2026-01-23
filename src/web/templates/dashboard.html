@@ -197,10 +197,32 @@
             <a href="/api/advertisers/export" class="block w-full text-left px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition text-sm border border-gray-700">
                 Download Full CSV
             </a>
-            <a href="/api/status" target="_blank" class="block w-full text-left px-3 py-2 bg-indigo-900/30 text-indigo-300 rounded hover:bg-indigo-900/50 transition text-sm border border-indigo-800/50">
-                View API Status (JSON)
-            </a>
+            <button onclick="retryFailed()" id="retryButton" class="block w-full text-left px-3 py-2 bg-orange-900/30 text-orange-400 rounded hover:bg-orange-900/50 transition text-sm border border-orange-800/50">
+                Retry Failed Domains (<span id="retryCount">0</span>)
+            </button>
         </div>
+    </div>
+</div>
+
+<!-- Custom Domains Section -->
+<div class="bg-gray-900 rounded p-4 border border-gray-800 mb-4">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-100">Add Custom Websites</h2>
+        <button onclick="scanCustomDomains()" id="customScanBtn" class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
+            Scan All
+        </button>
+    </div>
+    <div class="flex space-x-2 mb-3">
+        <input type="text" id="customDomain" placeholder="example.com"
+               class="flex-1 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
+        <input type="text" id="customCompany" placeholder="Company Name (optional)"
+               class="w-48 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
+        <button onclick="addCustomDomain()" class="bg-green-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-green-500">
+            Add
+        </button>
+    </div>
+    <div id="customDomainsList" class="space-y-1 max-h-32 overflow-y-auto">
+        <!-- Custom domains will be populated here -->
     </div>
 </div>
 

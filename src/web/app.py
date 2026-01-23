@@ -38,6 +38,8 @@ BASE_DIR = Path(__file__).parent.parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 DATA_FILE = OUTPUT_DIR / "latest_scan.json"
+RETRY_QUEUE_FILE = OUTPUT_DIR / "retry_queue.json"
+CUSTOM_DOMAINS_FILE = OUTPUT_DIR / "custom_domains.json"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -110,6 +112,106 @@ def is_scan_cancelled() -> bool:
     """Check if scan has been cancelled (thread-safe)."""
     with status_lock:
         return scan_status.get("cancelled", False)
+
+
+# ===== RETRY QUEUE MANAGEMENT =====
+def load_retry_queue() -> list[dict]:
+    """Load the retry queue from disk."""
+    if RETRY_QUEUE_FILE.exists():
+        try:
+            return json.loads(RETRY_QUEUE_FILE.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def save_retry_queue(queue: list[dict]):
+    """Save the retry queue to disk."""
+    RETRY_QUEUE_FILE.write_text(json.dumps(queue, indent=2))
+
+
+def add_to_retry_queue(domain: str, company_name: str, reason: str, company_data: dict | None = None):
+    """Add a failed domain to the retry queue."""
+    queue = load_retry_queue()
+
+    # Check if already in queue
+    existing = next((item for item in queue if item["domain"] == domain), None)
+    if existing:
+        existing["attempts"] = existing.get("attempts", 1) + 1
+        existing["last_reason"] = reason
+        existing["last_attempt"] = datetime.now().isoformat()
+    else:
+        queue.append({
+            "domain": domain,
+            "company_name": company_name,
+            "reason": reason,
+            "attempts": 1,
+            "added": datetime.now().isoformat(),
+            "last_attempt": datetime.now().isoformat(),
+            "company_data": company_data,  # Preserve original data for retry
+        })
+
+    save_retry_queue(queue)
+
+
+def remove_from_retry_queue(domain: str):
+    """Remove a domain from retry queue (after successful retry)."""
+    queue = load_retry_queue()
+    queue = [item for item in queue if item["domain"] != domain]
+    save_retry_queue(queue)
+
+
+def clear_retry_queue():
+    """Clear the entire retry queue."""
+    save_retry_queue([])
+
+
+# ===== CUSTOM DOMAINS MANAGEMENT =====
+def load_custom_domains() -> list[dict]:
+    """Load custom domains to scan."""
+    if CUSTOM_DOMAINS_FILE.exists():
+        try:
+            return json.loads(CUSTOM_DOMAINS_FILE.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def save_custom_domains(domains: list[dict]):
+    """Save custom domains list."""
+    CUSTOM_DOMAINS_FILE.write_text(json.dumps(domains, indent=2))
+
+
+def add_custom_domain(domain: str, company_name: str | None = None):
+    """Add a custom domain to scan."""
+    domains = load_custom_domains()
+
+    # Clean domain
+    if domain.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        domain = urlparse(domain).netloc
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    # Check if already exists
+    if any(d["domain"] == domain for d in domains):
+        return False
+
+    domains.append({
+        "domain": domain,
+        "company_name": company_name or domain.split(".")[0].title(),
+        "added": datetime.now().isoformat(),
+        "scanned": False,
+    })
+    save_custom_domains(domains)
+    return True
+
+
+def remove_custom_domain(domain: str):
+    """Remove a custom domain."""
+    domains = load_custom_domains()
+    domains = [d for d in domains if d["domain"] != domain]
+    save_custom_domains(domains)
 
 
 @asynccontextmanager
@@ -388,6 +490,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                 except Exception as e:
                     add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
+                    # Add to retry queue for later
+                    add_to_retry_queue(domain, name, str(e)[:100], company.copy())
                     for i in range(5):
                         company[f"email_{i+1}"] = ""
                         company[f"title_{i+1}"] = ""
@@ -424,7 +528,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         future.result(timeout=DOMAIN_TIMEOUT)
                     except FuturesTimeoutError:
                         domain = company.get("domain", "unknown")
+                        name = company.get("company_name", "Unknown")
                         add_log(f"    ⏰ {domain}: Timed out after {DOMAIN_TIMEOUT}s", level="warning")
+                        # Add to retry queue for later
+                        add_to_retry_queue(domain, name, f"Timeout after {DOMAIN_TIMEOUT}s", company.copy())
                         # Fill empty columns for timed-out domain
                         for i in range(5):
                             company[f"email_{i+1}"] = ""
@@ -432,7 +539,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                             company[f"name_{i+1}"] = ""
                     except Exception as e:
                         domain = company.get("domain", "unknown")
+                        name = company.get("company_name", "Unknown")
                         add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
+                        # Add to retry queue for later
+                        add_to_retry_queue(domain, name, str(e)[:100], company.copy())
 
             add_log(f"📊 Phase 2 complete: processed {total} companies")
         else:
@@ -872,6 +982,321 @@ def run_enrichment_only(advertisers: list[dict]):
 
     except Exception as e:
         add_log(f"❌ Enrichment failed: {e}", level="error")
+        update_status(last_error=str(e))
+
+    finally:
+        update_status(is_running=False, current_action=None)
+
+
+# ============== Retry Queue Endpoints ==============
+
+@app.get("/api/retry-queue")
+async def get_retry_queue():
+    """Get the current retry queue."""
+    queue = load_retry_queue()
+    return {
+        "count": len(queue),
+        "domains": queue,
+    }
+
+
+@app.post("/api/retry-queue/run")
+async def run_retry_queue(background_tasks: BackgroundTasks):
+    """Process all domains in the retry queue."""
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="A scan is already in progress")
+
+    queue = load_retry_queue()
+    if not queue:
+        return {"message": "Retry queue is empty", "count": 0}
+
+    background_tasks.add_task(process_retry_queue, queue)
+
+    return {
+        "message": f"Retrying {len(queue)} failed domains",
+        "count": len(queue),
+    }
+
+
+@app.post("/api/retry-queue/clear")
+async def api_clear_retry_queue():
+    """Clear the retry queue."""
+    clear_retry_queue()
+    return {"message": "Retry queue cleared"}
+
+
+@app.delete("/api/retry-queue/{domain}")
+async def remove_from_queue(domain: str):
+    """Remove a specific domain from retry queue."""
+    remove_from_retry_queue(domain)
+    return {"message": f"Removed {domain} from retry queue"}
+
+
+def process_retry_queue(queue: list[dict]):
+    """Process all domains in the retry queue."""
+    with status_lock:
+        scan_status["logs"] = []
+        scan_status["is_running"] = True
+        scan_status["current_action"] = "Retrying failed domains"
+        scan_status["progress"] = 0
+
+    add_log(f"🔄 Retrying {len(queue)} failed domains...")
+
+    try:
+        total = len(queue)
+        success_count = 0
+        results = []
+
+        for idx, item in enumerate(queue):
+            if is_scan_cancelled():
+                add_log("⚠️ Retry cancelled", level="warning")
+                break
+
+            domain = item["domain"]
+            name = item["company_name"]
+            company = item.get("company_data", {})
+
+            update_status(
+                current_action=f"Retrying ({idx+1}/{total}): {domain}",
+                progress=int((idx / total) * 100),
+            )
+
+            add_log(f"  🔄 [{idx+1}/{total}] Retrying {domain}...")
+
+            scraper = None
+            try:
+                scraper = WebsiteScraper(
+                    timeout=5.0,
+                    max_pages=10,
+                    use_browser=True,
+                    use_claude=True,
+                    log_callback=add_log,
+                )
+                result = scraper.scrape_domain(domain)
+
+                contact_count = 0
+                if result and result.contacts:
+                    for i, contact in enumerate(result.contacts[:5]):
+                        if contact.email:
+                            company[f"email_{i+1}"] = contact.email
+                            company[f"title_{i+1}"] = contact.title or ""
+                            company[f"name_{i+1}"] = contact.name or ""
+                            contact_count += 1
+
+                if contact_count > 0:
+                    add_log(f"    ✅ {domain}: Found {contact_count} contact(s)")
+                    # Remove from retry queue on success
+                    remove_from_retry_queue(domain)
+                    success_count += 1
+                    company["domain"] = domain
+                    company["company_name"] = name
+                    results.append(company)
+                else:
+                    add_log(f"    ⚪ {domain}: Still no contacts")
+                    # Update retry count but keep in queue
+                    add_to_retry_queue(domain, name, "No contacts found on retry", company)
+
+            except Exception as e:
+                add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
+                add_to_retry_queue(domain, name, str(e)[:100], company)
+
+            finally:
+                if scraper:
+                    try:
+                        scraper.close()
+                    except Exception:
+                        pass
+
+        # Merge results with existing data
+        if results:
+            existing = get_advertisers()
+            existing_domains = {a.get("domain") for a in existing}
+
+            for r in results:
+                if r.get("domain") not in existing_domains:
+                    existing.append(r)
+                else:
+                    # Update existing entry with new contact info
+                    for e in existing:
+                        if e.get("domain") == r.get("domain"):
+                            e.update(r)
+                            break
+
+            save_scan_data(existing)
+
+        remaining = len(load_retry_queue())
+        add_log(f"🎉 Retry complete! {success_count}/{total} succeeded, {remaining} still pending")
+
+        update_status(progress=100)
+
+    except Exception as e:
+        add_log(f"❌ Retry failed: {e}", level="error")
+        update_status(last_error=str(e))
+
+    finally:
+        update_status(is_running=False, current_action=None)
+
+
+# ============== Custom Domains Endpoints ==============
+
+@app.get("/api/custom-domains")
+async def get_custom_domains_list():
+    """Get all custom domains."""
+    domains = load_custom_domains()
+    return {
+        "count": len(domains),
+        "domains": domains,
+    }
+
+
+@app.post("/api/custom-domains")
+async def api_add_custom_domain(request: Request):
+    """Add a custom domain to scan."""
+    data = await request.json()
+    domain = data.get("domain", "").strip()
+    company_name = data.get("company_name", "").strip() or None
+
+    if not domain:
+        raise HTTPException(400, detail="Domain is required")
+
+    if add_custom_domain(domain, company_name):
+        return {"message": f"Added {domain}", "domain": domain}
+    else:
+        raise HTTPException(400, detail=f"{domain} already exists")
+
+
+@app.delete("/api/custom-domains/{domain}")
+async def api_remove_custom_domain(domain: str):
+    """Remove a custom domain."""
+    remove_custom_domain(domain)
+    return {"message": f"Removed {domain}"}
+
+
+@app.post("/api/custom-domains/scan")
+async def scan_custom_domains(background_tasks: BackgroundTasks):
+    """Scan all custom domains for contacts."""
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="A scan is already in progress")
+
+    domains = load_custom_domains()
+    unscanned = [d for d in domains if not d.get("scanned")]
+
+    if not unscanned:
+        return {"message": "All custom domains already scanned", "count": 0}
+
+    background_tasks.add_task(process_custom_domains, unscanned)
+
+    return {
+        "message": f"Scanning {len(unscanned)} custom domains",
+        "count": len(unscanned),
+    }
+
+
+def process_custom_domains(domains: list[dict]):
+    """Scan custom domains for contacts."""
+    with status_lock:
+        scan_status["logs"] = []
+        scan_status["is_running"] = True
+        scan_status["current_action"] = "Scanning custom domains"
+        scan_status["progress"] = 0
+
+    add_log(f"🌐 Scanning {len(domains)} custom domains...")
+
+    try:
+        total = len(domains)
+        results = []
+
+        for idx, item in enumerate(domains):
+            if is_scan_cancelled():
+                add_log("⚠️ Scan cancelled", level="warning")
+                break
+
+            domain = item["domain"]
+            name = item["company_name"]
+
+            update_status(
+                current_action=f"Scanning ({idx+1}/{total}): {domain}",
+                progress=int((idx / total) * 100),
+            )
+
+            add_log(f"  🌐 [{idx+1}/{total}] {domain}...")
+
+            company = {
+                "domain": domain,
+                "company_name": name,
+                "source": "custom",
+            }
+
+            scraper = None
+            try:
+                scraper = WebsiteScraper(
+                    timeout=5.0,
+                    max_pages=10,
+                    use_browser=True,
+                    use_claude=True,
+                    log_callback=add_log,
+                )
+                result = scraper.scrape_domain(domain)
+
+                contact_count = 0
+                if result and result.contacts:
+                    for i, contact in enumerate(result.contacts[:5]):
+                        if contact.email:
+                            company[f"email_{i+1}"] = contact.email
+                            company[f"title_{i+1}"] = contact.title or ""
+                            company[f"name_{i+1}"] = contact.name or ""
+                            contact_count += 1
+
+                for i in range(contact_count, 5):
+                    company[f"email_{i+1}"] = ""
+                    company[f"title_{i+1}"] = ""
+                    company[f"name_{i+1}"] = ""
+
+                if contact_count > 0:
+                    add_log(f"    ✅ {domain}: Found {contact_count} contact(s)")
+                else:
+                    add_log(f"    ⚪ {domain}: No contacts found")
+
+                results.append(company)
+
+                # Mark as scanned
+                all_domains = load_custom_domains()
+                for d in all_domains:
+                    if d["domain"] == domain:
+                        d["scanned"] = True
+                        d["scanned_at"] = datetime.now().isoformat()
+                        break
+                save_custom_domains(all_domains)
+
+            except Exception as e:
+                add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
+                add_to_retry_queue(domain, name, str(e)[:100], company)
+
+            finally:
+                if scraper:
+                    try:
+                        scraper.close()
+                    except Exception:
+                        pass
+
+        # Merge results with existing data
+        if results:
+            existing = get_advertisers()
+            existing_domains = {a.get("domain") for a in existing}
+
+            for r in results:
+                if r.get("domain") not in existing_domains:
+                    existing.append(r)
+
+            save_scan_data(existing)
+
+        with_emails = len([r for r in results if r.get("email_1")])
+        add_log(f"🎉 Custom scan complete! {len(results)} domains, {with_emails} with contacts")
+
+        update_status(progress=100, total_advertisers=len(get_advertisers()))
+
+    except Exception as e:
+        add_log(f"❌ Custom scan failed: {e}", level="error")
         update_status(last_error=str(e))
 
     finally:
