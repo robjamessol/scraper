@@ -54,6 +54,74 @@ class HealthcareBrewScraper(BaseScraper):
 
         super().__init__(config, **kwargs)
 
+    def _click_load_more_buttons(self, page, max_clicks: int = 50, target_count: int = 300) -> bool:
+        """
+        Click "Load More" or "Show More" buttons to load additional issues.
+
+        Many archive pages use buttons instead of infinite scroll.
+
+        Args:
+            page: Playwright page instance
+            max_clicks: Maximum button clicks to attempt
+            target_count: Stop when this many issues are loaded
+
+        Returns:
+            True if a load more button was found and clicked at least once
+        """
+        # Common selectors for "Load More" buttons
+        load_more_selectors = [
+            'button:has-text("Load More")',
+            'button:has-text("Show More")',
+            'button:has-text("Load more")',
+            'button:has-text("Show more")',
+            'a:has-text("Load More")',
+            'a:has-text("Show More")',
+            '[class*="load-more"]',
+            '[class*="show-more"]',
+            '[data-action="load-more"]',
+            'button:has-text("View More")',
+            'button:has-text("See More")',
+        ]
+
+        clicked = False
+
+        for click_num in range(max_clicks):
+            # Check how many issues we have
+            issue_links = page.query_selector_all('a[href*="/issues/"]')
+            current_count = len(issue_links)
+
+            if current_count >= target_count:
+                logger.info(f"Reached target: {current_count} issues loaded")
+                break
+
+            # Try each selector
+            button_found = False
+            for selector in load_more_selectors:
+                try:
+                    button = page.query_selector(selector)
+                    if button and button.is_visible():
+                        logger.info(f"Clicking load more button ({current_count} issues so far)...")
+                        button.click()
+                        clicked = True
+                        button_found = True
+                        # Wait for new content to load
+                        page.wait_for_timeout(1500)
+                        break
+                except Exception:
+                    continue
+
+            if not button_found:
+                # No button found, stop trying
+                if clicked:
+                    logger.info(f"No more 'Load More' buttons, loaded {current_count} issues")
+                break
+
+            # Log progress every 10 clicks
+            if (click_num + 1) % 10 == 0:
+                logger.info(f"Load more: {click_num + 1} clicks, {current_count} issues loaded")
+
+        return clicked
+
     @staticmethod
     def _default_config() -> dict[str, Any]:
         """Return default configuration for Healthcare Brew."""
@@ -91,7 +159,7 @@ class HealthcareBrewScraper(BaseScraper):
         Discover all issue URLs from the Healthcare Brew archive.
 
         The archive page loads via JavaScript and may require scrolling
-        to load all issues.
+        or clicking "Load More" to load all issues.
 
         Args:
             limit: Maximum number of issues to return
@@ -111,10 +179,13 @@ class HealthcareBrewScraper(BaseScraper):
             # Wait for content to render
             page.wait_for_timeout(2000)
 
-            # Scroll to load all issues (they may lazy-load)
-            # More scrolls + longer wait for archives with many issues
-            # 100 scrolls × 800ms = 80 seconds max, enough for 300+ issues
-            self._scroll_to_load_all(page, max_scrolls=100, wait_ms=800)
+            # Try to load more issues - some archives use buttons, some use scroll
+            # First, try clicking "Load More" / "Show More" buttons repeatedly
+            load_more_clicked = self._click_load_more_buttons(page, max_clicks=50, target_count=limit or 300)
+
+            # If no load more button, try scrolling for infinite scroll archives
+            if not load_more_clicked:
+                self._scroll_to_load_all(page, max_scrolls=100, wait_ms=800)
 
             # Get page content
             html = page.content()
