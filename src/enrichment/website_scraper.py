@@ -7,6 +7,7 @@ Uses a hybrid approach:
 
 import re
 import logging
+import base64
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from contextlib import contextmanager
@@ -21,6 +22,20 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     PlaywrightTimeout = Exception  # Fallback
+
+# Optional: trafilatura for HTML-to-Markdown conversion (much better for LLM input)
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
+
+# Optional: PDF parsing for Media Kits (often contain valuable contacts)
+try:
+    import pdfplumber
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
 from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS, resolve_domain_redirect, guess_alternative_domains
 
@@ -188,6 +203,322 @@ def is_url_worth_visiting(url: str) -> bool:
         return False
 
     return True
+
+
+# Block page indicators (soft 403s that return 200 status)
+# These sites appear to load but are actually bot challenges
+BLOCK_PAGE_INDICATORS = [
+    "cloudflare", "captcha", "recaptcha", "hcaptcha",
+    "pardon our interruption", "please verify you are human",
+    "access denied", "please complete the security check",
+    "enable javascript", "browser check", "ddos protection",
+    "checking your browser", "ray id", "attention required",
+    "just a moment", "please wait while we verify",
+    "bot detection", "security challenge",
+]
+
+
+def is_block_page(html: str) -> bool:
+    """
+    Detect if a page is actually a block/challenge page (soft 403).
+
+    Many anti-bot systems return 200 OK but serve a challenge page.
+    This wastes scraping effort and confuses contact extraction.
+    """
+    if not html or len(html) < 100:
+        return True  # Suspiciously short content
+
+    html_lower = html.lower()
+
+    # Check for block page indicators
+    indicator_count = sum(1 for ind in BLOCK_PAGE_INDICATORS if ind in html_lower)
+
+    # If multiple indicators or page is very short with one indicator
+    if indicator_count >= 2:
+        return True
+    if indicator_count >= 1 and len(html) < 5000:
+        return True
+
+    # Check for Cloudflare-specific patterns
+    if "cf-browser-verification" in html_lower or "cf_chl_opt" in html_lower:
+        return True
+
+    return False
+
+
+def html_to_clean_text(html: str, preserve_links: bool = True) -> str:
+    """
+    Convert HTML to clean text optimized for LLM processing.
+
+    This dramatically reduces token usage while preserving semantic meaning.
+    Following best practices from research on LLM-augmented scraping.
+
+    Args:
+        html: Raw HTML content
+        preserve_links: Whether to preserve href values inline
+
+    Returns:
+        Clean text suitable for LLM input
+    """
+    # Try trafilatura first (best quality, extracts main content only)
+    if TRAFILATURA_AVAILABLE:
+        try:
+            extracted = trafilatura.extract(
+                html,
+                include_links=preserve_links,
+                include_tables=True,
+                no_fallback=False,
+                favor_precision=False,  # Recall is more important for contacts
+            )
+            if extracted and len(extracted) > 100:
+                return extracted
+        except Exception:
+            pass  # Fall back to BeautifulSoup
+
+    # Fallback: manual cleaning with BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+
+    # Remove elements that never contain contact info
+    for tag in soup(["script", "style", "noscript", "svg", "path", "meta", "link",
+                     "head", "iframe", "canvas", "video", "audio", "source"]):
+        tag.decompose()
+
+    # Remove common boilerplate sections (nav, footer often have generic links)
+    # But be careful - footer sometimes has contact info!
+    for tag in soup.find_all(["nav"]):
+        tag.decompose()
+
+    # Get text with link preservation
+    if preserve_links:
+        # Replace links with text + URL in brackets
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            text = a.get_text(strip=True)
+            if href and text and "mailto:" in href:
+                # Preserve mailto links prominently
+                a.replace_with(f"{text} [{href}]")
+            elif href and text and len(text) > 2:
+                # Keep link text with abbreviated URL for context
+                a.replace_with(f"{text}")
+
+    # Get clean text
+    text = soup.get_text(separator=" ", strip=True)
+
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+
+    # Remove CSS artifacts that sometimes leak through
+    text = re.sub(r'[a-z-]+\s*:\s*[^;]+;', '', text)  # CSS properties
+    text = re.sub(r'\{[^}]+\}', '', text)  # CSS blocks
+
+    return text.strip()
+
+
+def decode_base64_emails(text: str, domain: str) -> list[str]:
+    """
+    Find and decode Base64-encoded emails in text/HTML.
+
+    Many sites encode emails in data attributes as Base64 to prevent harvesting.
+    E.g., data-email="am9obkBleGFtcGxlLmNvbQ==" -> john@example.com
+
+    Args:
+        text: Text/HTML content to search
+        domain: Target domain to validate emails against
+
+    Returns:
+        List of decoded email addresses
+    """
+    decoded_emails = []
+
+    # Find potential Base64 strings (data attributes, href values, etc.)
+    # Base64 email pattern: typically 20-60 chars, ends with = padding
+    base64_pattern = re.compile(r'[A-Za-z0-9+/]{20,80}={0,2}')
+
+    for match in base64_pattern.findall(text):
+        try:
+            # Attempt to decode
+            decoded = base64.b64decode(match).decode('utf-8', errors='ignore')
+
+            # Check if it looks like an email
+            email_match = EMAIL_PATTERN.search(decoded)
+            if email_match:
+                email = email_match.group()
+                # Validate it's for the target domain
+                email_domain = email.split('@')[-1].lower()
+                if domain.lower() in email_domain or email_domain in domain.lower():
+                    decoded_emails.append(email)
+
+            # Also check for mailto: prefix
+            if decoded.startswith('mailto:'):
+                email = decoded.replace('mailto:', '').split('?')[0].strip()
+                if EMAIL_PATTERN.match(email):
+                    email_domain = email.split('@')[-1].lower()
+                    if domain.lower() in email_domain or email_domain in domain.lower():
+                        decoded_emails.append(email)
+
+        except Exception:
+            continue  # Not valid Base64 or not decodable
+
+    return list(set(decoded_emails))
+
+
+def extract_contacts_from_pdf(pdf_content: bytes, domain: str) -> list[dict]:
+    """
+    Extract contact information from a PDF file (e.g., Media Kit).
+
+    Media Kits often contain valuable contacts: ad sales directors,
+    partnership managers, rate cards with contact info, etc.
+
+    Args:
+        pdf_content: Raw PDF bytes
+        domain: Target domain for email validation
+
+    Returns:
+        List of contact dicts with email, name, title
+    """
+    if not PDF_AVAILABLE:
+        return []
+
+    contacts = []
+    seen_emails = set()
+
+    try:
+        import io
+        pdf_file = io.BytesIO(pdf_content)
+
+        with pdfplumber.open(pdf_file) as pdf:
+            full_text = ""
+
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                full_text += page_text + "\n"
+
+                # Also check tables (often contain contact info)
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if row:
+                            full_text += " ".join(str(cell) for cell in row if cell) + "\n"
+
+            # Extract emails from PDF text
+            emails = EMAIL_PATTERN.findall(full_text)
+
+            # Also check for obfuscated patterns
+            for pattern, _ in EMAIL_OBFUSCATION_PATTERNS:
+                obfuscated = re.findall(pattern, full_text, re.IGNORECASE)
+                for match in obfuscated:
+                    if isinstance(match, tuple):
+                        decoded = f"{match[0]}@{match[1]}.{match[2]}"
+                        if EMAIL_PATTERN.match(decoded):
+                            emails.append(decoded)
+
+            # Process found emails
+            for email in emails:
+                email_lower = email.lower()
+                email_domain = email_lower.split('@')[-1]
+
+                # Skip non-matching domains and spam patterns
+                if domain.lower() not in email_domain and email_domain not in domain.lower():
+                    continue
+                if any(skip in email_lower for skip in ["noreply", "no-reply", "unsubscribe"]):
+                    continue
+                if email_lower in seen_emails:
+                    continue
+
+                seen_emails.add(email_lower)
+
+                # Try to find name/title near the email
+                contact = {"email": email, "name": None, "title": None, "source": "pdf_media_kit"}
+
+                # Search for context around email
+                email_pos = full_text.lower().find(email_lower)
+                if email_pos != -1:
+                    context = full_text[max(0, email_pos - 200):email_pos + 50]
+
+                    # Look for title keywords
+                    title_keywords = [
+                        "Director", "Manager", "VP", "Vice President", "Head of",
+                        "Advertising", "Sales", "Marketing", "Partnerships", "Media",
+                        "Contact", "Business Development", "Commercial",
+                    ]
+                    for keyword in title_keywords:
+                        if keyword.lower() in context.lower():
+                            # Try to extract full title
+                            title_match = re.search(
+                                rf'({keyword}[^,\n@]*)',
+                                context,
+                                re.IGNORECASE
+                            )
+                            if title_match:
+                                contact["title"] = title_match.group(1).strip()[:60]
+                                break
+
+                    # Look for name (2-3 capitalized words)
+                    name_pattern = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b')
+                    names = name_pattern.findall(context)
+                    if names:
+                        # Filter out common non-names
+                        skip_names = ["Media Kit", "Contact Us", "Sales Team", "Press Room"]
+                        for name in names:
+                            if name not in skip_names and len(name) > 4:
+                                contact["name"] = name
+                                break
+
+                contacts.append(contact)
+
+    except Exception as e:
+        logger.warning(f"PDF extraction error: {e}")
+
+    return contacts
+
+
+# High-value page patterns for tiered prioritization (from research document)
+# Tier 1 = most likely to have advertising/media contacts
+PAGE_PRIORITY_TIERS = {
+    "tier1_critical": [
+        "media-kit", "mediakit", "media_kit", "advertise", "advertising",
+        "partnership", "press-room", "pressroom", "public-relations",
+        "ad-sales", "adsales", "sponsor",
+    ],
+    "tier2_high": [
+        "investor-relations", "corporate", "media-assets", "newsroom",
+        "press-release", "press", "news",
+    ],
+    "tier3_moderate": [
+        "about-us", "about", "our-team", "team", "leadership",
+        "board-of-directors", "management", "contact",
+    ],
+    "tier4_low": [
+        "support", "help", "faq", "customer-service",
+    ],
+}
+
+
+def score_url_priority(url: str) -> int:
+    """
+    Score a URL's priority for contact discovery (higher = better).
+
+    Based on tiered keyword system from research document.
+    """
+    url_lower = url.lower()
+
+    for keyword in PAGE_PRIORITY_TIERS["tier1_critical"]:
+        if keyword in url_lower:
+            return 100
+
+    for keyword in PAGE_PRIORITY_TIERS["tier2_high"]:
+        if keyword in url_lower:
+            return 75
+
+    for keyword in PAGE_PRIORITY_TIERS["tier3_moderate"]:
+        if keyword in url_lower:
+            return 50
+
+    for keyword in PAGE_PRIORITY_TIERS["tier4_low"]:
+        if keyword in url_lower:
+            return 10
+
+    return 25  # Default for unknown pages
 
 
 class WebsiteScraper:
@@ -438,6 +769,79 @@ class WebsiteScraper:
 
         return contact_urls[:15]  # Limit to 15 most relevant links
 
+    def _click_reveal_email_buttons(self, page) -> int:
+        """
+        Find and click buttons/links that reveal hidden email addresses.
+
+        Many sites hide emails behind "Show Email", "Reveal Contact" buttons
+        to prevent basic scraping. This mimics human behavior to reveal them.
+
+        Returns:
+            Number of buttons clicked
+        """
+        reveal_keywords = [
+            "show email", "reveal email", "view email", "see email",
+            "show contact", "reveal contact", "view contact",
+            "click to reveal", "click here for email", "get email",
+            "email address", "contact info", "show address",
+            "unhide", "display email",
+        ]
+
+        buttons_clicked = 0
+        max_clicks = 3  # Limit to prevent infinite loops
+
+        try:
+            # Find clickable elements with reveal-like text
+            for keyword in reveal_keywords:
+                if buttons_clicked >= max_clicks:
+                    break
+
+                # Try buttons
+                buttons = page.query_selector_all(f'button:has-text("{keyword}")')
+                for btn in buttons[:1]:  # Only click first match per keyword
+                    try:
+                        btn.click(timeout=2000)
+                        page.wait_for_timeout(500)  # Wait for reveal animation
+                        buttons_clicked += 1
+                        self._log(f"  Clicked reveal button: '{keyword}'")
+                    except Exception:
+                        continue
+
+                # Try links/spans
+                links = page.query_selector_all(f'a:has-text("{keyword}"), span:has-text("{keyword}")')
+                for link in links[:1]:
+                    try:
+                        link.click(timeout=2000)
+                        page.wait_for_timeout(500)
+                        buttons_clicked += 1
+                        self._log(f"  Clicked reveal link: '{keyword}'")
+                    except Exception:
+                        continue
+
+            # Also check for common CSS classes/data attributes
+            reveal_selectors = [
+                '[data-reveal-email]', '[data-show-email]',
+                '.reveal-email', '.show-email', '.email-reveal',
+                '[onclick*="email"]', '[onclick*="reveal"]',
+            ]
+            for selector in reveal_selectors:
+                if buttons_clicked >= max_clicks:
+                    break
+                try:
+                    elements = page.query_selector_all(selector)
+                    for elem in elements[:1]:
+                        elem.click(timeout=2000)
+                        page.wait_for_timeout(500)
+                        buttons_clicked += 1
+                        self._log(f"  Clicked reveal element: '{selector}'")
+                except Exception:
+                    continue
+
+        except Exception as e:
+            self._log(f"  Reveal button search error: {e}", "warning")
+
+        return buttons_clicked
+
     def _scrape_with_browser(self, domain: str, urls: list[str]) -> list[WebsiteContact]:
         """
         Scrape URLs using Playwright for JavaScript-rendered content.
@@ -466,6 +870,37 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+
+            # Network interception: block unnecessary resources for faster loads
+            # This dramatically speeds up scraping while preserving contact info
+            def handle_route(route):
+                """Block images, fonts, media, and tracking scripts."""
+                resource_type = route.request.resource_type
+                url = route.request.url.lower()
+
+                # Block resource types that never contain contact info
+                blocked_types = {"image", "media", "font", "stylesheet"}
+                if resource_type in blocked_types:
+                    route.abort()
+                    return
+
+                # Block common tracking/analytics scripts
+                tracking_domains = [
+                    "google-analytics", "googletagmanager", "facebook.net",
+                    "doubleclick", "analytics", "tracking", "pixel",
+                    "hotjar", "mixpanel", "segment", "amplitude",
+                    "intercom", "crisp", "drift", "hubspot",
+                ]
+                if any(td in url for td in tracking_domains):
+                    route.abort()
+                    return
+
+                # Allow everything else
+                route.continue_()
+
+            # Enable route interception
+            page.route("**/*", handle_route)
+
             crash_count = 0  # Track consecutive crashes
 
             # Filter URLs and limit to 8 max for speed
@@ -487,6 +922,28 @@ class WebsiteScraper:
                     # Get rendered HTML
                     html = page.content()
                     crash_count = 0  # Reset on success
+
+                    # Check for block page (soft 403)
+                    if is_block_page(html):
+                        self._log(f"  Block page detected, skipping: {url}", "warning")
+                        continue
+
+                    # Try to click "reveal email" buttons before extraction
+                    self._click_reveal_email_buttons(page)
+
+                    # Re-get HTML after potential reveals
+                    html = page.content()
+
+                    # Try to decode any Base64-encoded emails
+                    base64_emails = decode_base64_emails(html, domain)
+                    for email in base64_emails:
+                        if email not in all_emails:
+                            all_emails[email] = WebsiteContact(
+                                email=email,
+                                source_page=url,
+                                email_type="generic",
+                            )
+                            self._log(f"  Found Base64-encoded email: {email}")
 
                     # Extract contacts
                     contacts = self._extract_contacts_from_html(html, url, domain)
@@ -803,6 +1260,12 @@ class WebsiteScraper:
                         if new_url not in visited_urls and new_url not in urls_to_visit:
                             urls_to_visit.append(new_url)
 
+                    # Check for PDF Media Kits on the homepage
+                    pdf_contacts = self._find_and_process_pdfs(html, base_url, domain)
+                    for contact in pdf_contacts:
+                        if contact.email not in all_emails:
+                            all_emails[contact.email] = contact
+
                     # Use Claude to pick the BEST links from actual links on the page
                     # This is more accurate than Claude guessing paths from raw HTML
                     agent = self._get_claude_agent()
@@ -859,6 +1322,22 @@ class WebsiteScraper:
                 consecutive_errors = 0
                 pages_scraped += 1
                 html = response.text
+
+                # Check for block page (soft 403)
+                if is_block_page(html):
+                    self._log(f"Block page detected: {url}", "warning")
+                    continue
+
+                # Try to decode any Base64-encoded emails
+                base64_emails = decode_base64_emails(html, domain)
+                for email in base64_emails:
+                    if email not in all_emails:
+                        all_emails[email] = WebsiteContact(
+                            email=email,
+                            source_page=url,
+                            email_type="generic",
+                        )
+                        self._log(f"Found Base64-encoded email: {email}")
 
                 # Extract contacts from this page using regex
                 page_contacts = self._extract_contacts_from_html(html, url, domain)
@@ -1507,6 +1986,73 @@ class WebsiteScraper:
                 continue
 
         return links[:50]  # Limit to 50 links to avoid overwhelming Claude
+
+    def _find_and_process_pdfs(self, html: str, base_url: str, domain: str) -> list[WebsiteContact]:
+        """
+        Find PDF links (especially Media Kits) and extract contacts from them.
+
+        Media Kits are gold mines for ad sales contacts but are often overlooked
+        by HTML-only scrapers.
+        """
+        if not PDF_AVAILABLE:
+            return []
+
+        contacts = []
+        soup = BeautifulSoup(html, "lxml")
+
+        # Keywords that indicate valuable PDFs
+        pdf_keywords = [
+            "media kit", "mediakit", "media-kit", "rate card", "ratecard",
+            "advertising", "ad specs", "press kit", "presskit",
+            "partnership", "sponsor", "media guide",
+        ]
+
+        # Find PDF links
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "").lower()
+            text = a.get_text().lower().strip()
+
+            # Check if it's a PDF link
+            if ".pdf" not in href:
+                continue
+
+            # Check if it's a high-value PDF (media kit, rate card, etc.)
+            is_valuable = any(kw in href or kw in text for kw in pdf_keywords)
+            if not is_valuable:
+                continue
+
+            # Build full URL
+            pdf_url = urljoin(base_url, a.get("href", ""))
+
+            self._log(f"Found potential Media Kit PDF: {pdf_url}")
+
+            try:
+                # Download PDF
+                client = self._get_http_client()
+                response = client.get(pdf_url, timeout=10.0)
+
+                if response.status_code == 200 and len(response.content) < 10_000_000:  # Max 10MB
+                    # Extract contacts from PDF
+                    pdf_contacts = extract_contacts_from_pdf(response.content, domain)
+
+                    for pc in pdf_contacts:
+                        contact = WebsiteContact(
+                            email=pc["email"],
+                            source_page=pdf_url,
+                            email_type="advertising" if any(
+                                kw in (pc.get("title") or "").lower()
+                                for kw in ["advertising", "sales", "media", "partnership"]
+                            ) else "generic",
+                            name=pc.get("name"),
+                            title=pc.get("title"),
+                        )
+                        contacts.append(contact)
+                        self._log(f"  Found in PDF: {contact.email}")
+
+            except Exception as e:
+                self._log(f"  PDF download/parse error: {e}", "warning")
+
+        return contacts
 
     def _find_contact_links(self, html: str, base_url: str) -> list[str]:
         """Find links to contact-related pages."""
