@@ -8,6 +8,7 @@ Uses a hybrid approach:
 import re
 import logging
 import base64
+import random
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from contextlib import contextmanager
@@ -40,6 +41,127 @@ except ImportError:
 from ..utils.helpers import strip_marketing_subdomain, TRACKING_DOMAINS, resolve_domain_redirect, guess_alternative_domains
 
 logger = logging.getLogger(__name__)
+
+
+# User-Agent rotation pool (for anti-bot evasion)
+# These are real, recent browser strings that blend in with normal traffic
+USER_AGENT_POOL = [
+    # Chrome on Windows (most common)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    # Chrome on Mac
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    # Firefox on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+    # Safari on Mac
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    # Edge on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+]
+
+
+def get_random_user_agent() -> str:
+    """Get a random user agent from the pool for anti-bot evasion."""
+    return random.choice(USER_AGENT_POOL)
+
+
+def ghost_cursor_move_and_click(page, element, click: bool = True) -> bool:
+    """
+    Human-like mouse movement using Bezier curves (Ghost Cursor emulation).
+
+    Instead of directly clicking elements, this simulates human mouse behavior:
+    1. Get current mouse position (or random starting point)
+    2. Calculate Bezier curve path to target element
+    3. Move mouse along the curve with natural speed variations
+    4. Click with slight position randomization
+
+    This helps evade bot detection systems that track mouse movement patterns.
+
+    Args:
+        page: Playwright page object
+        element: Target element to move to and click
+        click: Whether to click after moving (default True)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import math
+
+    try:
+        # Get element bounding box
+        bbox = element.bounding_box()
+        if not bbox:
+            # Element not visible, fall back to regular click
+            if click:
+                element.click(timeout=2000)
+            return True
+
+        # Target coordinates: center of element with slight randomization
+        target_x = bbox["x"] + bbox["width"] / 2 + random.uniform(-5, 5)
+        target_y = bbox["y"] + bbox["height"] / 2 + random.uniform(-3, 3)
+
+        # Get viewport size for starting position
+        viewport = page.viewport_size or {"width": 1280, "height": 720}
+
+        # Starting position: current or random position in viewport
+        start_x = random.uniform(viewport["width"] * 0.3, viewport["width"] * 0.7)
+        start_y = random.uniform(viewport["height"] * 0.3, viewport["height"] * 0.7)
+
+        # Generate Bezier curve control points for natural movement
+        # Human mouse movements typically have slight curves, not straight lines
+        mid_x = (start_x + target_x) / 2 + random.uniform(-50, 50)
+        mid_y = (start_y + target_y) / 2 + random.uniform(-30, 30)
+
+        # Calculate distance for determining number of steps
+        distance = math.sqrt((target_x - start_x) ** 2 + (target_y - start_y) ** 2)
+
+        # More steps for longer distances, minimum 5, maximum 25
+        num_steps = max(5, min(25, int(distance / 20)))
+
+        # Generate points along quadratic Bezier curve
+        points = []
+        for i in range(num_steps + 1):
+            t = i / num_steps
+            # Quadratic Bezier: B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
+            x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * mid_x + t ** 2 * target_x
+            y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * mid_y + t ** 2 * target_y
+
+            # Add slight randomization to each point for natural jitter
+            x += random.uniform(-1, 1)
+            y += random.uniform(-1, 1)
+            points.append((x, y))
+
+        # Move mouse along the curve with variable delays (human-like speed)
+        for i, (x, y) in enumerate(points):
+            page.mouse.move(x, y)
+
+            # Variable delay: slower at start and end, faster in middle (human-like)
+            progress = i / len(points)
+            if progress < 0.2 or progress > 0.8:
+                delay = random.uniform(8, 15)  # Slower at start/end
+            else:
+                delay = random.uniform(3, 8)   # Faster in middle
+
+            page.wait_for_timeout(delay)
+
+        # Small pause before clicking (like human hesitation)
+        if click:
+            page.wait_for_timeout(random.uniform(50, 150))
+            page.mouse.click(target_x, target_y)
+
+        return True
+
+    except Exception as e:
+        # Fall back to regular click on any error
+        try:
+            if click:
+                element.click(timeout=2000)
+            return True
+        except Exception:
+            return False
 
 
 # Link services that should not be scraped (not actual company websites)
@@ -521,6 +643,226 @@ def score_url_priority(url: str) -> int:
     return 25  # Default for unknown pages
 
 
+def check_content_type(url: str, client: httpx.Client, timeout: float = 3.0) -> str | None:
+    """
+    Perform HEAD request to check Content-Type before full download.
+
+    This is critical for efficiency: PDF Media Kits should go to PDF parser,
+    not the HTML scraper. Saves bandwidth and processing time.
+
+    Returns:
+        Content-Type string (e.g., "application/pdf", "text/html") or None on error
+    """
+    try:
+        response = client.head(url, timeout=timeout)
+        content_type = response.headers.get("content-type", "").lower()
+        return content_type.split(";")[0].strip()  # Remove charset suffix
+    except Exception:
+        return None
+
+
+def verify_email_smtp(email: str, timeout: float = 5.0) -> bool:
+    """
+    Verify an email address exists using SMTP handshake (without sending).
+
+    This helps filter out invalid/fake emails before adding to results.
+
+    Process:
+    1. DNS MX record lookup
+    2. Connect to SMTP server
+    3. EHLO handshake
+    4. MAIL FROM
+    5. RCPT TO - if server returns 250, email likely exists
+
+    Args:
+        email: Email address to verify
+        timeout: Connection timeout in seconds
+
+    Returns:
+        True if email appears valid, False otherwise
+    """
+    import socket
+    import dns.resolver
+
+    try:
+        # Extract domain
+        domain = email.split("@")[-1]
+
+        # Get MX records
+        try:
+            mx_records = dns.resolver.resolve(domain, "MX")
+            mx_host = str(sorted(mx_records, key=lambda x: x.preference)[0].exchange).rstrip(".")
+        except Exception:
+            # No MX records - try A record as fallback
+            mx_host = domain
+
+        # Connect to SMTP server
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((mx_host, 25))
+
+        # Read greeting
+        sock.recv(1024)
+
+        # Send EHLO
+        sock.send(b"EHLO scraper.local\r\n")
+        sock.recv(1024)
+
+        # Send MAIL FROM
+        sock.send(b"MAIL FROM:<verify@scraper.local>\r\n")
+        sock.recv(1024)
+
+        # Send RCPT TO - this is the key check
+        sock.send(f"RCPT TO:<{email}>\r\n".encode())
+        response = sock.recv(1024).decode()
+
+        sock.send(b"QUIT\r\n")
+        sock.close()
+
+        # 250 = OK, 251 = forwarded, 252 = cannot verify but will accept
+        # 550 = user unknown, 551 = user not local, 553 = mailbox name invalid
+        return response.startswith(("250", "251", "252"))
+
+    except Exception:
+        # On error, assume email is valid (don't want to filter out good emails)
+        return True
+
+
+def extract_contacts_from_screenshot(
+    screenshot_base64: str,
+    page_url: str,
+    api_key: str | None = None,
+) -> list[dict]:
+    """
+    Use Claude Vision to extract contact information from a screenshot.
+
+    This is the "sniper" fallback for when text extraction fails but
+    we suspect contact info is present (e.g., rendered in canvas/shadow DOM).
+
+    Args:
+        screenshot_base64: Base64-encoded screenshot image
+        page_url: URL of the page (for context)
+        api_key: Anthropic API key
+
+    Returns:
+        List of contact dicts with email, name, title
+    """
+    import os
+
+    api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        import httpx
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+        # Vision prompt optimized for contact extraction
+        prompt = """Analyze this screenshot and extract ALL contact information visible.
+
+Look for:
+1. Email addresses (including partially visible or stylized ones)
+2. Names associated with contacts
+3. Job titles (especially: Director, VP, Manager, Sales, Marketing, Media, Partnerships)
+4. Phone numbers
+
+Return ONLY valid JSON in this format:
+{
+    "contacts": [
+        {"email": "email@domain.com", "name": "Full Name", "title": "Job Title"},
+        ...
+    ]
+}
+
+If no contacts are visible, return: {"contacts": []}
+Do NOT make up or guess email addresses."""
+
+        payload = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": screenshot_base64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        },
+                    ],
+                }
+            ],
+        }
+
+        client = httpx.Client(timeout=30.0)
+        response = client.post(
+            "https://api.anthropic.com/v1/messages",
+            json=payload,
+            headers=headers,
+        )
+        client.close()
+
+        if response.status_code != 200:
+            logger.warning(f"Vision API error: {response.status_code}")
+            return []
+
+        result = response.json()
+        content = result.get("content", [])
+        if content and content[0].get("type") == "text":
+            text = content[0].get("text", "")
+            # Parse JSON from response
+            import json
+            # Find JSON in response
+            json_start = text.find("{")
+            json_end = text.rfind("}") + 1
+            if json_start != -1 and json_end > json_start:
+                data = json.loads(text[json_start:json_end])
+                return data.get("contacts", [])
+
+        return []
+
+    except Exception as e:
+        logger.warning(f"Vision extraction error: {e}")
+        return []
+
+
+# Few-shot examples for email classification (improves LLM accuracy)
+EMAIL_CLASSIFICATION_EXAMPLES = """
+Examples of email classification for Ad Sales relevance:
+
+Input: "support@company.com" -> Output: REJECT (customer support, not decision-maker)
+Input: "help@company.com" -> Output: REJECT (support alias)
+Input: "jobs@company.com" -> Output: REJECT (HR/recruiting)
+Input: "careers@company.com" -> Output: REJECT (HR/recruiting)
+Input: "legal@company.com" -> Output: REJECT (legal department)
+Input: "noreply@company.com" -> Output: REJECT (automated, no human)
+Input: "billing@company.com" -> Output: REJECT (finance/accounting)
+
+Input: "advertising@company.com" -> Output: KEEP (direct ad sales contact)
+Input: "ads@company.com" -> Output: KEEP (advertising contact)
+Input: "media@company.com" -> Output: KEEP (media/advertising contact)
+Input: "press@company.com" -> Output: KEEP (PR contact, valuable for partnerships)
+Input: "partnerships@company.com" -> Output: KEEP (business development)
+Input: "marketing@company.com" -> Output: KEEP (marketing decision-maker)
+Input: "sales@company.com" -> Output: KEEP (sales contact)
+Input: "hello@company.com" -> Output: KEEP (general inbox, often reaches decision-makers at startups)
+Input: "info@company.com" -> Output: KEEP (general contact, acceptable fallback)
+Input: "j.smith@company.com" (near text "VP of Marketing") -> Output: KEEP (personal email of decision-maker)
+"""
+
+
 class WebsiteScraper:
     """Scrapes company websites to find contact information.
 
@@ -538,6 +880,7 @@ class WebsiteScraper:
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
+        verify_emails: bool = False,  # SMTP verification (slow but accurate)
         log_callback: callable = None,
     ):
         """
@@ -549,6 +892,7 @@ class WebsiteScraper:
             max_errors: Stop scraping after this many consecutive errors
             use_browser: Use Playwright for JS-rendered sites (default True)
             use_claude: Use Claude for intelligent page discovery and extraction
+            verify_emails: Verify emails via SMTP (disabled by default - adds latency)
             log_callback: Optional callback for live logging
         """
         self.timeout = timeout
@@ -556,6 +900,7 @@ class WebsiteScraper:
         self.max_errors = max_errors
         self.use_browser = use_browser and PLAYWRIGHT_AVAILABLE
         self.use_claude = use_claude
+        self.verify_emails = verify_emails
         self._log_callback = log_callback
         self._claude_agent = None
         self._http_client = None  # Lazy-initialized, reused across all domains
@@ -721,8 +1066,9 @@ class WebsiteScraper:
             "about", "about us", "team", "leadership", "company", "who we are",
         ]
 
+        # Use random User-Agent for each browser context (anti-bot evasion)
         context = browser.new_context(
-            user_agent=self.headers["User-Agent"],
+            user_agent=get_random_user_agent(),
             viewport={"width": 1280, "height": 720},
         )
 
@@ -774,7 +1120,8 @@ class WebsiteScraper:
         Find and click buttons/links that reveal hidden email addresses.
 
         Many sites hide emails behind "Show Email", "Reveal Contact" buttons
-        to prevent basic scraping. This mimics human behavior to reveal them.
+        to prevent basic scraping. Uses Ghost Cursor (human-like mouse movement)
+        to evade bot detection while revealing hidden contacts.
 
         Returns:
             Number of buttons clicked
@@ -796,25 +1143,25 @@ class WebsiteScraper:
                 if buttons_clicked >= max_clicks:
                     break
 
-                # Try buttons
+                # Try buttons (use Ghost Cursor for human-like mouse movement)
                 buttons = page.query_selector_all(f'button:has-text("{keyword}")')
                 for btn in buttons[:1]:  # Only click first match per keyword
                     try:
-                        btn.click(timeout=2000)
-                        page.wait_for_timeout(500)  # Wait for reveal animation
-                        buttons_clicked += 1
-                        self._log(f"  Clicked reveal button: '{keyword}'")
+                        if ghost_cursor_move_and_click(page, btn):
+                            page.wait_for_timeout(500)  # Wait for reveal animation
+                            buttons_clicked += 1
+                            self._log(f"  Clicked reveal button: '{keyword}' (Ghost Cursor)")
                     except Exception:
                         continue
 
-                # Try links/spans
+                # Try links/spans (use Ghost Cursor)
                 links = page.query_selector_all(f'a:has-text("{keyword}"), span:has-text("{keyword}")')
                 for link in links[:1]:
                     try:
-                        link.click(timeout=2000)
-                        page.wait_for_timeout(500)
-                        buttons_clicked += 1
-                        self._log(f"  Clicked reveal link: '{keyword}'")
+                        if ghost_cursor_move_and_click(page, link):
+                            page.wait_for_timeout(500)
+                            buttons_clicked += 1
+                            self._log(f"  Clicked reveal link: '{keyword}' (Ghost Cursor)")
                     except Exception:
                         continue
 
@@ -830,10 +1177,10 @@ class WebsiteScraper:
                 try:
                     elements = page.query_selector_all(selector)
                     for elem in elements[:1]:
-                        elem.click(timeout=2000)
-                        page.wait_for_timeout(500)
-                        buttons_clicked += 1
-                        self._log(f"  Clicked reveal element: '{selector}'")
+                        if ghost_cursor_move_and_click(page, elem):
+                            page.wait_for_timeout(500)
+                            buttons_clicked += 1
+                            self._log(f"  Clicked reveal element: '{selector}' (Ghost Cursor)")
                 except Exception:
                     continue
 
@@ -863,8 +1210,9 @@ class WebsiteScraper:
         if not browser:
             return []
 
+        # Use random User-Agent for each browser context (anti-bot evasion)
         context = browser.new_context(
-            user_agent=self.headers["User-Agent"],
+            user_agent=get_random_user_agent(),
             viewport={"width": 1280, "height": 720},
         )
 
@@ -1016,8 +1364,9 @@ class WebsiteScraper:
         if not browser:
             return []
 
+        # Use random User-Agent for each browser context (anti-bot evasion)
         context = browser.new_context(
-            user_agent=self.headers["User-Agent"],
+            user_agent=get_random_user_agent(),
             viewport={"width": 1280, "height": 720},
         )
 
@@ -1600,7 +1949,38 @@ class WebsiteScraper:
         # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
         # Call scraper.close() when done with all scraping to clean up
 
+        # Phase N: Vision fallback - take screenshot if no contacts found
+        # This uses Claude Vision to OCR contact info that might be rendered
+        # in canvas, shadow DOM, or image-based text
+        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE:
+            self._log("No contacts found via text. Trying Vision/screenshot fallback...")
+            try:
+                screenshot_contacts = self._try_vision_fallback(base_url, domain)
+                for contact in screenshot_contacts:
+                    if contact.email not in all_emails:
+                        all_emails[contact.email] = contact
+                        self._log(f"  Vision found: {contact.email}")
+            except Exception as e:
+                self._log(f"  Vision fallback failed: {e}", "warning")
+
         result.contacts = self._prioritize_contacts(list(all_emails.values()))
+
+        # Optional: SMTP email verification (disabled by default - adds latency)
+        if self.verify_emails and result.contacts:
+            self._log(f"Verifying {len(result.contacts)} emails via SMTP...")
+            verified_contacts = []
+            for contact in result.contacts:
+                try:
+                    if verify_email_smtp(contact.email, timeout=5.0):
+                        verified_contacts.append(contact)
+                        self._log(f"  ✓ Verified: {contact.email}")
+                    else:
+                        self._log(f"  ✗ Invalid: {contact.email}")
+                except Exception as e:
+                    # On verification error, keep the email (conservative approach)
+                    verified_contacts.append(contact)
+                    self._log(f"  ? Could not verify: {contact.email} ({e})")
+            result.contacts = verified_contacts
 
         if result.contacts:
             self._log(f"Found {len(result.contacts)} contacts on {domain}")
@@ -2027,8 +2407,15 @@ class WebsiteScraper:
             self._log(f"Found potential Media Kit PDF: {pdf_url}")
 
             try:
-                # Download PDF
                 client = self._get_http_client()
+
+                # Pre-check Content-Type with HEAD request (saves bandwidth)
+                content_type = check_content_type(pdf_url, client, timeout=3.0)
+                if content_type and "pdf" not in content_type:
+                    self._log(f"  Skipping non-PDF content: {content_type}")
+                    continue
+
+                # Download PDF
                 response = client.get(pdf_url, timeout=10.0)
 
                 if response.status_code == 200 and len(response.content) < 10_000_000:  # Max 10MB
@@ -2051,6 +2438,76 @@ class WebsiteScraper:
 
             except Exception as e:
                 self._log(f"  PDF download/parse error: {e}", "warning")
+
+        return contacts
+
+    def _try_vision_fallback(self, base_url: str, domain: str) -> list[WebsiteContact]:
+        """
+        Use Claude Vision to extract contacts from a screenshot.
+
+        This is a "sniper" fallback for when text extraction fails but
+        we suspect contact info is present (e.g., rendered in canvas,
+        shadow DOM, or image-based text).
+
+        Args:
+            base_url: Homepage URL to screenshot
+            domain: Domain being scraped
+
+        Returns:
+            List of WebsiteContact objects found via Vision
+        """
+        import base64
+
+        contacts = []
+        browser = self._get_browser()
+
+        if not browser:
+            return contacts
+
+        context = browser.new_context(
+            user_agent=get_random_user_agent(),
+            viewport={"width": 1920, "height": 1080},  # Larger viewport for better screenshot
+        )
+
+        try:
+            page = context.new_page()
+            page.goto(base_url, wait_until="networkidle", timeout=15000)
+            page.wait_for_timeout(2000)  # Wait for any animations/lazy loading
+
+            # Try to scroll to footer (contact info often there)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+            page.wait_for_timeout(500)
+
+            # Take full page screenshot
+            screenshot_bytes = page.screenshot(full_page=False)  # Just visible viewport
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+
+            # Use Vision to extract contacts
+            vision_contacts = extract_contacts_from_screenshot(screenshot_b64, base_url)
+
+            for vc in vision_contacts:
+                email = vc.get("email", "")
+                if not email or not EMAIL_PATTERN.match(email):
+                    continue
+
+                # Validate email domain matches target
+                email_domain = email.split("@")[-1].lower()
+                if domain.lower() not in email_domain and email_domain not in domain.lower():
+                    continue
+
+                contact = WebsiteContact(
+                    email=email,
+                    source_page=base_url,
+                    email_type="generic",
+                    name=vc.get("name"),
+                    title=vc.get("title"),
+                )
+                contacts.append(contact)
+
+        except Exception as e:
+            self._log(f"Vision screenshot error: {e}", "warning")
+        finally:
+            context.close()
 
         return contacts
 
