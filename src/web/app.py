@@ -303,56 +303,61 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
 
         # ===== PHASE 2: Scrape company websites for contacts =====
-        add_log("🔍 Phase 2: Finding contact info on company websites...")
-        update_status(current_action="Finding contacts")
+        if unique:
+            add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies...")
+            update_status(current_action="Finding contacts")
 
-        for idx, company in enumerate(unique):
-            domain = company.get("domain")
-            name = company.get("company_name", "Unknown")
+            total = len(unique)
+            for idx, company in enumerate(unique):
+                domain = company.get("domain")
+                name = company.get("company_name", "Unknown")
 
-            if not domain:
-                add_log(f"  ⚪ [{idx+1}/{len(unique)}] {name} - no domain, skipping")
-                company["emails"] = ""
-                company["phones"] = ""
-                continue
+                if not domain:
+                    add_log(f"  ⚪ [{idx+1}/{total}] {name} - no domain, skipping")
+                    company["emails"] = ""
+                    company["phones"] = ""
+                    continue
 
-            update_status(
-                current_action=f"Scraping {idx+1}/{len(unique)}: {domain}",
-                progress=50 + int((idx / len(unique)) * 50),
-            )
-
-            add_log(f"  🌐 [{idx+1}/{len(unique)}] {domain}...")
-
-            try:
-                scraper = WebsiteScraper(
-                    timeout=8.0,
-                    max_pages=5,
-                    use_browser=False,
-                    use_claude=False,
+                update_status(
+                    current_action=f"Scraping {idx+1}/{total}: {domain}",
+                    progress=50 + int((idx / max(total, 1)) * 50),
                 )
-                result = scraper.scrape_domain(domain)
 
-                # Collect all emails and phones
-                emails = []
-                phones = []
-                for contact in result.contacts:
-                    if contact.email and contact.email not in emails:
-                        emails.append(contact.email)
-                    if contact.phone and contact.phone not in phones:
-                        phones.append(contact.phone)
+                add_log(f"  🌐 [{idx+1}/{total}] {domain}...")
 
-                company["emails"] = "; ".join(emails[:5])  # Max 5 emails
-                company["phones"] = "; ".join(phones[:3])  # Max 3 phones
+                try:
+                    scraper = WebsiteScraper(
+                        timeout=10.0,
+                        max_pages=6,
+                        use_browser=False,
+                        use_claude=False,
+                    )
+                    result = scraper.scrape_domain(domain)
 
-                if emails:
-                    add_log(f"    ✅ Found {len(emails)} email(s), {len(phones)} phone(s)")
-                else:
-                    add_log(f"    ⚪ No contacts found")
+                    # Collect all emails and phones
+                    emails = []
+                    phones = []
+                    if result and result.contacts:
+                        for contact in result.contacts:
+                            if contact.email and contact.email not in emails:
+                                emails.append(contact.email)
+                            if contact.phone and contact.phone not in phones:
+                                phones.append(contact.phone)
 
-            except Exception as e:
-                add_log(f"    ❌ Error: {str(e)[:40]}", level="error")
-                company["emails"] = ""
-                company["phones"] = ""
+                    company["emails"] = "; ".join(emails[:5])  # Max 5 emails
+                    company["phones"] = "; ".join(phones[:3])  # Max 3 phones
+
+                    if emails:
+                        add_log(f"    ✅ Found {len(emails)} email(s), {len(phones)} phone(s)")
+                    else:
+                        add_log(f"    ⚪ No contacts found")
+
+                except Exception as e:
+                    add_log(f"    ❌ Error: {str(e)[:50]}", level="error")
+                    company["emails"] = ""
+                    company["phones"] = ""
+        else:
+            add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
 
         # Save results
         add_log("💾 Saving results...")

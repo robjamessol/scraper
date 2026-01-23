@@ -76,15 +76,19 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
-# Default pages to check - Claude will suggest better ones based on the site
+# Default pages to check for contact info
 CONTACT_PAGE_PATTERNS = [
     # Advertising/partnership pages - HIGHEST PRIORITY
     "/advertise", "/advertising", "/partnerships", "/partners",
-    "/media-kit", "/mediakit", "/sponsorship",
-    # Contact pages
-    "/contact", "/contact-us",
-    # About pages (often has footer contact info)
-    "/about", "/about-us", "/team",
+    "/media-kit", "/mediakit", "/sponsorship", "/sponsors",
+    # Contact pages - EXPANDED
+    "/contact", "/contact-us", "/connect", "/connect-with-us",
+    "/get-in-touch", "/reach-us", "/reach-out", "/talk-to-us",
+    "/enquiry", "/inquiry", "/enquiries", "/inquiries",
+    # About pages (often has contact info)
+    "/about", "/about-us", "/team", "/our-team",
+    # Business pages
+    "/for-business", "/business", "/enterprise",
 ]
 
 # Email obfuscation patterns to decode
@@ -752,12 +756,15 @@ class WebsiteScraper:
             # Advertising/sales (highest priority for our use case)
             "advertise", "advertising", "sponsors", "sponsorship", "media-kit",
             "mediakit", "ad-sales", "partnerships", "partner",
-            # Contact pages
-            "contact", "get-in-touch", "reach-us", "inquiry", "enquiry",
+            # Contact pages - EXPANDED
+            "contact", "connect", "get-in-touch", "reach-us", "reach-out",
+            "talk-to-us", "inquiry", "enquiry", "inquiries", "enquiries",
             # Team/about pages
             "about", "team", "leadership", "people", "management", "company",
             # Press/media (often has contacts)
             "press", "newsroom", "media", "pr",
+            # Business
+            "for-business", "business", "enterprise",
         ]
 
         base_domain = urlparse(base_url).netloc
