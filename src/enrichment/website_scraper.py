@@ -386,6 +386,149 @@ class WebsiteScraper:
 
         return list(all_emails.values())
 
+    def _scrape_with_browser_and_navigate(self, domain: str, start_urls: list[str]) -> list[WebsiteContact]:
+        """
+        Use browser to navigate pages and CLICK THROUGH to find contact links.
+
+        This mimics human behavior:
+        1. Go to About page
+        2. Look for Press/Media/Contact links
+        3. Click through and extract contacts
+
+        Args:
+            domain: The domain being scraped
+            start_urls: Starting URLs (e.g., /about, /about-us, /company)
+
+        Returns:
+            List of contacts found
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return []
+
+        all_emails: dict[str, WebsiteContact] = {}
+
+        browser = self._get_browser()
+        if not browser:
+            return []
+
+        context = browser.new_context(
+            user_agent=self.headers["User-Agent"],
+            viewport={"width": 1280, "height": 720},
+        )
+
+        try:
+            page = context.new_page()
+
+            # Keywords to look for in links (for clicking through)
+            click_keywords = [
+                "press", "media", "newsroom", "news", "contact",
+                "press & media", "press and media", "media relations",
+                "press room", "media room", "communications",
+            ]
+
+            for start_url in start_urls:
+                if len(all_emails) >= 2:
+                    break  # Found enough
+
+                try:
+                    self._log(f"Browser navigating: {start_url}")
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(800)
+
+                    # First extract any contacts on this page
+                    html = page.content()
+                    contacts = self._extract_contacts_from_html(html, start_url, domain)
+                    for contact in contacts:
+                        if contact.email not in all_emails:
+                            all_emails[contact.email] = contact
+
+                    # Look for mailto links
+                    mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                    for link in mailto_links:
+                        href = link.get_attribute("href")
+                        if href:
+                            email = href.replace("mailto:", "").split("?")[0].strip()
+                            if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                all_emails[email] = WebsiteContact(
+                                    email=email,
+                                    source_page=start_url,
+                                    email_type="generic",
+                                )
+
+                    # Now look for links to click through
+                    all_links = page.query_selector_all('a[href]')
+                    links_to_click = []
+
+                    for link in all_links:
+                        try:
+                            text = (link.inner_text() or "").lower().strip()
+                            href = (link.get_attribute("href") or "").lower()
+
+                            # Check if this link looks like it leads to press/contact
+                            for keyword in click_keywords:
+                                if keyword in text or keyword.replace(" ", "-") in href or keyword.replace(" ", "") in href:
+                                    full_href = link.get_attribute("href")
+                                    if full_href and not full_href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                                        links_to_click.append((link, text, full_href))
+                                        break
+                        except Exception:
+                            continue
+
+                    # Click through found links (max 3)
+                    for link, text, href in links_to_click[:3]:
+                        if len(all_emails) >= 2:
+                            break
+
+                        try:
+                            self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
+
+                            # Navigate to the link
+                            link.click()
+                            page.wait_for_load_state("domcontentloaded", timeout=8000)
+                            page.wait_for_timeout(500)
+
+                            # Extract contacts from new page
+                            html = page.content()
+                            current_url = page.url
+                            contacts = self._extract_contacts_from_html(html, current_url, domain)
+                            for contact in contacts:
+                                if contact.email not in all_emails:
+                                    all_emails[contact.email] = contact
+                                    self._log(f"    Found: {contact.email}")
+
+                            # Check mailto links on new page
+                            mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                            for mailto in mailto_links:
+                                href = mailto.get_attribute("href")
+                                if href:
+                                    email = href.replace("mailto:", "").split("?")[0].strip()
+                                    if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                        all_emails[email] = WebsiteContact(
+                                            email=email,
+                                            source_page=current_url,
+                                            email_type="generic",
+                                        )
+                                        self._log(f"    Found: {email}")
+
+                            # Go back to try next link
+                            page.go_back(wait_until="domcontentloaded", timeout=5000)
+                            page.wait_for_timeout(300)
+
+                        except Exception as e:
+                            self._log(f"  Click navigation error: {str(e)[:50]}", "warning")
+                            # Try to recover by going to next start URL
+                            break
+
+                except PlaywrightTimeout:
+                    self._log(f"Browser timeout: {start_url}", "warning")
+                except Exception as e:
+                    self._log(f"Browser error on {start_url}: {e}", "warning")
+
+        finally:
+            context.close()
+
+        return list(all_emails.values())
+
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """
         Scrape a domain for contact information.
@@ -616,8 +759,64 @@ class WebsiteScraper:
                 if contact.email not in all_emails:
                     all_emails[contact.email] = contact
 
-        # Phase 3 removed for speed - Claude extraction is too slow
-        # Email patterns will be generated and verified via SMTP in apollo.py instead
+        # Phase 3: THOROUGH SEARCH - if still no contacts, try nested/uncommon paths
+        if len(all_emails) == 0:
+            self._log(f"No contacts found, trying thorough nested search...")
+
+            # Common nested paths that sites use (About → Press, Company → Contact, etc.)
+            nested_patterns = [
+                # About section nested pages
+                "/about/press", "/about/media", "/about/press-media", "/about/contact",
+                "/about/team", "/about/leadership", "/about-us/press", "/about-us/media",
+                "/about-us/contact", "/about-us/team",
+                # Company section nested pages
+                "/company/press", "/company/media", "/company/contact", "/company/team",
+                "/company/about", "/company/newsroom",
+                # Press/News variations
+                "/press-room", "/press-releases", "/media-room", "/media-center",
+                "/news/press", "/news/media", "/newsroom/contact", "/newsroom/press",
+                # Corporate pages
+                "/corporate/press", "/corporate/media", "/corporate/contact",
+                # Other common patterns
+                "/info/press", "/info/contact", "/resources/press", "/resources/media",
+                "/en/press", "/en/contact", "/en/about/press",  # Multilingual
+                "/us/press", "/us/contact",  # Regional
+            ]
+
+            # Try these patterns with HTTP first (fast)
+            for pattern in nested_patterns:
+                if len(all_emails) > 0:
+                    break  # Found something, stop
+
+                url = urljoin(base_url, pattern)
+                if url in visited_urls:
+                    continue
+
+                try:
+                    response = client.get(url)
+                    if response.status_code == 200:
+                        visited_urls.add(url)
+                        html = response.text
+                        page_contacts = self._extract_contacts_from_html(html, url, domain)
+                        for contact in page_contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+                                self._log(f"  Found contact on nested page: {pattern}")
+                except Exception:
+                    continue
+
+            # If STILL nothing, use browser to navigate About page and find links
+            if len(all_emails) == 0 and self.use_browser:
+                self._log(f"Trying browser navigation on About page...")
+                about_urls = [
+                    urljoin(base_url, "/about"),
+                    urljoin(base_url, "/about-us"),
+                    urljoin(base_url, "/company"),
+                ]
+                browser_contacts = self._scrape_with_browser_and_navigate(domain, about_urls)
+                for contact in browser_contacts:
+                    if contact.email not in all_emails:
+                        all_emails[contact.email] = contact
 
         # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
         # Call scraper.close() when done with all scraping to clean up
