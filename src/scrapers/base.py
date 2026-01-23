@@ -276,19 +276,29 @@ class BaseScraper(ABC):
             wait_ms: Milliseconds to wait between scrolls (longer = more content loads)
         """
         previous_height = 0
+        no_change_count = 0  # Track consecutive scrolls with no height change
 
         for i in range(max_scrolls):
             # Scroll to bottom
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(wait_ms)
 
-            # Check if we've reached the end
+            # Check if page height changed
             current_height = page.evaluate("document.body.scrollHeight")
             if current_height == previous_height:
-                logger.debug(f"Finished scrolling after {i + 1} scrolls")
-                break
+                no_change_count += 1
+                # Keep scrolling a few more times in case content loads async
+                if no_change_count >= 3:
+                    logger.debug(f"Finished scrolling after {i + 1} scrolls (height stabilized)")
+                    break
+            else:
+                no_change_count = 0  # Reset counter when new content loads
 
             previous_height = current_height
+
+            # Log progress every 20 scrolls
+            if (i + 1) % 20 == 0:
+                logger.info(f"Scrolling... {i + 1} scrolls, page height: {current_height}px")
 
         # Scroll back to top
         page.evaluate("window.scrollTo(0, 0)")
