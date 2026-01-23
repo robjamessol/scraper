@@ -1820,10 +1820,66 @@ class WebsiteScraper:
         # Check if site appears to block HTTP requests (many errors = likely anti-bot)
         site_blocks_http = consecutive_errors >= 2 and pages_scraped == 0
 
-        # Skip browser if domain is completely unreachable (DNS failure)
+        # If domain is completely unreachable (DNS failure), try alternative TLDs
+        # E.g., collectly.com -> collectly.co
         if domain_unreachable:
-            self._log(f"Skipping browser - domain unreachable: {domain}", "warning")
-            result.errors.append(f"Domain unreachable: {domain}")
+            self._log(f"Domain unreachable, trying alternative TLDs...")
+
+            # Try common TLD alternatives (.co, .io, .org are common for tech companies)
+            base_name = domain.split('.')[0]
+            tld_alternatives = [
+                f"{base_name}.co",    # Very common (collectly.co, etc.)
+                f"{base_name}.io",    # Tech companies
+                f"{base_name}.org",   # Non-profits, institutes
+                f"{base_name}.net",   # Networks
+            ]
+
+            # Also get initials-based alternatives for longer names
+            if len(base_name) > 10:
+                tld_alternatives.extend(guess_alternative_domains(domain)[:3])
+
+            for alt_domain in tld_alternatives:
+                if alt_domain == domain:
+                    continue
+
+                alt_base_url = f"https://{alt_domain}"
+                try:
+                    response = client.get(alt_base_url, timeout=5.0)
+                    if response.status_code == 200:
+                        self._log(f"  Found working alternative: {alt_domain}")
+                        # Update domain and base_url for rest of scraping
+                        domain = alt_domain
+                        base_url = alt_base_url
+                        result.domain = alt_domain
+                        domain_unreachable = False
+
+                        # Extract contacts from this alternative domain's homepage
+                        html = response.text
+                        page_contacts = self._extract_contacts_from_html(html, alt_base_url, alt_domain)
+                        for contact in page_contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+
+                        # Try key pages on the working alternative domain
+                        for pattern in ["/contact", "/contact-us", "/press", "/about"]:
+                            alt_url = urljoin(alt_base_url, pattern)
+                            try:
+                                resp = client.get(alt_url, timeout=5.0)
+                                if resp.status_code == 200:
+                                    page_contacts = self._extract_contacts_from_html(resp.text, alt_url, alt_domain)
+                                    for contact in page_contacts:
+                                        if contact.email not in all_emails:
+                                            all_emails[contact.email] = contact
+                            except Exception:
+                                continue
+                        break
+                except Exception:
+                    continue
+
+        # If still unreachable after trying alternatives, give up
+        if domain_unreachable:
+            self._log(f"No working domain found for: {domain}", "warning")
+            result.errors.append(f"Domain unreachable (tried alternatives): {domain}")
             return result
 
         if len(all_emails) < 2 and self.use_browser:
