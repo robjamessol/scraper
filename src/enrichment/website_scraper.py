@@ -558,11 +558,20 @@ class WebsiteScraper:
                 # Claude is used for homepage navigation analysis only
 
                 # Look for additional contact page links on EVERY page (not just homepage)
-                # This helps find contact links in navigation, footer, etc.
+                # This helps find nested navigation like: About Us → Press & Media
                 new_urls = self._find_contact_links(html, base_url)
+
+                # Prioritize important links (press, media, contact) - insert near front
+                high_priority_keywords = ["press", "media", "contact", "advertise", "partnership"]
                 for new_url in new_urls:
                     if new_url not in visited_urls and new_url not in urls_to_visit:
-                        urls_to_visit.append(new_url)
+                        # Check if this is a high-priority link
+                        url_lower = new_url.lower()
+                        if any(kw in url_lower for kw in high_priority_keywords):
+                            # Insert near front (after current position in queue)
+                            urls_to_visit.insert(pages_scraped + 1, new_url)
+                        else:
+                            urls_to_visit.append(new_url)
 
             except httpx.TimeoutException:
                 consecutive_errors += 1
@@ -840,19 +849,22 @@ class WebsiteScraper:
         contact_urls = []
 
         # Expanded keywords - prioritize advertising/sales related
+        # NOTE: These match partial strings, so "press" matches "press-media", "press-room", etc.
         contact_keywords = [
             # Advertising/sales (highest priority for our use case)
             "advertise", "advertising", "sponsors", "sponsorship", "media-kit",
-            "mediakit", "ad-sales", "partnerships", "partner",
+            "mediakit", "ad-sales", "partnerships", "partner", "affiliate",
             # Contact pages - EXPANDED
             "contact", "connect", "get-in-touch", "reach-us", "reach-out",
             "talk-to-us", "inquiry", "enquiry", "inquiries", "enquiries",
             # Team/about pages
             "about", "team", "leadership", "people", "management", "company",
-            # Press/media (often has contacts)
-            "press", "newsroom", "media", "pr",
+            # Press/media (often has contacts) - EXPANDED for nested nav
+            "press", "newsroom", "media", "news", "pr", "communications",
+            "media-relations", "press-room", "press-media", "media-center",
+            "public-relations", "corporate-communications",
             # Business
-            "for-business", "business", "enterprise",
+            "for-business", "business", "enterprise", "commercial",
         ]
 
         base_domain = urlparse(base_url).netloc
