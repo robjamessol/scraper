@@ -52,23 +52,16 @@ class SponsorInfo:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for DataFrame/CSV export."""
+        # Simplified output - just company info, no ad copy
         return {
             "advertiser_name": self.advertiser_name,
             "advertiser_domain": self.advertiser_domain,
-            "placement_type": self.placement_type,
-            "ad_copy_snippet": self.ad_copy_snippet,
-            "full_ad_copy": self.full_ad_copy,
-            "ad_headline": self.ad_headline,
-            "product_service": self.product_service,
-            "call_to_action": self.call_to_action,
             "landing_page_url": self.landing_page_url,
-            "sponsor_url": self.sponsor_url,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
             "source_newsletter": self.source_newsletter,
             "category": self.category,
             "niche_fit": self.niche_fit,
-            "confidence": self.confidence,
         }
 
 
@@ -89,24 +82,16 @@ class AffiliateLink:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for DataFrame/CSV export."""
+        # Simplified output - just company info
         return {
             "advertiser_name": self.advertiser_name,
             "advertiser_domain": self.advertiser_domain,
-            "placement_type": self.placement_type,
-            "ad_copy_snippet": self.context_snippet,
-            "full_ad_copy": self.context_snippet,
-            "ad_headline": self.link_text,
-            "product_service": None,
-            "call_to_action": self.link_text,
             "landing_page_url": self.link_url,
-            "sponsor_url": self.link_url,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
             "source_newsletter": self.source_newsletter,
             "category": "affiliate",
             "niche_fit": "Unknown",
-            "confidence": "low",  # Affiliate links are less certain
-            "affiliate_network": self.affiliate_network,
         }
 
 

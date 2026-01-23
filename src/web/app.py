@@ -266,13 +266,16 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         try:
                             sponsors = scraper.scrape_issue(issue_url)
 
+                            if not sponsors:
+                                add_log(f"    ⚪ No sponsors found in this issue")
+
                             for sponsor in sponsors:
                                 data = sponsor.to_dict()
-                                data = categorizer.enrich_sponsor(data)
+                                data = categorizer.enrich_sponsor(data, use_claude=False)
                                 all_sponsors.append(data)
 
                                 update_status(advertisers_found=len(all_sponsors))
-                                add_log(f"    ✅ Found: {sponsor.advertiser_name} ({data.get('niche_fit', 'Unknown')})")
+                                add_log(f"    ✅ {sponsor.advertiser_name} @ {sponsor.advertiser_domain or '(no domain)'}")
 
                         except Exception as e:
                             add_log(f"    ❌ Error: {str(e)[:50]}", level="error")

@@ -382,17 +382,7 @@ class AdvertiserCategorizer:
             cat_score.category, company_name, domain, ad_copy
         )
 
-        # If confidence is low, try Claude for better analysis
-        if use_claude and (cat_score.confidence < 0.5 or fit_score.confidence < 0.5):
-            claude_result = self._score_with_claude(
-                company_name, ad_copy, company_description
-            )
-            if claude_result:
-                # Use Claude's results
-                sponsor_info["category"] = claude_result["category"]
-                sponsor_info["niche_fit"] = f"{claude_result['emoji']} {claude_result['score']}"
-                return sponsor_info
-
+        # Claude disabled for speed - just use keyword matching
         sponsor_info["niche_fit"] = fit_score.display
         return sponsor_info
 
