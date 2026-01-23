@@ -76,19 +76,21 @@ PRIORITY_EMAIL_PREFIXES = [
     "press", "pr", "communications", "comms", "news",
 ]
 
-# Default pages to check for contact info
+# Default pages to check for contact info (REDUCED for speed - prioritized list)
 CONTACT_PAGE_PATTERNS = [
-    # Advertising/partnership pages - HIGHEST PRIORITY
-    "/advertise", "/advertising", "/partnerships", "/partners",
-    "/media-kit", "/mediakit", "/sponsorship", "/sponsors",
-    # Contact pages - EXPANDED
-    "/contact", "/contact-us", "/connect", "/connect-with-us",
-    "/get-in-touch", "/reach-us", "/reach-out", "/talk-to-us",
-    "/enquiry", "/inquiry", "/enquiries", "/inquiries",
-    # About pages (often has contact info)
-    "/about", "/about-us", "/team", "/our-team",
-    # Business pages
-    "/for-business", "/business", "/enterprise",
+    # Highest priority - advertising/sales related
+    "/advertise", "/advertising", "/partnerships", "/media-kit",
+    # Contact pages - most common patterns only
+    "/contact", "/contact-us",
+    # About pages
+    "/about", "/about-us",
+]
+
+# Extended patterns - used only if Claude is disabled or we need more options
+EXTENDED_CONTACT_PATTERNS = [
+    "/partners", "/mediakit", "/sponsorship", "/sponsors",
+    "/connect", "/connect-with-us", "/get-in-touch",
+    "/team", "/our-team", "/for-business",
 ]
 
 # Email obfuscation patterns to decode
@@ -155,6 +157,9 @@ class WebsiteScraper:
         self.use_claude = use_claude
         self._log_callback = log_callback
         self._claude_agent = None
+        self._http_client = None  # Lazy-initialized, reused across all domains
+        self._browser = None      # Lazy-initialized browser for JS fallback
+        self._playwright = None
 
         # Common headers to avoid being blocked
         self.headers = {
@@ -163,6 +168,40 @@ class WebsiteScraper:
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
         }
+
+    def _get_http_client(self):
+        """Get or create HTTP client (reused across all domains)."""
+        if self._http_client is None:
+            self._http_client = httpx.Client(
+                timeout=self.timeout,
+                headers=self.headers,
+                follow_redirects=True,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+        return self._http_client
+
+    def _get_browser(self):
+        """Get or create browser (reused across all JS-rendered domains)."""
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+
+        if self._browser is None:
+            try:
+                from playwright.sync_api import sync_playwright
+                self._playwright = sync_playwright().start()
+                self._browser = self._playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                        "--no-sandbox",
+                    ],
+                )
+                self._log("Browser started for JS rendering")
+            except Exception as e:
+                self._log(f"Failed to start browser: {e}", "error")
+                return None
+        return self._browser
 
     def _get_claude_agent(self):
         """Get or create Claude agent (lazy initialization, reused across calls)."""
@@ -186,6 +225,27 @@ class WebsiteScraper:
             except Exception:
                 pass
             self._claude_agent = None
+
+        if self._http_client:
+            try:
+                self._http_client.close()
+            except Exception:
+                pass
+            self._http_client = None
+
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+
+        if self._playwright:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
     def _log(self, message: str, level: str = "info"):
         """Log a message, optionally to callback."""
@@ -243,59 +303,60 @@ class WebsiteScraper:
 
         all_emails: dict[str, WebsiteContact] = {}
 
-        with self._browser_context() as browser:
-            if not browser:
-                return []
+        # Use reusable browser (MUCH faster than starting fresh each time)
+        browser = self._get_browser()
+        if not browser:
+            return []
 
-            context = browser.new_context(
-                user_agent=self.headers["User-Agent"],
-                viewport={"width": 1280, "height": 720},
-            )
+        context = browser.new_context(
+            user_agent=self.headers["User-Agent"],
+            viewport={"width": 1280, "height": 720},
+        )
 
-            try:
-                page = context.new_page()
+        try:
+            page = context.new_page()
 
-                for url in urls[:self.max_pages]:
-                    try:
-                        self._log(f"Browser loading: {url}")
-                        page.goto(url, wait_until="domcontentloaded", timeout=8000)
+            for url in urls[:self.max_pages]:
+                try:
+                    self._log(f"Browser loading: {url}")
+                    page.goto(url, wait_until="domcontentloaded", timeout=8000)
 
-                        # Brief wait for dynamic content (reduced for speed)
-                        page.wait_for_timeout(500)
+                    # Brief wait for dynamic content (reduced for speed)
+                    page.wait_for_timeout(500)
 
-                        # Get rendered HTML
-                        html = page.content()
+                    # Get rendered HTML
+                    html = page.content()
 
-                        # Extract contacts
-                        contacts = self._extract_contacts_from_html(html, url, domain)
-                        for contact in contacts:
-                            if contact.email not in all_emails:
-                                all_emails[contact.email] = contact
+                    # Extract contacts
+                    contacts = self._extract_contacts_from_html(html, url, domain)
+                    for contact in contacts:
+                        if contact.email not in all_emails:
+                            all_emails[contact.email] = contact
 
-                        # Also look for mailto: links in the DOM
-                        mailto_links = page.query_selector_all('a[href^="mailto:"]')
-                        for link in mailto_links:
-                            href = link.get_attribute("href")
-                            if href:
-                                email = href.replace("mailto:", "").split("?")[0].strip()
-                                if EMAIL_PATTERN.match(email) and email not in all_emails:
-                                    all_emails[email] = WebsiteContact(
-                                        email=email,
-                                        source_page=url,
-                                        email_type="generic",
-                                    )
+                    # Also look for mailto: links in the DOM
+                    mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                    for link in mailto_links:
+                        href = link.get_attribute("href")
+                        if href:
+                            email = href.replace("mailto:", "").split("?")[0].strip()
+                            if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                all_emails[email] = WebsiteContact(
+                                    email=email,
+                                    source_page=url,
+                                    email_type="generic",
+                                )
 
-                        # Stop if we found good contacts
-                        if len(all_emails) >= 3:
-                            break
+                    # Stop if we found good contacts
+                    if len(all_emails) >= 3:
+                        break
 
-                    except PlaywrightTimeout:
-                        self._log(f"Browser timeout: {url}", "warning")
-                    except Exception as e:
-                        self._log(f"Browser error on {url}: {e}", "warning")
+                except PlaywrightTimeout:
+                    self._log(f"Browser timeout: {url}", "warning")
+                except Exception as e:
+                    self._log(f"Browser error on {url}: {e}", "warning")
 
-            finally:
-                context.close()
+        finally:
+            context.close()
 
         return list(all_emails.values())
 
@@ -365,130 +426,127 @@ class WebsiteScraper:
             ad_emails = [c for c in all_emails.values() if c.email_type == "advertising"]
             return len(ad_emails) >= 1 and len(all_emails) >= 3
 
-        with httpx.Client(
-            timeout=self.timeout,
-            headers=self.headers,
-            follow_redirects=True,
-            limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
-        ) as client:
-            # Phase 1: Fetch homepage and use Claude to suggest best pages (ONE call)
-            homepage_fetched = False
+        # Use reusable HTTP client (MUCH faster than creating new one per domain)
+        client = self._get_http_client()
 
-            if self.use_claude:
-                try:
-                    response = client.get(base_url)
-                    if response.status_code == 200:
-                        homepage_fetched = True
-                        pages_scraped += 1
-                        html = response.text
-                        visited_urls.add(base_url)
+        # Phase 1: Fetch homepage and use Claude to suggest best pages (ONE call)
+        homepage_fetched = False
 
-                        # Extract contacts from homepage
-                        page_contacts = self._extract_contacts_from_html(html, base_url, domain)
-                        for contact in page_contacts:
-                            if contact.email not in all_emails:
-                                all_emails[contact.email] = contact
-
-                        # Find links on homepage
-                        new_urls = self._find_contact_links(html, base_url)
-                        for new_url in new_urls:
-                            if new_url not in visited_urls and new_url not in urls_to_visit:
-                                urls_to_visit.append(new_url)
-
-                        # ONE Claude call to analyze homepage and suggest pages
-                        agent = self._get_claude_agent()
-                        if agent:
-                            self._log(f"Asking Claude to analyze {domain} structure...")
-                            nav_analysis = agent.analyze_website_navigation(
-                                html, domain, "find advertising/marketing contact information"
-                            )
-                            if nav_analysis and nav_analysis.get("suggested_paths"):
-                                suggested = nav_analysis["suggested_paths"]
-                                self._log(f"Claude suggested pages: {suggested[:5]}")
-                                # Add Claude's suggestions to the front of the queue
-                                for path in reversed(suggested[:8]):
-                                    full_url = urljoin(base_url, path)
-                                    if full_url not in visited_urls and full_url not in urls_to_visit:
-                                        urls_to_visit.insert(1, full_url)  # After current position
-
-                                if nav_analysis.get("navigation_notes"):
-                                    self._log(f"Navigation: {nav_analysis['navigation_notes']}")
-                except Exception as e:
-                    self._log(f"Homepage/Claude analysis failed: {e}", "warning")
-
-            for url in urls_to_visit:
-                # Stop conditions
-                if pages_scraped >= self.max_pages:
-                    break
-                if consecutive_errors >= self.max_errors:
-                    self._log(f"Stopping after {consecutive_errors} errors", "warning")
-                    break
-                # Early exit only if we have high-quality contacts
-                if has_good_contacts():
-                    break
-
-                if url in visited_urls:
-                    continue
-
-                visited_urls.add(url)
-
-                try:
-                    response = client.get(url)
-
-                    # Handle different status codes
-                    if response.status_code == 404:
-                        continue  # Page not found, try next
-                    elif response.status_code == 403:
-                        consecutive_errors += 1
-                        continue  # Forbidden, site may be blocking
-                    elif response.status_code >= 500:
-                        consecutive_errors += 1
-                        result.errors.append(f"Server error {response.status_code}: {url}")
-                        continue
-                    elif response.status_code != 200:
-                        continue
-
-                    # Success - reset error counter
-                    consecutive_errors = 0
+        if self.use_claude:
+            try:
+                response = client.get(base_url)
+                if response.status_code == 200:
+                    homepage_fetched = True
                     pages_scraped += 1
                     html = response.text
+                    visited_urls.add(base_url)
 
-                    # Extract contacts from this page using regex
-                    page_contacts = self._extract_contacts_from_html(html, url, domain)
-
+                    # Extract contacts from homepage
+                    page_contacts = self._extract_contacts_from_html(html, base_url, domain)
                     for contact in page_contacts:
-                        # Deduplicate by email, keeping the best version
                         if contact.email not in all_emails:
                             all_emails[contact.email] = contact
-                        else:
-                            # Update if this one has more info
-                            existing = all_emails[contact.email]
-                            if contact.name and not existing.name:
-                                existing.name = contact.name
-                            if contact.title and not existing.title:
-                                existing.title = contact.title
-                            if contact.phone and not existing.phone:
-                                existing.phone = contact.phone
 
-                    # Skip Claude per-page extraction for speed - regex is sufficient
-                    # Claude is used for homepage navigation analysis only
-
-                    # Look for additional contact page links on EVERY page (not just homepage)
-                    # This helps find contact links in navigation, footer, etc.
+                    # Find links on homepage
                     new_urls = self._find_contact_links(html, base_url)
                     for new_url in new_urls:
                         if new_url not in visited_urls and new_url not in urls_to_visit:
                             urls_to_visit.append(new_url)
 
-                except httpx.TimeoutException:
+                    # ONE Claude call to analyze homepage and suggest pages
+                    agent = self._get_claude_agent()
+                    if agent:
+                        self._log(f"Asking Claude to analyze {domain} structure...")
+                        nav_analysis = agent.analyze_website_navigation(
+                            html, domain, "find advertising/marketing contact information"
+                        )
+                        if nav_analysis and nav_analysis.get("suggested_paths"):
+                            suggested = nav_analysis["suggested_paths"]
+                            self._log(f"Claude suggested pages: {suggested[:5]}")
+                            # Add Claude's suggestions to the front of the queue
+                            for path in reversed(suggested[:8]):
+                                full_url = urljoin(base_url, path)
+                                if full_url not in visited_urls and full_url not in urls_to_visit:
+                                    urls_to_visit.insert(1, full_url)  # After current position
+
+                            if nav_analysis.get("navigation_notes"):
+                                self._log(f"Navigation: {nav_analysis['navigation_notes']}")
+            except Exception as e:
+                self._log(f"Homepage/Claude analysis failed: {e}", "warning")
+
+        for url in urls_to_visit:
+            # Stop conditions
+            if pages_scraped >= self.max_pages:
+                break
+            if consecutive_errors >= self.max_errors:
+                self._log(f"Stopping after {consecutive_errors} errors", "warning")
+                break
+            # Early exit only if we have high-quality contacts
+            if has_good_contacts():
+                break
+
+            if url in visited_urls:
+                continue
+
+            visited_urls.add(url)
+
+            try:
+                response = client.get(url)
+
+                # Handle different status codes
+                if response.status_code == 404:
+                    continue  # Page not found, try next
+                elif response.status_code == 403:
                     consecutive_errors += 1
-                    self._log(f"Timeout fetching {url}", "warning")
-                except httpx.ConnectError:
+                    continue  # Forbidden, site may be blocking
+                elif response.status_code >= 500:
                     consecutive_errors += 1
-                    self._log(f"Connection failed: {url}", "warning")
-                except Exception as e:
-                    consecutive_errors += 1
-                    result.errors.append(f"Error fetching {url}: {str(e)}")
+                    result.errors.append(f"Server error {response.status_code}: {url}")
+                    continue
+                elif response.status_code != 200:
+                    continue
+
+                # Success - reset error counter
+                consecutive_errors = 0
+                pages_scraped += 1
+                html = response.text
+
+                # Extract contacts from this page using regex
+                page_contacts = self._extract_contacts_from_html(html, url, domain)
+
+                for contact in page_contacts:
+                    # Deduplicate by email, keeping the best version
+                    if contact.email not in all_emails:
+                        all_emails[contact.email] = contact
+                    else:
+                        # Update if this one has more info
+                        existing = all_emails[contact.email]
+                        if contact.name and not existing.name:
+                            existing.name = contact.name
+                        if contact.title and not existing.title:
+                            existing.title = contact.title
+                        if contact.phone and not existing.phone:
+                            existing.phone = contact.phone
+
+                # Skip Claude per-page extraction for speed - regex is sufficient
+                # Claude is used for homepage navigation analysis only
+
+                # Look for additional contact page links on EVERY page (not just homepage)
+                # This helps find contact links in navigation, footer, etc.
+                new_urls = self._find_contact_links(html, base_url)
+                for new_url in new_urls:
+                    if new_url not in visited_urls and new_url not in urls_to_visit:
+                        urls_to_visit.append(new_url)
+
+            except httpx.TimeoutException:
+                consecutive_errors += 1
+                self._log(f"Timeout fetching {url}", "warning")
+            except httpx.ConnectError:
+                consecutive_errors += 1
+                self._log(f"Connection failed: {url}", "warning")
+            except Exception as e:
+                consecutive_errors += 1
+                result.errors.append(f"Error fetching {url}: {str(e)}")
 
         result.pages_scraped = pages_scraped
 
