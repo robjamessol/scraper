@@ -52,16 +52,13 @@ class SponsorInfo:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for DataFrame/CSV export."""
-        # Simplified output - just company info, no ad copy
         return {
-            "advertiser_name": self.advertiser_name,
-            "advertiser_domain": self.advertiser_domain,
-            "landing_page_url": self.landing_page_url,
+            "company_name": self.advertiser_name,
+            "domain": self.advertiser_domain,
+            "sector": self.category,
+            "sponsor_type": self.placement_type,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
-            "source_newsletter": self.source_newsletter,
-            "category": self.category,
-            "niche_fit": self.niche_fit,
         }
 
 
@@ -82,16 +79,13 @@ class AffiliateLink:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for DataFrame/CSV export."""
-        # Simplified output - just company info
         return {
-            "advertiser_name": self.advertiser_name,
-            "advertiser_domain": self.advertiser_domain,
-            "landing_page_url": self.link_url,
+            "company_name": self.advertiser_name,
+            "domain": self.advertiser_domain,
+            "sector": "affiliate",
+            "sponsor_type": "affiliate_link",
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
-            "source_newsletter": self.source_newsletter,
-            "category": "affiliate",
-            "niche_fit": "Unknown",
         }
 
 
@@ -755,7 +749,7 @@ class BaseScraper(ABC):
 
     def auto_detect_sponsors(self, html: str, issue_url: str) -> list[SponsorInfo]:
         """
-        Auto-detect sponsors using common patterns (for unknown newsletters).
+        Auto-detect sponsors using expanded patterns.
 
         Args:
             html: HTML content
@@ -766,46 +760,53 @@ class BaseScraper(ABC):
         """
         sponsors = []
 
-        # Common sponsor keywords to look for
-        keywords = [
-            r"Presented\s+[Bb]y\s+([A-Z][A-Za-z0-9\s]+)",
-            r"Together\s+[Ww]ith\s+([A-Z][A-Za-z0-9\s]+)",
-            r"Sponsored\s+[Bb]y\s+([A-Z][A-Za-z0-9\s]+)",
-            r"Brought\s+to\s+you\s+by\s+([A-Z][A-Za-z0-9\s]+)",
-            r"Partner:\s*([A-Z][A-Za-z0-9\s]+)",
+        # Expanded sponsor patterns with sponsor_type mapping
+        patterns = [
+            # Primary sponsor patterns
+            (r"Presented\s+[Bb]y\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "presented_by"),
+            (r"Together\s+[Ww]ith\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "together_with"),
+            # Sponsored variations
+            (r"Sponsored\s+[Bb]y\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "sponsored_by"),
+            (r"This\s+(?:issue|edition)\s+(?:is\s+)?sponsored\s+by\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "sponsored_by"),
+            (r"Today(?:'s|\s+is)\s+sponsored\s+by\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "sponsored_by"),
+            # Partner patterns
+            (r"(?:In\s+)?[Pp]artnership\s+[Ww]ith\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "partnership"),
+            (r"Partner(?:ed)?\s+[Ww]ith\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "partnership"),
+            (r"Our\s+[Pp]artner[s]?:\s*([A-Z][A-Za-z0-9\s&\-\.]+)", "partnership"),
+            # Brought to you
+            (r"Brought\s+to\s+you\s+by\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "brought_by"),
+            # Message from sponsor
+            (r"[Aa]\s+message\s+from\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "sponsored_message"),
+            (r"From\s+[Oo]ur\s+[Ss]ponsor[s]?:?\s*([A-Z][A-Za-z0-9\s&\-\.]+)", "sponsored_message"),
+            # Powered by
+            (r"Powered\s+[Bb]y\s+([A-Z][A-Za-z0-9\s&\-\.]+)", "powered_by"),
         ]
 
         seen_names = set()
 
-        for pattern in keywords:
+        for pattern, sponsor_type in patterns:
             for match in re.finditer(pattern, html):
                 name = clean_text(match.group(1))
+                # Clean trailing words that got captured
+                name = re.sub(r'\s+(Take|Learn|Get|Read|Check|This|The|And|In|A|An).*$', '', name, flags=re.IGNORECASE).strip()
                 normalized = normalize_company_name(name)
 
-                if normalized in seen_names or len(name) < 2 or len(name) > 50:
+                if normalized in seen_names or len(name) < 2 or len(name) > 40:
                     continue
 
                 seen_names.add(normalized)
 
                 domain = self._find_sponsor_domain(html, name, match.start())
-                ad_copy = self._extract_ad_copy(html, match.start(), match.end())
-
-                # Extract product/service info from ad copy
-                product_info = self.extract_product_service(ad_copy, name)
 
                 sponsors.append(SponsorInfo(
                     advertiser_name=name,
                     advertiser_domain=domain,
-                    placement_type="auto_detected",
-                    ad_copy_snippet=truncate_text(ad_copy, 150),
-                    full_ad_copy=ad_copy,
-                    ad_headline=product_info.get("headline"),
-                    product_service=product_info.get("product_service"),
-                    call_to_action=product_info.get("call_to_action"),
+                    placement_type=sponsor_type,
+                    ad_copy_snippet="",
                     issue_url=issue_url,
                     issue_date=None,
                     source_newsletter=self.config.name.lower().replace(" ", "_"),
-                    confidence="low",
+                    confidence="medium",
                 ))
 
         return sponsors

@@ -287,21 +287,73 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 add_log(f"❌ Error scanning {newsletter_name}: {e}", level="error")
                 continue
 
-        # Deduplicate by domain
-        add_log("🔄 Deduplicating results...")
-        update_status(current_action="Deduplicating results")
+        # ===== PHASE 1 COMPLETE: Deduplicate sponsors =====
+        add_log("🔄 Deduplicating sponsors...")
+        update_status(current_action="Deduplicating")
 
         seen = set()
         unique = []
         for s in all_sponsors:
-            key = s.get("advertiser_domain") or s.get("advertiser_name", "").lower()
-            if key not in seen:
+            key = s.get("domain") or s.get("company_name", "").lower()
+            if key and key not in seen:
                 seen.add(key)
                 unique.append(s)
 
-        # Contact enrichment DISABLED - just get company info from newsletters
-        # User will create separate email finder later
-        add_log("ℹ️ Contact enrichment disabled - outputting company info only")
+        add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
+
+        # ===== PHASE 2: Scrape company websites for contacts =====
+        add_log("🔍 Phase 2: Finding contact info on company websites...")
+        update_status(current_action="Finding contacts")
+
+        from ..enrichment.website_scraper import WebsiteScraper
+
+        for idx, company in enumerate(unique):
+            domain = company.get("domain")
+            name = company.get("company_name", "Unknown")
+
+            if not domain:
+                add_log(f"  ⚪ [{idx+1}/{len(unique)}] {name} - no domain, skipping")
+                company["emails"] = ""
+                company["phones"] = ""
+                continue
+
+            update_status(
+                current_action=f"Scraping {idx+1}/{len(unique)}: {domain}",
+                progress=50 + int((idx / len(unique)) * 50),
+            )
+
+            add_log(f"  🌐 [{idx+1}/{len(unique)}] {domain}...")
+
+            try:
+                scraper = WebsiteScraper(
+                    timeout=8.0,
+                    max_pages=5,
+                    use_browser=False,
+                    use_claude=False,
+                )
+                result = scraper.scrape_domain(domain)
+
+                # Collect all emails and phones
+                emails = []
+                phones = []
+                for contact in result.contacts:
+                    if contact.email and contact.email not in emails:
+                        emails.append(contact.email)
+                    if contact.phone and contact.phone not in phones:
+                        phones.append(contact.phone)
+
+                company["emails"] = "; ".join(emails[:5])  # Max 5 emails
+                company["phones"] = "; ".join(phones[:3])  # Max 3 phones
+
+                if emails:
+                    add_log(f"    ✅ Found {len(emails)} email(s), {len(phones)} phone(s)")
+                else:
+                    add_log(f"    ⚪ No contacts found")
+
+            except Exception as e:
+                add_log(f"    ❌ Error: {str(e)[:40]}", level="error")
+                company["emails"] = ""
+                company["phones"] = ""
 
         # Save results
         add_log("💾 Saving results...")
@@ -314,13 +366,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             progress=100,
         )
 
-        add_log(f"🎉 Scan complete! Found {len(unique)} unique advertisers")
-
-        # Summary by fit
-        high = len([a for a in unique if "High" in a.get("niche_fit", "")])
-        medium = len([a for a in unique if "Medium" in a.get("niche_fit", "")])
-        low = len([a for a in unique if "Low" in a.get("niche_fit", "")])
-        add_log(f"   🟢 High fit: {high}  |  🟡 Medium: {medium}  |  🔴 Low: {low}")
+        # Summary
+        with_emails = len([c for c in unique if c.get("emails")])
+        add_log(f"🎉 Complete! {len(unique)} companies, {with_emails} with contact info")
 
     except Exception as e:
         add_log(f"❌ Scan failed: {e}", level="error")

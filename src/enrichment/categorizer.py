@@ -352,38 +352,26 @@ class AdvertiserCategorizer:
     def enrich_sponsor(
         self,
         sponsor_info: dict[str, Any],
-        use_claude: bool = True,
+        use_claude: bool = False,
     ) -> dict[str, Any]:
         """
-        Add category and niche fit scoring to a sponsor record.
-
-        Uses a hybrid approach:
-        1. Try keyword-based categorization first (fast, free)
-        2. If confidence is low, use Claude for intelligent scoring (more accurate)
+        Add sector to a sponsor record based on company name and domain.
 
         Args:
             sponsor_info: Dictionary with sponsor information
-            use_claude: Whether to use Claude for low-confidence cases
+            use_claude: Ignored (kept for compatibility)
 
         Returns:
-            Updated dictionary with category and niche_fit fields
+            Updated dictionary with sector field
         """
-        company_name = sponsor_info.get("advertiser_name", "")
-        domain = sponsor_info.get("advertiser_domain", "")
-        ad_copy = sponsor_info.get("ad_copy_snippet", "") or sponsor_info.get("full_ad_copy", "")
-        company_description = sponsor_info.get("company_description", "")
+        # Support both old and new field names
+        company_name = sponsor_info.get("company_name") or sponsor_info.get("advertiser_name", "")
+        domain = sponsor_info.get("domain") or sponsor_info.get("advertiser_domain", "")
 
-        # Get category using keyword matching
-        cat_score = self.categorize(company_name, domain, ad_copy)
-        sponsor_info["category"] = cat_score.category
+        # Get sector using keyword matching on company name and domain
+        cat_score = self.categorize(company_name, domain, "")
+        sponsor_info["sector"] = cat_score.category
 
-        # Get niche fit using keyword matching
-        fit_score = self.score_niche_fit(
-            cat_score.category, company_name, domain, ad_copy
-        )
-
-        # Claude disabled for speed - just use keyword matching
-        sponsor_info["niche_fit"] = fit_score.display
         return sponsor_info
 
     def _score_with_claude(
