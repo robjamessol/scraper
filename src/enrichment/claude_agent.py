@@ -178,6 +178,8 @@ class ClaudeAgent:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int = 1024,
+        model: str | None = None,
+        use_cache: bool = False,
     ) -> str | None:
         """
         Make a call to Claude API.
@@ -186,6 +188,8 @@ class ClaudeAgent:
             system_prompt: System prompt defining Claude's role
             user_prompt: User message with the task
             max_tokens: Maximum tokens in response
+            model: Model override (defaults to self.model)
+            use_cache: Enable prompt caching for system prompt
 
         Returns:
             Claude's response text or None on error
@@ -199,10 +203,26 @@ class ClaudeAgent:
             "anthropic-version": "2023-06-01",
         }
 
+        # Enable prompt caching if requested (reduces cost/latency for repeated prompts)
+        if use_cache:
+            headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+
+        # Build system content (with cache control if enabled)
+        if use_cache:
+            system_content = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        else:
+            system_content = system_prompt
+
         payload = {
-            "model": self.model,
+            "model": model or self.model,
             "max_tokens": max_tokens,
-            "system": system_prompt,
+            "system": system_content,
             "messages": [
                 {"role": "user", "content": user_prompt}
             ],
@@ -232,6 +252,86 @@ class ClaudeAgent:
         except Exception as e:
             self._log(f"Claude API request failed: {e}", "error")
             return None
+
+    def _filter_page_with_haiku(self, text: str, page_url: str) -> dict:
+        """
+        Use Haiku (fast/cheap) to quickly filter pages before expensive extraction.
+
+        This is the first stage of the Haiku-Sonnet relay pattern:
+        - Haiku decides if page is worth processing (< 0.5s, minimal cost)
+        - Only pages with high potential get sent to Sonnet
+
+        Args:
+            text: First ~2k chars of page content
+            page_url: URL for context
+
+        Returns:
+            Dict with 'relevant' (bool), 'reason' (str), 'signals' (list)
+        """
+        if not self.is_configured:
+            return {"relevant": True, "reason": "API not configured, assuming relevant"}
+
+        # Quick heuristic pre-filter (avoid API call entirely for obvious cases)
+        text_lower = text.lower()
+        high_value_signals = [
+            "advertis", "sponsor", "partnership", "media kit", "mediakit",
+            "press@", "media@", "ads@", "advertising@", "partnerships@",
+            "ad sales", "marketing contact", "business development",
+        ]
+        if any(signal in text_lower for signal in high_value_signals):
+            return {"relevant": True, "reason": "High-value signal found in text", "signals": high_value_signals}
+
+        # Use Haiku for fast classification
+        system_prompt = """You are a fast content classifier. Analyze if a page contains contact information for advertising, press, or business inquiries.
+
+Return ONLY valid JSON:
+{"relevant": true/false, "reason": "brief explanation", "signals": ["list", "of", "signals"]}
+
+Relevant pages contain:
+- Email addresses (especially @company.com)
+- Contact forms for business/advertising/press
+- Press/media contact sections
+- Partnership inquiry info
+- Team/leadership pages with contact details
+
+NOT relevant:
+- Generic marketing pages without contacts
+- Product feature pages
+- Blog posts without author contact
+- Terms/privacy/legal pages
+- Career/job listing pages"""
+
+        # Only send first 2k chars (Haiku is fast but we want minimal latency)
+        user_prompt = f"""Page URL: {page_url}
+
+Content preview (first 2000 chars):
+{text[:2000]}
+
+Does this page contain contact information worth extracting?"""
+
+        response = self._call_api(
+            system_prompt,
+            user_prompt,
+            max_tokens=150,  # Short response needed
+            model=self.MODEL_HAIKU,  # Force Haiku (fast/cheap)
+        )
+
+        if not response:
+            # Default to relevant if API fails (don't skip pages due to errors)
+            return {"relevant": True, "reason": "API error, assuming relevant"}
+
+        try:
+            data = extract_json_from_response(response)
+            if data and isinstance(data, dict):
+                return {
+                    "relevant": data.get("relevant", True),
+                    "reason": data.get("reason", ""),
+                    "signals": data.get("signals", []),
+                }
+        except Exception:
+            pass
+
+        return {"relevant": True, "reason": "Parse error, assuming relevant"}
 
     def analyze_ad_copy(self, ad_copy: str, company_name: str) -> AdAnalysis | None:
         """
@@ -725,9 +825,14 @@ Look for nested navigation (e.g., About Us containing Press & Media submenu)."""
         html: str,
         page_url: str,
         company_name: str,
+        skip_filter: bool = False,
     ) -> list[dict]:
         """
         Use Claude to extract ALL contact information from a page.
+
+        Uses the Haiku-Sonnet relay pattern:
+        1. Haiku (fast/cheap) filters if page is worth processing
+        2. Sonnet (smart/expensive) extracts contacts from high-value pages
 
         Optimized for finding advertising/marketing contacts with:
         - Email priority hierarchy for ad sales outreach
@@ -739,6 +844,7 @@ Look for nested navigation (e.g., About Us containing Press & Media submenu)."""
             html: Page HTML content
             page_url: URL of the page
             company_name: Company name for context
+            skip_filter: If True, skip Haiku filter (for known high-value pages)
 
         Returns:
             List of contact dicts with email, name, title, type, confidence
@@ -746,6 +852,24 @@ Look for nested navigation (e.g., About Us containing Press & Media submenu)."""
         if not self.is_configured or not html:
             return []
 
+        # Convert HTML to clean text FIRST (reduces tokens by ~70%)
+        clean_text = html_to_clean_text(html, preserve_links=True)
+
+        # If clean text extraction failed or is too short, fall back to raw HTML
+        if not clean_text or len(clean_text) < 100:
+            content_for_analysis = html[:20000]
+        else:
+            content_for_analysis = clean_text[:15000]
+
+        # === STAGE 1: Haiku Filter (fast/cheap) ===
+        # Skip filter for known high-value pages (e.g., /contact, /advertise)
+        if not skip_filter:
+            filter_result = self._filter_page_with_haiku(content_for_analysis, page_url)
+            if not filter_result.get("relevant", True):
+                # Page filtered out - no contacts worth extracting
+                return []
+
+        # === STAGE 2: Sonnet Extraction (smart/expensive) ===
         system_prompt = """You are an expert at identifying contact emails for advertising and sponsorship outreach.
 
 **Your Task:**
@@ -794,35 +918,33 @@ Respond ONLY with valid JSON:
 Return {"contacts": []} if no suitable emails found. DO NOT make up emails.
 
 **Few-Shot Classification Examples:**
-{EMAIL_CLASSIFICATION_EXAMPLES}"""
-
-        # Convert HTML to clean text (removes scripts, styles, reduces tokens significantly)
-        # This typically reduces 20KB of HTML to ~3-5KB of relevant text
-        clean_text = html_to_clean_text(html, preserve_links=True)
-
-        # If clean text extraction failed or is too short, fall back to raw HTML
-        if not clean_text or len(clean_text) < 100:
-            html_sample = html[:20000]
-        else:
-            # Use clean text (much more efficient) - can include more content
-            html_sample = clean_text[:15000]
+""" + EMAIL_CLASSIFICATION_EXAMPLES
 
         user_prompt = f"""Analyze this page from {company_name} and extract contact information for ad sales outreach:
 
 **Source URL:** {page_url}
 
 **Page Content:**
-{html_sample}
+{content_for_analysis}
 
 Find every relevant email, especially advertising/partnership contacts."""
 
-        response = self._call_api(system_prompt, user_prompt, max_tokens=1200)
+        # Use Sonnet for extraction (smarter) with prompt caching (faster/cheaper)
+        response = self._call_api(
+            system_prompt,
+            user_prompt,
+            max_tokens=1200,
+            model=self.MODEL_SONNET,  # Use Sonnet for extraction quality
+            use_cache=True,  # Cache the system prompt
+        )
 
         if not response:
             return []
 
         try:
-            data = json.loads(response)
+            data = extract_json_from_response(response)
+            if not data:
+                return []
             contacts = data.get("contacts", [])
             if isinstance(contacts, list):
                 # Add any page-level info to first contact as notes
@@ -830,7 +952,7 @@ Find every relevant email, especially advertising/partnership contacts."""
                     contacts[0]["advertise_page"] = data["advertise_page_url"]
                 return contacts
             return []
-        except json.JSONDecodeError:
+        except Exception:
             return []
 
     def select_best_urls_from_list(
