@@ -514,7 +514,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             # Run in parallel with 3 workers, with per-domain timeout
             from concurrent.futures import as_completed, TimeoutError as FuturesTimeoutError
 
-            with ThreadPoolExecutor(max_workers=3) as pool:
+            with ThreadPoolExecutor(max_workers=2) as pool:  # Reduced from 3 to prevent browser hangs
                 # Submit all tasks
                 futures = {
                     pool.submit(scrape_company, (idx, company)): (idx, company)

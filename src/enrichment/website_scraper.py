@@ -1143,8 +1143,10 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+            page.set_default_timeout(5000)  # Prevent hangs
+            page.set_default_navigation_timeout(5000)
             self._log(f"Browser reading links from: {base_url}")
-            page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
             page.wait_for_timeout(1000)  # Wait for JS to render
 
             # Find all links on the page
@@ -1274,7 +1276,7 @@ class WebsiteScraper:
 
         import time
         browser_start = time.time()
-        max_browser_time = 30  # Max 30 seconds for browser phase
+        max_browser_time = 20  # Max 20 seconds for browser phase (reduced from 30)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1291,6 +1293,9 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+            # Set aggressive default timeouts to prevent hangs
+            page.set_default_timeout(5000)  # 5s max for any operation
+            page.set_default_navigation_timeout(5000)  # 5s max for navigation
 
             # Network interception: block unnecessary resources for faster loads
             # This dramatically speeds up scraping while preserving contact info
@@ -1324,8 +1329,8 @@ class WebsiteScraper:
 
             crash_count = 0  # Track consecutive crashes
 
-            # Filter URLs and limit to 8 max for speed
-            filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:8]
+            # Filter URLs and limit to 5 max for speed (reduced from 8)
+            filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:5]
 
             for url in filtered_urls:
                 # Skip if too many crashes (browser is unstable)
@@ -1340,7 +1345,7 @@ class WebsiteScraper:
 
                 try:
                     self._log(f"Browser loading: {url}")
-                    page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                    page.goto(url, wait_until="domcontentloaded", timeout=5000)
 
                     # Brief wait for dynamic content (reduced for speed)
                     page.wait_for_timeout(500)
@@ -1438,7 +1443,7 @@ class WebsiteScraper:
 
         import time
         nav_start = time.time()
-        max_nav_time = 20  # Max 20 seconds for click-through navigation
+        max_nav_time = 15  # Max 15 seconds for click-through navigation (reduced from 20)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1454,6 +1459,9 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+            # Set aggressive default timeouts to prevent hangs
+            page.set_default_timeout(5000)  # 5s max for any operation
+            page.set_default_navigation_timeout(5000)  # 5s max for navigation
 
             # Keywords to look for in links (for clicking through) - EXPANDED
             click_keywords = [
@@ -1484,7 +1492,7 @@ class WebsiteScraper:
 
                 try:
                     self._log(f"Browser navigating: {start_url}")
-                    page.goto(start_url, wait_until="domcontentloaded", timeout=10000)
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=5000)
                     page.wait_for_timeout(800)
 
                     # First extract any contacts on this page
@@ -1548,8 +1556,8 @@ class WebsiteScraper:
                             self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
 
                             # Navigate to the link (8s timeout, not 30s default)
-                            link.click(timeout=8000)
-                            page.wait_for_load_state("domcontentloaded", timeout=8000)
+                            link.click(timeout=5000)
+                            page.wait_for_load_state("domcontentloaded", timeout=5000)
                             page.wait_for_timeout(500)
 
                             # Extract contacts from new page
@@ -2702,8 +2710,10 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
+            page.set_default_timeout(5000)  # Prevent hangs
+            page.set_default_navigation_timeout(5000)
             # Use domcontentloaded instead of networkidle (much faster)
-            page.goto(base_url, wait_until="domcontentloaded", timeout=8000)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
             page.wait_for_timeout(1000)  # Brief wait for JS rendering
 
             # Take screenshot (skip scrolling to save time)
