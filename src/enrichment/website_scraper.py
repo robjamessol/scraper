@@ -1242,12 +1242,13 @@ class WebsiteScraper:
     @contextmanager
     def _browser_context(self):
         """
-        Context manager for Playwright browser using Global Browser Singleton.
+        Context manager for Playwright browser using Thread-Local storage.
 
-        High-Performance Mode:
-        - Uses shared browser instance (no startup overhead)
-        - Semaphore controls concurrent contexts (8 max = one per vCPU)
+        Thread-Safe High-Performance Mode:
+        - Each thread gets its own browser instance (fixes threading errors)
+        - Semaphore limits total concurrent contexts across all threads
         - Automatic cleanup on context exit
+        - Auto-recovery: browser is reset on crash/error
         """
         if not PLAYWRIGHT_AVAILABLE:
             yield None
@@ -1261,9 +1262,13 @@ class WebsiteScraper:
             return
 
         context = None
+        semaphore_held = True
         try:
             browser = GlobalBrowserManager.get_browser()
             if not browser:
+                # Release semaphore early if browser failed to start
+                GlobalBrowserManager.release_context_slot()
+                semaphore_held = False
                 yield None
                 return
 
@@ -1276,6 +1281,12 @@ class WebsiteScraper:
             yield context
         except Exception as e:
             self._log(f"Error creating browser context: {e}", "error")
+            # If the browser is dead/crashed, close it so it restarts next time
+            # This handles "Target page, context or browser has been closed" errors
+            error_str = str(e).lower()
+            if "closed" in error_str or "crash" in error_str or "thread" in error_str:
+                self._log("Browser appears dead, resetting for next attempt...", "warning")
+                GlobalBrowserManager.close_thread_browser()
             yield None
         finally:
             if context:
@@ -1283,7 +1294,8 @@ class WebsiteScraper:
                     context.close()
                 except Exception:
                     pass
-            GlobalBrowserManager.release_context_slot()
+            if semaphore_held:
+                GlobalBrowserManager.release_context_slot()
 
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
         """
