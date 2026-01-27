@@ -273,22 +273,36 @@ def load_scan_data():
 
 def save_scan_data(advertisers: list[dict]):
     """Save scan data to disk."""
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "advertisers": advertisers,
-    }
+    try:
+        # Ensure output directory exists
+        OUTPUT_DIR.mkdir(exist_ok=True)
 
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "advertisers": advertisers,
+        }
 
-    # Also save as CSV
-    if advertisers:
-        df = pd.DataFrame(advertisers)
-        csv_path = OUTPUT_DIR / f"advertisers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        df.to_csv(csv_path, index=False)
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
 
-        # Also update latest.csv
-        df.to_csv(OUTPUT_DIR / "latest.csv", index=False)
+        add_log(f"  Saved {len(advertisers)} advertisers to {DATA_FILE.name}")
+
+        # Also save as CSV
+        if advertisers:
+            df = pd.DataFrame(advertisers)
+            csv_path = OUTPUT_DIR / f"advertisers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            df.to_csv(csv_path, index=False)
+
+            # Also update latest.csv
+            df.to_csv(OUTPUT_DIR / "latest.csv", index=False)
+            add_log(f"  Saved CSV to {csv_path.name}")
+        else:
+            add_log("  No advertisers to save to CSV", level="warning")
+
+    except Exception as e:
+        add_log(f"❌ Failed to save scan data: {e}", level="error")
+        logger.error(f"Save failed: {e}")
+        raise
 
 
 def get_advertisers() -> list[dict]:
@@ -422,6 +436,11 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
         add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
 
+        # Save Phase 1 results immediately (before Phase 2 which might hang/fail)
+        # This ensures we always have SOMETHING saved even if Phase 2 crashes
+        add_log("💾 Saving Phase 1 results...")
+        save_scan_data(unique)
+
         # ===== PHASE 2: Scrape company websites for contacts (PARALLEL) =====
         if unique:
             add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies (parallel)...")
@@ -489,6 +508,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         add_log(f"    ✅ {domain}: Found {contact_count} contact(s)")
                     else:
                         add_log(f"    ⚪ {domain}: No contacts found")
+                        # Add to retry queue so user can retry later
+                        add_to_retry_queue(domain, name, "No contacts found", company.copy())
 
                 except Exception as e:
                     add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
@@ -598,13 +619,13 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 add_log(f"📊 Phase 2 timed out: processed {completed[0]}/{total} companies (remaining added to retry queue)")
             else:
                 add_log(f"📊 Phase 2 complete: processed {total} companies")
+
+            # Save results with contacts (updates the Phase 1 save)
+            add_log("💾 Saving results with contacts...")
+            update_status(current_action="Saving results")
+            save_scan_data(unique)
         else:
             add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
-
-        # Save results (even if cancelled - save what we have)
-        add_log("💾 Saving results...")
-        update_status(current_action="Saving results")
-        save_scan_data(unique)
 
         update_status(
             last_scan=datetime.now().isoformat(),
@@ -784,9 +805,14 @@ async def api_clear_logs():
 async def api_clear_advertisers():
     """Clear all advertiser data."""
     try:
-        data_file = DATA_DIR / "scan_results.json"
-        if data_file.exists():
-            data_file.unlink()
+        # Clear the main data file
+        if DATA_FILE.exists():
+            DATA_FILE.unlink()
+
+        # Also clear the latest CSV
+        latest_csv = OUTPUT_DIR / "latest.csv"
+        if latest_csv.exists():
+            latest_csv.unlink()
 
         # Also clear logs
         with status_lock:
