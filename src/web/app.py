@@ -522,7 +522,17 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 }
 
                 # Wait for completion with per-task timeout
+                cancelled_during_phase2 = False
                 for future in as_completed(futures, timeout=DOMAIN_TIMEOUT * total):
+                    # Check for cancellation between futures
+                    if is_scan_cancelled():
+                        add_log("⛔ Stopping contact scraping due to cancellation...")
+                        cancelled_during_phase2 = True
+                        # Cancel remaining futures
+                        for f in futures:
+                            f.cancel()
+                        break
+
                     idx, company = futures[future]
                     try:
                         future.result(timeout=DOMAIN_TIMEOUT)
@@ -544,11 +554,14 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         # Add to retry queue for later
                         add_to_retry_queue(domain, name, str(e)[:100], company.copy())
 
-            add_log(f"📊 Phase 2 complete: processed {total} companies")
+            if cancelled_during_phase2:
+                add_log(f"📊 Phase 2 stopped: processed {completed[0]}/{total} companies before cancellation")
+            else:
+                add_log(f"📊 Phase 2 complete: processed {total} companies")
         else:
             add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
 
-        # Save results
+        # Save results (even if cancelled - save what we have)
         add_log("💾 Saving results...")
         update_status(current_action="Saving results")
         save_scan_data(unique)
@@ -559,9 +572,13 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             progress=100,
         )
 
-        # Summary
+        # Summary - different message for cancelled vs completed
         with_emails = len([c for c in unique if c.get("email_1")])
-        add_log(f"🎉 Complete! {len(unique)} companies, {with_emails} with contact info")
+        if is_scan_cancelled():
+            add_log(f"⛔ Scan stopped by user. Saved {len(unique)} companies, {with_emails} with contact info")
+            add_log("💡 You can start a new scan or use 'Retry Failed' to complete contact scraping")
+        else:
+            add_log(f"🎉 Complete! {len(unique)} companies, {with_emails} with contact info")
 
     except Exception as e:
         add_log(f"❌ Scan failed: {e}", level="error")
@@ -569,8 +586,10 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         raise
 
     finally:
+        # Reset cancelled flag so next scan can start fresh
         update_status(
             is_running=False,
+            cancelled=False,
             current_newsletter=None,
             current_action=None,
         )
@@ -673,6 +692,7 @@ async def api_status():
     with status_lock:
         return {
             "status": "running" if scan_status["is_running"] else "idle",
+            "cancelled": scan_status.get("cancelled", False),
             "current_newsletter": scan_status["current_newsletter"],
             "current_action": scan_status["current_action"],
             "progress": scan_status["progress"],

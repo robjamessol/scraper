@@ -167,20 +167,35 @@
                         updateLogs(data.logs);
                     }
 
-                    // Check if scan completed
+                    // Check if scan completed or was cancelled
                     if (data.status === 'idle') {
                         clearInterval(pollInterval);
                         pollInterval = null;
 
-                        // Add completion message
-                        addLogEntry({
-                            time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
-                            level: 'info',
-                            message: '✨ Scan complete!'
-                        });
+                        // Check if scan was cancelled vs completed normally
+                        // Note: cancelled flag is reset after scan ends, so we check if the last log mentions cancellation
+                        const wasCancelled = data.logs && data.logs.some(log =>
+                            log.message.includes('Scan stopped by user') ||
+                            log.message.includes('Cancel requested')
+                        );
 
-                        // Show completion buttons instead of auto-reload
-                        showScanComplete();
+                        if (wasCancelled) {
+                            // Add stopped message
+                            addLogEntry({
+                                time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
+                                level: 'warning',
+                                message: '⛔ Scan stopped - partial results saved'
+                            });
+                            showScanStopped();
+                        } else {
+                            // Add completion message
+                            addLogEntry({
+                                time: new Date().toLocaleTimeString('en-US', { hour12: false }).substr(0, 8),
+                                level: 'info',
+                                message: '✨ Scan complete!'
+                            });
+                            showScanComplete();
+                        }
                     }
                 } catch (e) {
                     console.error('Poll error:', e);
@@ -349,6 +364,41 @@
             const progressPercent = document.getElementById('progressPercent');
             if (progressBar) progressBar.style.width = '100%';
             if (progressPercent) progressPercent.textContent = '100%';
+        }
+
+        function showScanStopped() {
+            // Update scan button to allow starting a new scan
+            const btn = document.getElementById('scanButton');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Start New Scan';
+            }
+
+            // Hide the cancel button
+            const cancelBtn = document.getElementById('cancelButton');
+            if (cancelBtn) {
+                cancelBtn.classList.add('hidden');
+            }
+
+            // Show stopped state actions in the progress panel
+            const currentAction = document.getElementById('currentAction');
+            if (currentAction) {
+                currentAction.innerHTML = `
+                    <span class="text-yellow-400 font-medium">⛔ Scan Stopped</span>
+                    <div class="text-gray-400 text-xs mt-1">Partial results have been saved</div>
+                    <div class="flex gap-2 mt-2">
+                        <button onclick="copyLogs()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs">
+                            📋 Copy Logs
+                        </button>
+                        <button onclick="location.reload()" class="bg-primary hover:bg-indigo-500 text-white px-3 py-1 rounded text-xs">
+                            🔄 View Results
+                        </button>
+                        <button onclick="retryFailed()" class="bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-1 rounded text-xs">
+                            🔁 Retry Failed
+                        </button>
+                    </div>
+                `;
+            }
         }
 
         // Check if scan is running on page load
