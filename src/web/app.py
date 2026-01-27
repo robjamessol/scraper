@@ -40,6 +40,7 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 DATA_FILE = OUTPUT_DIR / "latest_scan.json"
 RETRY_QUEUE_FILE = OUTPUT_DIR / "retry_queue.json"
 CUSTOM_DOMAINS_FILE = OUTPUT_DIR / "custom_domains.json"
+SCANNED_ISSUES_FILE = OUTPUT_DIR / "scanned_issues.json"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -214,6 +215,44 @@ def remove_custom_domain(domain: str):
     save_custom_domains(domains)
 
 
+# ===== SCANNED ISSUES TRACKING =====
+def load_scanned_issues() -> set[str]:
+    """Load the set of already-scanned issue URLs."""
+    if SCANNED_ISSUES_FILE.exists():
+        try:
+            data = json.loads(SCANNED_ISSUES_FILE.read_text())
+            return set(data.get("issues", []))
+        except Exception:
+            return set()
+    return set()
+
+
+def save_scanned_issues(issues: set[str]):
+    """Save the set of scanned issue URLs."""
+    data = {
+        "issues": list(issues),
+        "last_updated": datetime.now().isoformat(),
+    }
+    SCANNED_ISSUES_FILE.write_text(json.dumps(data, indent=2))
+
+
+def mark_issue_scanned(issue_url: str):
+    """Mark a single issue as scanned."""
+    issues = load_scanned_issues()
+    issues.add(issue_url)
+    save_scanned_issues(issues)
+
+
+def clear_scanned_issues():
+    """Clear all scanned issues (allows re-scanning everything)."""
+    save_scanned_issues(set())
+
+
+def get_scanned_issues_count() -> int:
+    """Get count of scanned issues."""
+    return len(load_scanned_issues())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown."""
@@ -368,15 +407,23 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                     issues = scraper.discover_all_issues(limit=limit)
 
-                    update_status(issues_total=len(issues))
-                    add_log(f"📋 Found {len(issues)} issues to scan")
+                    # Filter out already-scanned issues
+                    scanned_issues = load_scanned_issues()
+                    new_issues = [url for url in issues if url not in scanned_issues]
+                    skipped_count = len(issues) - len(new_issues)
 
-                    if not issues:
-                        add_log("⚠️ No issues found", level="warning")
+                    update_status(issues_total=len(new_issues))
+
+                    if skipped_count > 0:
+                        add_log(f"📋 Found {len(issues)} issues, skipping {skipped_count} already scanned")
+                    add_log(f"📋 Scanning {len(new_issues)} new issues")
+
+                    if not new_issues:
+                        add_log("✅ All issues already scanned - nothing new to process")
                         continue
 
-                    # Scan each issue
-                    for j, issue_url in enumerate(issues):
+                    # Scan each NEW issue
+                    for j, issue_url in enumerate(new_issues):
                         # Check for cancellation
                         if is_scan_cancelled():
                             add_log("⛔ Scan cancelled by user")
@@ -384,14 +431,14 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                         issue_num = j + 1
                         update_status(
-                            current_action=f"Scanning issue {issue_num}/{len(issues)}",
+                            current_action=f"Scanning issue {issue_num}/{len(new_issues)}",
                             issues_scanned=issue_num,
-                            progress=int(((i + (j / len(issues))) / len(newsletters_to_scan)) * 100),
+                            progress=int(((i + (j / max(len(new_issues), 1))) / len(newsletters_to_scan)) * 100),
                         )
 
                         # Extract slug for display
                         slug = issue_url.split("/")[-1][:30]
-                        add_log(f"  📄 [{issue_num}/{len(issues)}] {slug}...")
+                        add_log(f"  📄 [{issue_num}/{len(new_issues)}] {slug}...")
 
                         try:
                             sponsors = scraper.scrape_issue(issue_url)
@@ -406,6 +453,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                                 update_status(advertisers_found=len(all_sponsors))
                                 add_log(f"    ✅ {sponsor.advertiser_name} @ {sponsor.advertiser_domain or '(no domain)'}")
+
+                            # Mark issue as scanned (even if no sponsors found)
+                            mark_issue_scanned(issue_url)
 
                         except Exception as e:
                             add_log(f"    ❌ Error: {str(e)[:50]}", level="error")
@@ -717,6 +767,7 @@ async def dashboard(request: Request):
             "advertisers": advertisers[:50],  # Show top 50
             "scan_status": scan_status,
             "newsletters": SCRAPERS,
+            "scanned_issues_count": get_scanned_issues_count(),
         },
     )
 
@@ -816,15 +867,32 @@ async def api_clear_advertisers():
         if latest_csv.exists():
             latest_csv.unlink()
 
+        # Also clear scanned issues tracking (so they can be re-scanned)
+        clear_scanned_issues()
+
         # Also clear logs
         with status_lock:
             scan_status["logs"] = []
             scan_status["total_advertisers"] = 0
             scan_status["advertisers_found"] = 0
 
-        return {"status": "cleared", "message": "All advertiser data cleared"}
+        return {"status": "cleared", "message": "All advertiser data and scanned issues cleared"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/scanned-issues/clear")
+async def api_clear_scanned_issues():
+    """Clear scanned issues tracking (allows re-scanning)."""
+    clear_scanned_issues()
+    return {"status": "cleared", "message": "Scanned issues tracking cleared - all issues will be re-scanned"}
+
+
+@app.get("/api/scanned-issues")
+async def api_get_scanned_issues():
+    """Get count of scanned issues."""
+    count = get_scanned_issues_count()
+    return {"count": count}
 
 
 @app.post("/api/scan")
