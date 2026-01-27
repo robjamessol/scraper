@@ -1,20 +1,139 @@
-"""Website contact scraper - extracts contact info directly from company websites.
+"""Website contact scraper - Balanced High Performance Version.
 
-Uses a hybrid approach:
-1. Try fast httpx requests first
-2. Fall back to Playwright (headless browser) for JavaScript-rendered sites
+Optimized for 8 vCPU / 8GB RAM environments.
+Restores 'Smart' features (Click-Reveal, Vision, Hydration Wait) for higher yield.
+
+Key Features:
+1. Global Browser Singleton - Single browser instance, 8 concurrent contexts
+2. Hydration Waits (1.5s) - Lets React/Next.js sites fully render
+3. Click-Reveal - Clicks "Show Email" buttons to reveal hidden contacts
+4. Relaxed Domain Filtering - Priority emails (ads@, press@) accepted cross-domain
+5. Vision Fallback - Screenshot OCR for hard-to-scrape sites
+
+Approach:
+1. Fast httpx requests first (20 parallel connections)
+2. Playwright browser fallback with GlobalBrowserManager singleton
+3. Semaphore controls concurrent contexts (8 max = one per vCPU)
+4. Vision AI fallback for sites with no text-extractable contacts
 """
 
 import re
 import logging
 import base64
 import random
+import threading
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from contextlib import contextmanager
 
 import httpx
 from bs4 import BeautifulSoup
+
+
+# --- THREAD-LOCAL BROWSER MANAGER ---
+# Playwright's sync API is NOT thread-safe. Each thread must have its own browser.
+# Using threading.local() ensures each thread gets its own Playwright instance.
+
+class ThreadLocalBrowserManager:
+    """
+    Thread-local browser manager for safe parallel scraping.
+
+    CRITICAL: Playwright's sync API cannot be used across threads.
+    This manager creates a separate browser instance per thread to avoid
+    "cannot switch to a different thread" errors.
+
+    Each thread gets its own:
+    - Playwright instance
+    - Browser instance
+    - Contexts are created/destroyed per-scrape
+
+    A global semaphore still limits total concurrent contexts across all threads.
+    """
+    _thread_local = threading.local()
+    _global_semaphore = threading.Semaphore(8)  # Limit total concurrent contexts
+    _init_lock = threading.Lock()
+
+    @classmethod
+    def _get_thread_browser(cls):
+        """Get or create browser for current thread."""
+        # Check if this thread already has a browser
+        if hasattr(cls._thread_local, 'browser') and cls._thread_local.browser is not None:
+            return cls._thread_local.browser, cls._thread_local.playwright
+
+        # Import here to handle optional dependency
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None, None
+
+        # Create new browser for this thread
+        try:
+            thread_id = threading.current_thread().name
+            logging.getLogger(__name__).info(f"🚀 Launching browser for thread: {thread_id}")
+            cls._thread_local.playwright = sync_playwright().start()
+            cls._thread_local.browser = cls._thread_local.playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            return cls._thread_local.browser, cls._thread_local.playwright
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Failed to launch browser: {e}")
+            return None, None
+
+    @classmethod
+    def get_browser(cls):
+        """Get browser for current thread."""
+        browser, _ = cls._get_thread_browser()
+        return browser
+
+    @classmethod
+    def acquire_context_slot(cls, timeout: float = 30.0) -> bool:
+        """Acquire a semaphore slot for a browser context."""
+        return cls._global_semaphore.acquire(timeout=timeout)
+
+    @classmethod
+    def release_context_slot(cls):
+        """Release a semaphore slot after context is closed."""
+        try:
+            cls._global_semaphore.release()
+        except ValueError:
+            pass  # Already released
+
+    @classmethod
+    def close_thread_browser(cls):
+        """Close browser for current thread. Call when thread is done scraping."""
+        if hasattr(cls._thread_local, 'browser') and cls._thread_local.browser:
+            try:
+                cls._thread_local.browser.close()
+            except Exception:
+                pass
+            cls._thread_local.browser = None
+
+        if hasattr(cls._thread_local, 'playwright') and cls._thread_local.playwright:
+            try:
+                cls._thread_local.playwright.stop()
+            except Exception:
+                pass
+            cls._thread_local.playwright = None
+
+    @classmethod
+    def close_all(cls):
+        """Close browser for current thread (alias for compatibility)."""
+        cls.close_thread_browser()
+
+
+# Alias for backward compatibility
+GlobalBrowserManager = ThreadLocalBrowserManager
+
+
+# Legacy lock for backward compatibility (used by some functions)
+BROWSER_LOCK = threading.Lock()
 
 # Playwright is optional - import with fallback
 try:
@@ -232,13 +351,24 @@ RELEVANT_JOB_TITLES = [
 
 # Job titles to EXCLUDE (not relevant for advertising outreach)
 EXCLUDED_JOB_TITLES = [
+    # Technical roles
     "engineer", "developer", "software", "technical", "tech",
+    "designer", "ux", "ui",
+    # Legal
     "legal", "counsel", "attorney", "lawyer",
+    # HR/recruiting
     "hr", "human resources", "recruiting", "talent",
+    # Finance
     "finance", "accounting", "cfo", "controller",
+    # IT/ops
     "it ", "information technology", "security", "devops",
-    "product manager", "product owner", "ux", "design",
+    "product manager", "product owner",
+    # Customer-facing support roles (not decision-makers)
     "customer support", "customer service", "support",
+    "customer success", "technical support",
+    # Implementation/onboarding (service delivery, not buying)
+    "implementation", "onboarding",
+    # Operations
     "operations", "logistics", "supply chain",
 ]
 
@@ -977,12 +1107,12 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 2.5,  # Reduced for speed (was 3.0)
-        max_pages: int = 5,    # Reduced for speed (was 6) - slow sites go to retry
+        timeout: float = 15.0,  # 15s HTTP timeout (Balanced mode - was 10)
+        max_pages: int = 12,    # Increased depth for balanced mode (was 8)
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
-        verify_emails: bool = False,  # SMTP verification (slow but accurate)
+        verify_emails: bool = True,  # Enable verification on high-perf plan
         log_callback: callable = None,
         cancel_check: callable = None,  # Optional callback to check for cancellation
     ):
@@ -1022,38 +1152,34 @@ class WebsiteScraper:
         }
 
     def _get_http_client(self):
-        """Get or create HTTP client (reused across all domains)."""
+        """Get or create HTTP client (reused across all domains).
+
+        High-Performance Mode: Increased connection limits for parallel scraping.
+        """
         if self._http_client is None:
             self._http_client = httpx.Client(
                 timeout=self.timeout,
                 headers=self.headers,
                 follow_redirects=True,
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                # Increased limits for high-performance (was 10/5)
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             )
         return self._http_client
 
     def _get_browser(self):
-        """Get or create browser (reused across all JS-rendered domains)."""
+        """Get browser from Global Browser Singleton (shared across all scrapers).
+
+        High-Performance Mode: Uses GlobalBrowserManager singleton instead of
+        creating a new browser per instance. This dramatically reduces memory
+        usage and startup time.
+        """
         if not PLAYWRIGHT_AVAILABLE:
             return None
 
-        if self._browser is None:
-            try:
-                from playwright.sync_api import sync_playwright
-                self._playwright = sync_playwright().start()
-                self._browser = self._playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-features=IsolateOrigins,site-per-process",
-                        "--no-sandbox",
-                    ],
-                )
-                self._log("Browser started for JS rendering")
-            except Exception as e:
-                self._log(f"Failed to start browser: {e}", "error")
-                return None
-        return self._browser
+        browser = GlobalBrowserManager.get_browser()
+        if browser:
+            self._log("Using Global Browser Singleton for JS rendering")
+        return browser
 
     def _get_claude_agent(self):
         """Get or create Claude agent (lazy initialization, reused across calls)."""
@@ -1070,7 +1196,12 @@ class WebsiteScraper:
         return self._claude_agent
 
     def close(self):
-        """Clean up resources (call when done with all scraping)."""
+        """Clean up resources (call when done with all scraping).
+
+        Note: Does NOT close the Global Browser Singleton, as other scrapers
+        may still be using it. Call GlobalBrowserManager.close() explicitly
+        when shutting down the application.
+        """
         if self._claude_agent:
             try:
                 self._claude_agent.close()
@@ -1085,19 +1216,8 @@ class WebsiteScraper:
                 pass
             self._http_client = None
 
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
-
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+        # Note: We do NOT close the Global Browser here, as other threads need it
+        # The GlobalBrowserManager singleton persists until application shutdown
 
     def _log(self, message: str, level: str = "info"):
         """Log a message, optionally to callback."""
@@ -1121,32 +1241,61 @@ class WebsiteScraper:
 
     @contextmanager
     def _browser_context(self):
-        """Context manager for Playwright browser."""
+        """
+        Context manager for Playwright browser using Thread-Local storage.
+
+        Thread-Safe High-Performance Mode:
+        - Each thread gets its own browser instance (fixes threading errors)
+        - Semaphore limits total concurrent contexts across all threads
+        - Automatic cleanup on context exit
+        - Auto-recovery: browser is reset on crash/error
+        """
         if not PLAYWRIGHT_AVAILABLE:
             yield None
             return
 
-        playwright = None
-        browser = None
+        # Acquire semaphore slot to respect CPU limits
+        acquired = GlobalBrowserManager.acquire_context_slot(timeout=30)
+        if not acquired:
+            self._log("Could not acquire browser semaphore (load too high)", "warning")
+            yield None
+            return
+
+        context = None
+        semaphore_held = True
         try:
-            playwright = sync_playwright().start()
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--no-sandbox",
-                ],
+            browser = GlobalBrowserManager.get_browser()
+            if not browser:
+                # Release semaphore early if browser failed to start
+                GlobalBrowserManager.release_context_slot()
+                semaphore_held = False
+                yield None
+                return
+
+            # Create a new context with anti-detection settings
+            context = browser.new_context(
+                user_agent=get_random_user_agent(),
+                viewport={"width": 1280, "height": 720},
+                java_script_enabled=True,
             )
-            yield browser
+            yield context
         except Exception as e:
-            self._log(f"Failed to start browser: {e}", "error")
+            self._log(f"Error creating browser context: {e}", "error")
+            # If the browser is dead/crashed, close it so it restarts next time
+            # This handles "Target page, context or browser has been closed" errors
+            error_str = str(e).lower()
+            if "closed" in error_str or "crash" in error_str or "thread" in error_str:
+                self._log("Browser appears dead, resetting for next attempt...", "warning")
+                GlobalBrowserManager.close_thread_browser()
             yield None
         finally:
-            if browser:
-                browser.close()
-            if playwright:
-                playwright.stop()
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if semaphore_held:
+                GlobalBrowserManager.release_context_slot()
 
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
         """
@@ -1155,14 +1304,13 @@ class WebsiteScraper:
         Instead of guessing URLs like /contact, /press etc, this reads the
         actual links from the JS-rendered page.
 
+        Uses BROWSER_LOCK to ensure only one browser operation runs at a time
+        (critical for low-resource environments).
+
         Returns:
             List of URLs to contact-related pages (found on the actual page)
         """
         if not PLAYWRIGHT_AVAILABLE:
-            return []
-
-        browser = self._get_browser()
-        if not browser:
             return []
 
         contact_urls = []
@@ -1181,54 +1329,60 @@ class WebsiteScraper:
             "about", "about us", "team", "leadership", "company", "who we are",
         ]
 
-        # Use random User-Agent for each browser context (anti-bot evasion)
-        context = browser.new_context(
-            user_agent=get_random_user_agent(),
-            viewport={"width": 1280, "height": 720},
-        )
+        # Acquire lock for entire browser operation to prevent resource exhaustion
+        with BROWSER_LOCK:
+            browser = self._get_browser()
+            if not browser:
+                return []
 
-        try:
-            page = context.new_page()
-            page.set_default_timeout(3000)  # Reduced from 5000 for speed
-            page.set_default_navigation_timeout(3000)
-            self._log(f"Browser reading links from: {base_url}")
-            page.goto(base_url, wait_until="domcontentloaded", timeout=3000)
-            page.wait_for_timeout(500)  # Reduced from 1000 - quick JS render check
+            # Use random User-Agent for each browser context (anti-bot evasion)
+            context = browser.new_context(
+                user_agent=get_random_user_agent(),
+                viewport={"width": 1280, "height": 720},
+            )
 
-            # Find all links on the page
-            links = page.query_selector_all('a[href]')
-            base_domain = urlparse(base_url).netloc
+            try:
+                page = context.new_page()
+                page.set_default_timeout(15000)  # 15s timeout for corporate sites
+                page.set_default_navigation_timeout(15000)
+                self._log(f"Browser reading links from: {base_url}")
+                page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(500)  # Quick JS render check
 
-            for link in links:
-                try:
-                    href = link.get_attribute("href") or ""
-                    text = (link.inner_text() or "").lower().strip()
+                # Find all links on the page
+                links = page.query_selector_all('a[href]')
+                base_domain = urlparse(base_url).netloc
 
-                    # Skip empty/external/js links
-                    if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                for link in links:
+                    try:
+                        href = link.get_attribute("href") or ""
+                        text = (link.inner_text() or "").lower().strip()
+
+                        # Skip empty/external/js links
+                        if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                            continue
+
+                        # Build full URL
+                        full_url = urljoin(base_url, href)
+
+                        # Only same-domain links
+                        if urlparse(full_url).netloc != base_domain:
+                            continue
+
+                        # Check if text or href contains contact keywords
+                        href_lower = href.lower()
+                        if any(kw in text or kw.replace(" ", "-") in href_lower or kw.replace(" ", "") in href_lower
+                               for kw in contact_keywords):
+                            if full_url not in contact_urls and is_url_worth_visiting(full_url):
+                                contact_urls.append(full_url)
+
+                    except Exception:
                         continue
 
-                    # Build full URL
-                    full_url = urljoin(base_url, href)
-
-                    # Only same-domain links
-                    if urlparse(full_url).netloc != base_domain:
-                        continue
-
-                    # Check if text or href contains contact keywords
-                    href_lower = href.lower()
-                    if any(kw in text or kw.replace(" ", "-") in href_lower or kw.replace(" ", "") in href_lower
-                           for kw in contact_keywords):
-                        if full_url not in contact_urls and is_url_worth_visiting(full_url):
-                            contact_urls.append(full_url)
-
-                except Exception:
-                    continue
-
-        except Exception as e:
-            self._log(f"Browser link discovery failed: {e}", "warning")
-        finally:
-            context.close()
+            except Exception as e:
+                self._log(f"Browser link discovery failed: {e}", "warning")
+            finally:
+                context.close()
 
         return contact_urls[:15]  # Limit to 15 most relevant links
 
@@ -1310,6 +1464,13 @@ class WebsiteScraper:
         """
         Scrape URLs using Playwright for JavaScript-rendered content.
 
+        Balanced High-Performance Mode:
+        - Uses GlobalBrowserManager singleton (fast startup)
+        - Semaphore controls concurrent contexts (8 max = one per vCPU)
+        - 1.5s hydration wait for React/Next.js sites
+        - Click-reveal for hidden emails
+        - Increased URL depth (10 pages)
+
         Args:
             domain: The domain being scraped
             urls: List of URLs to try
@@ -1322,160 +1483,222 @@ class WebsiteScraper:
 
         import time
         browser_start = time.time()
-        max_browser_time = 10  # Max 10 seconds for browser phase (reduced for speed)
+        max_browser_time = 25  # Increased for balanced mode (was 10)
 
         all_emails: dict[str, WebsiteContact] = {}
 
-        # Use reusable browser (MUCH faster than starting fresh each time)
-        browser = self._get_browser()
-        if not browser:
-            return []
+        # Use GlobalBrowserManager via context manager
+        with self._browser_context() as context:
+            if not context:
+                return []
 
-        # Use random User-Agent for each browser context (anti-bot evasion)
-        context = browser.new_context(
-            user_agent=get_random_user_agent(),
-            viewport={"width": 1280, "height": 720},
-        )
+            try:
+                page = context.new_page()
+                # Increased timeouts for corporate sites
+                page.set_default_timeout(20000)  # 20s max for any operation
+                page.set_default_navigation_timeout(20000)  # 20s max for navigation
 
-        try:
-            page = context.new_page()
-            # Set aggressive default timeouts to prevent hangs
-            page.set_default_timeout(5000)  # 5s max for any operation
-            page.set_default_navigation_timeout(5000)  # 5s max for navigation
+                # Network interception: block heavy resources but allow scripts for hydration
+                def handle_route(route):
+                    """Block images, fonts, media, and tracking scripts."""
+                    resource_type = route.request.resource_type
+                    url = route.request.url.lower()
 
-            # Network interception: block unnecessary resources for faster loads
-            # This dramatically speeds up scraping while preserving contact info
-            def handle_route(route):
-                """Block images, fonts, media, and tracking scripts."""
-                resource_type = route.request.resource_type
-                url = route.request.url.lower()
+                    # Block resource types that never contain contact info
+                    # NOTE: Allow stylesheets for proper rendering
+                    blocked_types = {"image", "media", "font"}
+                    if resource_type in blocked_types:
+                        route.abort()
+                        return
 
-                # Block resource types that never contain contact info
-                blocked_types = {"image", "media", "font", "stylesheet"}
-                if resource_type in blocked_types:
-                    route.abort()
-                    return
+                    # Block common tracking/analytics scripts
+                    tracking_domains = [
+                        "google-analytics", "googletagmanager", "facebook.net",
+                        "doubleclick", "analytics", "tracking", "pixel",
+                        "hotjar", "mixpanel", "segment", "amplitude",
+                        "intercom", "crisp", "drift", "hubspot",
+                    ]
+                    if any(td in url for td in tracking_domains):
+                        route.abort()
+                        return
 
-                # Block common tracking/analytics scripts
-                tracking_domains = [
-                    "google-analytics", "googletagmanager", "facebook.net",
-                    "doubleclick", "analytics", "tracking", "pixel",
-                    "hotjar", "mixpanel", "segment", "amplitude",
-                    "intercom", "crisp", "drift", "hubspot",
-                ]
-                if any(td in url for td in tracking_domains):
-                    route.abort()
-                    return
+                    # Allow everything else (including scripts for hydration)
+                    route.continue_()
 
-                # Allow everything else
-                route.continue_()
-
-            # Enable route interception
-            page.route("**/*", handle_route)
-
-            crash_count = 0  # Track consecutive crashes
-
-            # Filter URLs and limit to 5 max for speed (reduced from 8)
-            filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:5]
-
-            for url in filtered_urls:
-                # Skip if too many crashes (browser is unstable)
-                if crash_count >= 3:
-                    self._log(f"Stopping browser - too many crashes", "warning")
-                    break
-
-                # CANCELLATION CHECK
-                if self._is_cancelled():
-                    self._log(f"Cancelled, stopping browser", "warning")
-                    break
-
-                # TIME CHECK: Don't let browser phase run too long
-                if (time.time() - browser_start) > max_browser_time:
-                    self._log(f"Browser time limit reached", "warning")
-                    break
-
+                # Enable route interception
                 try:
-                    self._log(f"Browser loading: {url}")
-                    page.goto(url, wait_until="domcontentloaded", timeout=3000)
+                    page.route("**/*", handle_route)
+                except Exception:
+                    pass  # Continue without route interception if it fails
 
-                    # Brief wait for dynamic content (reduced for speed)
-                    page.wait_for_timeout(500)
+                crash_count = 0  # Track consecutive crashes
+                deep_drill_visited = set()  # Track deep drill URLs to avoid loops
 
-                    # Get rendered HTML
-                    html = page.content()
-                    crash_count = 0  # Reset on success
+                # Increased URL limit for balanced mode (was 5, now 10)
+                filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:10]
+                # Use a mutable queue to allow adding deep drill targets
+                url_queue = list(filtered_urls)
+                processed_count = 0
+                max_urls = 15  # Allow more for deep drill on difficult sites
 
-                    # Check for block page (soft 403)
-                    if is_block_page(html):
-                        self._log(f"  Block page detected, skipping: {url}", "warning")
-                        continue
+                while url_queue and processed_count < max_urls:
+                    url = url_queue.pop(0)
+                    processed_count += 1
 
-                    # Try to click "reveal email" buttons before extraction
-                    self._click_reveal_email_buttons(page)
+                    # Skip if too many crashes (browser is unstable)
+                    if crash_count >= 3:
+                        self._log(f"Stopping browser - too many crashes", "warning")
+                        break
 
-                    # Re-get HTML after potential reveals
-                    html = page.content()
+                    # CANCELLATION CHECK
+                    if self._is_cancelled():
+                        self._log(f"Cancelled, stopping browser", "warning")
+                        break
 
-                    # Try to decode any Base64-encoded emails
-                    base64_emails = decode_base64_emails(html, domain)
-                    for email in base64_emails:
-                        if email not in all_emails:
-                            all_emails[email] = WebsiteContact(
-                                email=email,
-                                source_page=url,
-                                email_type="generic",
-                            )
-                            self._log(f"  Found Base64-encoded email: {email}")
+                    # TIME CHECK: Don't let browser phase run too long
+                    if (time.time() - browser_start) > max_browser_time:
+                        self._log(f"Browser time limit reached", "warning")
+                        break
 
-                    # Extract contacts
-                    contacts = self._extract_contacts_from_html(html, url, domain)
-                    for contact in contacts:
-                        if contact.email not in all_emails:
-                            all_emails[contact.email] = contact
+                    try:
+                        self._log(f"Browser loading: {url}")
+                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
-                    # Also look for mailto: links in the DOM
-                    mailto_links = page.query_selector_all('a[href^="mailto:"]')
-                    for link in mailto_links:
-                        href = link.get_attribute("href")
-                        if href:
-                            email = href.replace("mailto:", "").split("?")[0].strip()
-                            if EMAIL_PATTERN.match(email) and email not in all_emails:
+                        # HYDRATION WAIT: Crucial for React/Next.js sites
+                        # This gives JS frameworks time to render contact info
+                        page.wait_for_timeout(1500)
+
+                        # Get rendered HTML
+                        html = page.content()
+                        crash_count = 0  # Reset on success
+
+                        # Check for block page (soft 403)
+                        if is_block_page(html):
+                            self._log(f"  Block page detected, skipping: {url}", "warning")
+                            continue
+
+                        # Try to click "reveal email" buttons before extraction
+                        self._click_reveal_email_buttons(page)
+
+                        # Brief wait after clicking reveals
+                        page.wait_for_timeout(300)
+
+                        # Re-get HTML after potential reveals
+                        html = page.content()
+
+                        # Try to decode any Base64-encoded emails
+                        base64_emails = decode_base64_emails(html, domain)
+                        for email in base64_emails:
+                            if email not in all_emails:
                                 all_emails[email] = WebsiteContact(
                                     email=email,
                                     source_page=url,
                                     email_type="generic",
                                 )
+                                self._log(f"  Found Base64-encoded email: {email}")
 
-                    # Stop if we found good contacts
-                    if len(all_emails) >= 3:
-                        break
+                        # Extract contacts
+                        contacts = self._extract_contacts_from_html(html, url, domain)
+                        for contact in contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
 
-                except PlaywrightTimeout:
-                    self._log(f"Browser timeout: {url}", "warning")
-                except Exception as e:
-                    error_str = str(e).lower()
-                    if "crash" in error_str or "detach" in error_str:
-                        crash_count += 1
-                        self._log(f"Browser crash ({crash_count}/3): {url}", "warning")
-                        # Try to create new page after crash
-                        try:
-                            page = context.new_page()
-                        except Exception:
-                            break  # Context is dead, exit
-                    elif "err_name_not_resolved" in error_str:
-                        self._log(f"Domain unreachable: {url}", "warning")
-                        break  # Skip entire domain
-                    else:
-                        self._log(f"Browser error on {url}: {e}", "warning")
+                        # Also look for mailto: links in the DOM
+                        mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                        for link in mailto_links:
+                            href = link.get_attribute("href")
+                            if href:
+                                email = href.replace("mailto:", "").split("?")[0].strip()
+                                if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                    all_emails[email] = WebsiteContact(
+                                        email=email,
+                                        source_page=url,
+                                        email_type="generic",
+                                    )
 
-        finally:
-            context.close()
+                        # DEEP DRILL: Look for "Press/Newsroom" links if no advertising emails yet
+                        has_ad_email = any(c.email_type == "advertising" for c in all_emails.values())
+                        if not has_ad_email and len(deep_drill_visited) < 5:
+                            try:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(html, "lxml")
+                                for a_tag in soup.find_all("a", href=True):
+                                    link_text = a_tag.get_text().lower().strip()
+                                    href = a_tag['href'].lower()
+                                    # Expanded keywords for press/media/contact pages
+                                    drill_keywords = [
+                                        # Press/news variations
+                                        "press", "newsroom", "news room", "press room", "press-room",
+                                        "media room", "media-room", "news center", "press center",
+                                        "press release", "media release", "press contact",
+                                        # Media kit variations
+                                        "media kit", "media-kit", "mediakit", "press kit", "press-kit",
+                                        # Contact variations
+                                        "media contact", "pr contact", "media inquir", "press inquir",
+                                        "media relation", "public relation", "corporate communication",
+                                        # About variations that often lead to contact
+                                        "about us", "about-us", "our company", "who we are",
+                                        "company info", "corporate", "/about/",
+                                        # Direct contact indicators
+                                        "contact us", "contact-us", "get in touch", "reach us",
+                                    ]
+                                    if any(k in link_text or k in href for k in drill_keywords):
+                                        full_url = urljoin(url, a_tag['href'])  # Use original href for urljoin
+                                        parsed_full = urlparse(full_url)
+                                        parsed_current = urlparse(url)
+                                        # Allow same domain OR www variant
+                                        same_domain = (
+                                            parsed_full.netloc == parsed_current.netloc or
+                                            parsed_full.netloc == f"www.{parsed_current.netloc}" or
+                                            f"www.{parsed_full.netloc}" == parsed_current.netloc
+                                        )
+                                        if (same_domain and
+                                            full_url not in deep_drill_visited and
+                                            full_url not in url_queue):
+                                            self._log(f"  Deep drill target found: {full_url}")
+                                            deep_drill_visited.add(full_url)
+                                            url_queue.insert(0, full_url)  # Visit NEXT (priority)
+                            except Exception as e:
+                                self._log(f"  Deep drill parsing error: {e}", "warning")
+
+                        # Stop if we found high-quality contacts (advertising emails)
+                        ad_emails = [e for e in all_emails.values() if e.email_type == "advertising"]
+                        if len(ad_emails) >= 1 and len(all_emails) >= 2:
+                            self._log(f"  Found {len(ad_emails)} advertising email(s), stopping early")
+                            break
+
+                    except PlaywrightTimeout:
+                        self._log(f"Browser timeout: {url}", "warning")
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if "crash" in error_str or "detach" in error_str:
+                            crash_count += 1
+                            self._log(f"Browser crash ({crash_count}/3): {url}", "warning")
+                            # Try to create new page after crash
+                            try:
+                                page = context.new_page()
+                            except Exception:
+                                break  # Context is dead, exit
+                        elif "err_name_not_resolved" in error_str:
+                            self._log(f"Domain unreachable: {url}", "warning")
+                            break  # Skip entire domain
+                        else:
+                            self._log(f"Browser error on {url}: {e}", "warning")
+
+            except Exception as e:
+                self._log(f"Browser context error: {e}", "error")
 
         return list(all_emails.values())
 
     def _scrape_with_browser_and_navigate(self, domain: str, start_urls: list[str]) -> list[WebsiteContact]:
         """
         Use browser to navigate pages and CLICK THROUGH to find contact links.
+
+        Balanced High-Performance Mode:
+        - Uses GlobalBrowserManager singleton (fast startup)
+        - Semaphore controls concurrent contexts
+        - 1.5s hydration wait for React/Next.js sites
+        - Increased navigation time (15s)
 
         This mimics human behavior:
         1. Go to About page
@@ -1494,162 +1717,162 @@ class WebsiteScraper:
 
         import time
         nav_start = time.time()
-        max_nav_time = 6  # Max 6 seconds for click-through navigation (reduced for speed)
+        max_nav_time = 15  # Increased for balanced mode (was 6)
 
         all_emails: dict[str, WebsiteContact] = {}
 
-        browser = self._get_browser()
-        if not browser:
-            return []
+        # Use GlobalBrowserManager via context manager
+        with self._browser_context() as context:
+            if not context:
+                return []
 
-        # Use random User-Agent for each browser context (anti-bot evasion)
-        context = browser.new_context(
-            user_agent=get_random_user_agent(),
-            viewport={"width": 1280, "height": 720},
-        )
+            try:
+                page = context.new_page()
+                # Increased timeouts for corporate sites (20s)
+                page.set_default_timeout(20000)  # 20s max for any operation
+                page.set_default_navigation_timeout(20000)  # 20s max for navigation
 
-        try:
-            page = context.new_page()
-            # Set aggressive default timeouts to prevent hangs
-            page.set_default_timeout(5000)  # 5s max for any operation
-            page.set_default_navigation_timeout(5000)  # 5s max for navigation
+                # Keywords to look for in links (for clicking through) - EXPANDED
+                click_keywords = [
+                    "press", "media", "newsroom", "news", "contact", "contact us",
+                    "press & media", "press and media", "media relations",
+                    "press room", "media room", "communications",
+                    "press releases", "media inquiries", "press inquiries",
+                    "press contacts", "media contacts", "about", "about us",
+                    "advertise", "advertising", "partnerships", "partners",
+                ]
 
-            # Keywords to look for in links (for clicking through) - EXPANDED
-            click_keywords = [
-                "press", "media", "newsroom", "news", "contact", "contact us",
-                "press & media", "press and media", "media relations",
-                "press room", "media room", "communications",
-                "press releases", "media inquiries", "press inquiries",
-                "press contacts", "media contacts", "about", "about us",
-            ]
+                # Keywords to EXCLUDE from clicking (irrelevant links)
+                exclude_keywords = [
+                    "sign in", "login", "register", "sign up", "signup",
+                    "job", "career", "hiring", "apply", "cart", "checkout",
+                    "shop", "buy", "subscribe", "trial", "demo", "pricing",
+                    "facebook", "twitter", "linkedin", "instagram", "youtube",
+                    "privacy", "terms", "cookie", "legal",
+                ]
 
-            # Keywords to EXCLUDE from clicking (irrelevant links)
-            exclude_keywords = [
-                "sign in", "login", "register", "sign up", "signup",
-                "job", "career", "hiring", "apply", "cart", "checkout",
-                "shop", "buy", "subscribe", "trial", "demo", "pricing",
-                "facebook", "twitter", "linkedin", "instagram", "youtube",
-                "privacy", "terms", "cookie", "legal",
-            ]
+                for start_url in start_urls:
+                    if len(all_emails) >= 2:
+                        break  # Found enough
 
-            for start_url in start_urls:
-                if len(all_emails) >= 2:
-                    break  # Found enough
+                    # TIME CHECK: Don't exceed nav time limit
+                    if (time.time() - nav_start) > max_nav_time:
+                        self._log(f"Navigation time limit reached ({max_nav_time}s)", "warning")
+                        break
 
-                # TIME CHECK: Don't exceed nav time limit
-                if (time.time() - nav_start) > max_nav_time:
-                    self._log(f"Navigation time limit reached ({max_nav_time}s)", "warning")
-                    break
+                    try:
+                        self._log(f"Browser navigating: {start_url}")
+                        page.goto(start_url, wait_until="domcontentloaded", timeout=20000)
 
-                try:
-                    self._log(f"Browser navigating: {start_url}")
-                    page.goto(start_url, wait_until="domcontentloaded", timeout=3000)
-                    page.wait_for_timeout(800)
+                        # HYDRATION WAIT: Crucial for React/Next.js sites
+                        page.wait_for_timeout(1500)
 
-                    # First extract any contacts on this page
-                    html = page.content()
-                    contacts = self._extract_contacts_from_html(html, start_url, domain)
-                    for contact in contacts:
-                        if contact.email not in all_emails:
-                            all_emails[contact.email] = contact
+                        # First extract any contacts on this page
+                        html = page.content()
+                        contacts = self._extract_contacts_from_html(html, start_url, domain)
+                        for contact in contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
 
-                    # Look for mailto links
-                    mailto_links = page.query_selector_all('a[href^="mailto:"]')
-                    for link in mailto_links:
-                        href = link.get_attribute("href")
-                        if href:
-                            email = href.replace("mailto:", "").split("?")[0].strip()
-                            if EMAIL_PATTERN.match(email) and email not in all_emails:
-                                all_emails[email] = WebsiteContact(
-                                    email=email,
-                                    source_page=start_url,
-                                    email_type="generic",
-                                )
+                        # Look for mailto links
+                        mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                        for link in mailto_links:
+                            href = link.get_attribute("href")
+                            if href:
+                                email = href.replace("mailto:", "").split("?")[0].strip()
+                                if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                    all_emails[email] = WebsiteContact(
+                                        email=email,
+                                        source_page=start_url,
+                                        email_type="generic",
+                                    )
 
-                    # Now look for links to click through
-                    all_links = page.query_selector_all('a[href]')
-                    links_to_click = []
+                        # Now look for links to click through
+                        all_links = page.query_selector_all('a[href]')
+                        links_to_click = []
 
-                    for link in all_links:
-                        try:
-                            text = (link.inner_text() or "").lower().strip()
-                            href = (link.get_attribute("href") or "").lower()
+                        for link in all_links:
+                            try:
+                                text = (link.inner_text() or "").lower().strip()
+                                href = (link.get_attribute("href") or "").lower()
 
-                            # Skip empty text links or excluded keywords
-                            if not text or len(text) < 2:
+                                # Skip empty text links or excluded keywords
+                                if not text or len(text) < 2:
+                                    continue
+                                if any(excl in text or excl in href for excl in exclude_keywords):
+                                    continue
+
+                                # Check if this link looks like it leads to press/contact
+                                for keyword in click_keywords:
+                                    if keyword in text or keyword.replace(" ", "-") in href or keyword.replace(" ", "") in href:
+                                        full_href = link.get_attribute("href")
+                                        if full_href and not full_href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                                            # Also check URL is worth visiting
+                                            if is_url_worth_visiting(urljoin(start_url, full_href)):
+                                                links_to_click.append((link, text, full_href))
+                                            break
+                            except Exception:
                                 continue
-                            if any(excl in text or excl in href for excl in exclude_keywords):
-                                continue
 
-                            # Check if this link looks like it leads to press/contact
-                            for keyword in click_keywords:
-                                if keyword in text or keyword.replace(" ", "-") in href or keyword.replace(" ", "") in href:
-                                    full_href = link.get_attribute("href")
-                                    if full_href and not full_href.startswith(("javascript:", "#", "mailto:", "tel:")):
-                                        # Also check URL is worth visiting
-                                        if is_url_worth_visiting(urljoin(start_url, full_href)):
-                                            links_to_click.append((link, text, full_href))
-                                        break
-                        except Exception:
-                            continue
+                        # Click through found links (max 3 for balanced mode)
+                        for link, text, href in links_to_click[:3]:
+                            if len(all_emails) >= 2:
+                                break
 
-                    # Click through found links (max 2 for speed)
-                    for link, text, href in links_to_click[:2]:
-                        if len(all_emails) >= 2:
-                            break
+                            # TIME CHECK: Don't exceed nav time limit
+                            if (time.time() - nav_start) > max_nav_time:
+                                self._log(f"Navigation time limit reached during click-through", "warning")
+                                break
 
-                        # TIME CHECK: Don't exceed nav time limit
-                        if (time.time() - nav_start) > max_nav_time:
-                            self._log(f"Navigation time limit reached during click-through", "warning")
-                            break
+                            try:
+                                self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
 
-                        try:
-                            self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
+                                # Navigate to the link (20s timeout for corporate sites)
+                                link.click(timeout=20000)
+                                page.wait_for_load_state("domcontentloaded", timeout=20000)
 
-                            # Navigate to the link (8s timeout, not 30s default)
-                            link.click(timeout=3000)
-                            page.wait_for_load_state("domcontentloaded", timeout=3000)
-                            page.wait_for_timeout(500)
+                                # HYDRATION WAIT after click
+                                page.wait_for_timeout(1200)
 
-                            # Extract contacts from new page
-                            html = page.content()
-                            current_url = page.url
-                            contacts = self._extract_contacts_from_html(html, current_url, domain)
-                            for contact in contacts:
-                                if contact.email not in all_emails:
-                                    all_emails[contact.email] = contact
-                                    self._log(f"    Found: {contact.email}")
+                                # Extract contacts from new page
+                                html = page.content()
+                                current_url = page.url
+                                contacts = self._extract_contacts_from_html(html, current_url, domain)
+                                for contact in contacts:
+                                    if contact.email not in all_emails:
+                                        all_emails[contact.email] = contact
+                                        self._log(f"    Found: {contact.email}")
 
-                            # Check mailto links on new page
-                            mailto_links = page.query_selector_all('a[href^="mailto:"]')
-                            for mailto in mailto_links:
-                                href = mailto.get_attribute("href")
-                                if href:
-                                    email = href.replace("mailto:", "").split("?")[0].strip()
-                                    if EMAIL_PATTERN.match(email) and email not in all_emails:
-                                        all_emails[email] = WebsiteContact(
-                                            email=email,
-                                            source_page=current_url,
-                                            email_type="generic",
-                                        )
-                                        self._log(f"    Found: {email}")
+                                # Check mailto links on new page
+                                mailto_links = page.query_selector_all('a[href^="mailto:"]')
+                                for mailto in mailto_links:
+                                    href = mailto.get_attribute("href")
+                                    if href:
+                                        email = href.replace("mailto:", "").split("?")[0].strip()
+                                        if EMAIL_PATTERN.match(email) and email not in all_emails:
+                                            all_emails[email] = WebsiteContact(
+                                                email=email,
+                                                source_page=current_url,
+                                                email_type="generic",
+                                            )
+                                            self._log(f"    Found: {email}")
 
-                            # Go back to try next link
-                            page.go_back(wait_until="domcontentloaded", timeout=3000)
-                            page.wait_for_timeout(300)
+                                # Go back to try next link
+                                page.go_back(wait_until="domcontentloaded", timeout=20000)
+                                page.wait_for_timeout(500)
 
-                        except Exception as e:
-                            self._log(f"  Click navigation error: {str(e)[:50]}", "warning")
-                            # Try to recover by going to next start URL
-                            break
+                            except Exception as e:
+                                self._log(f"  Click navigation error: {str(e)[:50]}", "warning")
+                                # Try to recover by going to next start URL
+                                break
 
-                except PlaywrightTimeout:
-                    self._log(f"Browser timeout: {start_url}", "warning")
-                except Exception as e:
-                    self._log(f"Browser error on {start_url}: {e}", "warning")
+                    except PlaywrightTimeout:
+                        self._log(f"Browser timeout: {start_url}", "warning")
+                    except Exception as e:
+                        self._log(f"Browser error on {start_url}: {e}", "warning")
 
-        finally:
-            context.close()
+            except Exception as e:
+                self._log(f"Browser context error: {e}", "error")
 
         return list(all_emails.values())
 
@@ -1709,7 +1932,7 @@ class WebsiteScraper:
         # Track timing - prevent any single domain from taking too long
         import time
         domain_start_time = time.time()
-        max_domain_time = 20  # Max 20 seconds per domain - slow sites go to retry queue
+        max_domain_time = 60  # Max 60 seconds per domain - increased for corporate sites
 
         def is_time_exceeded() -> bool:
             """Check if we've spent too long on this domain."""
@@ -1733,6 +1956,7 @@ class WebsiteScraper:
         pages_scraped = 0
         consecutive_errors = 0
         domain_unreachable = False  # DNS failure = skip everything
+        domain_completely_blocked = False  # HTTP 403/Block + Browser fail = skip nested search/vision
         all_emails: dict[str, WebsiteContact] = {}  # email -> contact
 
         def has_good_contacts() -> bool:
@@ -2026,6 +2250,12 @@ class WebsiteScraper:
                 if contact.email not in all_emails:
                     all_emails[contact.email] = contact
 
+            # FAIL FAST: If HTTP was blocked AND browser found nothing, domain is completely blocked
+            # Skip nested search and vision fallback to save resources
+            if site_blocks_http and len(browser_contacts) == 0:
+                domain_completely_blocked = True
+                self._log(f"Domain completely blocked (HTTP + Browser failed), skipping further attempts", "warning")
+
         # Phase 2.5: If we have a contact form but no emails, try press/media pages
         # Sites like floqast.com have contact forms but emails are on press pages
         if len(all_emails) == 0:
@@ -2068,7 +2298,8 @@ class WebsiteScraper:
                         continue
 
         # Phase 3: THOROUGH SEARCH - if still no contacts, try nested/uncommon paths
-        if len(all_emails) == 0:
+        # FAIL FAST: Skip if domain is completely blocked (both HTTP and browser failed)
+        if len(all_emails) == 0 and not domain_completely_blocked:
             self._log(f"No contacts found, trying thorough nested search...")
 
             # Common nested paths that sites use (About → Press, Company → Contact, etc.)
@@ -2193,13 +2424,74 @@ class WebsiteScraper:
         # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
         # Call scraper.close() when done with all scraping to clean up
 
+        # Phase 5: TLD Fallback - Try alternative TLDs when zero contacts found
+        # This handles cases like collectly.com → collectly.co where the .com exists but has no contacts
+        if len(all_emails) == 0 and not is_time_exceeded() and not self._is_cancelled():
+            base_name = domain.split('.')[0]
+            current_tld = '.'.join(domain.split('.')[1:])
+
+            # Common TLD alternatives for tech/business sites
+            tld_alternatives = [
+                f"{base_name}.co",
+                f"{base_name}.io",
+                f"{base_name}.com",
+                f"{base_name}.org",
+                f"{base_name}.net",
+            ]
+
+            # Filter out the current domain
+            tld_alternatives = [d for d in tld_alternatives if d != domain]
+
+            self._log(f"Zero contacts, trying TLD alternatives...")
+
+            for alt_domain in tld_alternatives[:4]:
+                if len(all_emails) > 0 or is_time_exceeded():
+                    break
+
+                alt_base_url = f"https://{alt_domain}"
+                try:
+                    response = client.get(alt_base_url, timeout=5.0)
+                    if response.status_code == 200:
+                        self._log(f"  TLD alternative reachable: {alt_domain}")
+                        html = response.text
+
+                        # Extract from homepage
+                        page_contacts = self._extract_contacts_from_html(html, alt_base_url, alt_domain)
+                        for contact in page_contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+
+                        # Try key pages on alternative TLD
+                        for pattern in ["/contact", "/contact-us", "/press", "/about", "/about-us"]:
+                            if len(all_emails) >= 2:
+                                break
+                            alt_url = urljoin(alt_base_url, pattern)
+                            try:
+                                resp = client.get(alt_url, timeout=5.0)
+                                if resp.status_code == 200:
+                                    page_contacts = self._extract_contacts_from_html(resp.text, alt_url, alt_domain)
+                                    for contact in page_contacts:
+                                        if contact.email not in all_emails:
+                                            all_emails[contact.email] = contact
+                                            self._log(f"  Found on {alt_domain}: {contact.email}")
+                            except Exception:
+                                continue
+
+                        if all_emails:
+                            result.domain = alt_domain
+                            self._log(f"  Using TLD alternative: {alt_domain}")
+                            break
+                except Exception:
+                    continue
+
         # Phase N: Vision fallback - take screenshot if no contacts found
         # This uses Claude Vision to OCR contact info that might be rendered
         # in canvas, shadow DOM, or image-based text
-        # SKIP if: site was heavily blocked, time exceeded, or cancelled
-        # SPEED: Skip Vision if we've already spent > 15s on this domain (slow sites go to retry)
-        time_for_vision = (time.time() - domain_start_time) < 15
-        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5 and time_for_vision and not self._is_cancelled():
+        # SKIP if: site was heavily blocked, time exceeded, cancelled, or domain completely blocked
+        # FAIL FAST: Skip if domain is completely blocked (both HTTP and browser failed)
+        # Allow Vision if we're under 50s (relative to 60s max_domain_time)
+        time_for_vision = (time.time() - domain_start_time) < 50
+        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5 and time_for_vision and not self._is_cancelled() and not domain_completely_blocked:
             self._log("No contacts found via text. Trying Vision/screenshot fallback...")
             try:
                 screenshot_contacts = self._try_vision_fallback(base_url, domain)
@@ -2402,8 +2694,23 @@ class WebsiteScraper:
                 emails.update(email_matches)
 
         # Filter out emails from the same domain (internal emails only)
-        # and skip obvious non-contact emails
-        skip_patterns = ["noreply", "no-reply", "donotreply", "unsubscribe", "example.com", "test@", "demo@", "wixpress.com"]
+        # and skip obvious non-contact emails (expanded list of non-buyer prefixes)
+        skip_patterns = [
+            # System/automated emails
+            "noreply", "no-reply", "donotreply", "unsubscribe", "example.com", "test@", "demo@", "wixpress.com",
+            # Support/help (not decision-makers)
+            "support", "help", "helpdesk", "customerservice", "customer-service",
+            # Finance/billing (not ad buyers)
+            "billing", "invoice", "invoices", "payments", "accounts",
+            # Legal/compliance
+            "legal", "privacy", "compliance", "gdpr",
+            # HR/careers (not relevant for ad sales)
+            "jobs", "career", "careers", "recruiting", "hr", "humanresources", "talent",
+            # Account/auth (system emails)
+            "account", "accounts", "login", "signin", "signup", "registration",
+            # Operations (not decision-makers)
+            "returns", "shipping", "orders", "fulfillment",
+        ]
 
         # Skip file extensions that look like emails (image@2x.png, etc.)
         skip_extensions = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"]
@@ -2428,31 +2735,66 @@ class WebsiteScraper:
             if "." not in domain_part or len(domain_part) < 4:
                 continue
 
-            # IMPORTANT: Only accept emails from the target domain
-            # This prevents picking up random emails from subdomains or other sites
-            # e.g., for hsbc.com, accept info@hsbc.com but not cc.life@mail.life.hsbc.com.sg
+            # RELAXED Domain Filtering (Balanced Mode):
+            # 1. Exact domain match: @domain.com
+            # 2. Subdomain match: @corp.domain.com
+            # 3. Root domain match: @domain.co.uk vs @domain.com
+            # 4. Priority prefix override: ads@ANYTHING is accepted if found on page
+            #    (catches ads@parentcompany.com found on childcompany.com)
             target_domain = domain.lower()
-            if not (domain_part == target_domain or domain_part.endswith("." + target_domain)):
+            email_prefix = email_lower.split("@")[0]
+
+            # Priority prefixes that indicate high-value contacts
+            # These are accepted even if domain doesn't match exactly
+            priority_prefixes = [
+                "ads", "advert", "advertising", "partner", "partnerships",
+                "sponsor", "sponsorship", "media", "press", "marketing",
+                "sales", "business", "bd", "commercial"
+            ]
+            is_priority_email = any(p in email_prefix for p in priority_prefixes)
+
+            # Check domain match
+            is_domain_match = (
+                domain_part == target_domain or
+                domain_part.endswith("." + target_domain) or
+                target_domain in domain_part  # Partial match for redirects
+            )
+
+            if not is_domain_match:
                 # Check if it's the same root domain (e.g., hsbc.com vs hsbc.co.uk)
                 target_parts = target_domain.split(".")
                 email_parts = domain_part.split(".")
                 if len(target_parts) >= 2 and len(email_parts) >= 2:
                     # Compare the main domain name (e.g., "hsbc")
-                    if target_parts[-2] != email_parts[-2]:
-                        continue
+                    if target_parts[-2] == email_parts[-2]:
+                        is_domain_match = True
                     # If email has too many subdomains, skip (likely regional subdomain)
-                    if len(email_parts) > 3:
+                    elif len(email_parts) > 3 and not is_priority_email:
                         continue
-                else:
-                    continue
 
-            # Determine email type
-            email_prefix = email_lower.split("@")[0]
+            # Accept if: domain matches OR it's a priority email prefix
+            # This allows ads@parentcompany.com to be captured from childcompany.com
+            if not is_domain_match and not is_priority_email:
+                continue
+
+            # Determine email type based on prefix
+            # email_prefix already defined above
             email_type = "unknown"
 
-            if any(prefix in email_prefix for prefix in PRIORITY_EMAIL_PREFIXES[:6]):
+            # Advertising/sales related prefixes (highest priority)
+            ad_prefixes = ["ads", "advert", "advertising", "partner", "partnerships",
+                          "sponsor", "sponsorship", "media", "adsales", "ad-sales"]
+            # Marketing/business prefixes
+            marketing_prefixes = ["marketing", "sales", "business", "bd", "commercial",
+                                 "press", "pr", "communications"]
+            # Generic contact prefixes
+            generic_prefixes = ["hello", "contact", "info", "inquiries", "enquiries"]
+
+            if any(p in email_prefix for p in ad_prefixes):
                 email_type = "advertising"
-            elif any(prefix in email_prefix for prefix in PRIORITY_EMAIL_PREFIXES[6:]):
+            elif any(p in email_prefix for p in marketing_prefixes):
+                email_type = "marketing"
+            elif any(p in email_prefix for p in generic_prefixes):
                 email_type = "generic"
             elif "." in email_prefix or any(c.isdigit() for c in email_prefix):
                 # Likely a personal email (firstname.lastname or with numbers)

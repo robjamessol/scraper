@@ -46,8 +46,8 @@
     <div class="bg-gray-900 rounded p-4 border border-gray-800">
         <div class="flex items-center justify-between">
             <div>
-                <p class="text-sm font-medium text-gray-400">Issues Scanned</p>
-                <p class="text-3xl font-bold text-indigo-400 mt-1">{{ scan_status.issues_scanned or 0 }}</p>
+                <p class="text-sm font-medium text-gray-400">Issues Scanned (Total)</p>
+                <p class="text-3xl font-bold text-indigo-400 mt-1">{{ scanned_issues_count or 0 }}</p>
             </div>
             <div class="bg-indigo-900/50 rounded-full p-3">
                 <span class="text-2xl">&#x1F4C4;</span>
@@ -286,26 +286,4 @@
     </div>
 </div>
 
-<!-- API Documentation -->
-<div class="mt-4 bg-gray-900 rounded p-4 border border-gray-800">
-    <h2 class="text-lg font-semibold text-gray-100 mb-3">API Endpoints for n8n Integration</h2>
-    <div class="space-y-2 text-sm">
-        <div class="p-3 bg-gray-800/50 rounded border border-gray-700">
-            <code class="text-indigo-400">POST /api/scan</code>
-            <p class="text-gray-400 mt-1">Start a new scan. Body: {"newsletters": ["healthcare_brew"], "limit": 10}</p>
-        </div>
-        <div class="p-3 bg-gray-800/50 rounded border border-gray-700">
-            <code class="text-indigo-400">GET /api/status</code>
-            <p class="text-gray-400 mt-1">Get current scan status and progress</p>
-        </div>
-        <div class="p-3 bg-gray-800/50 rounded border border-gray-700">
-            <code class="text-indigo-400">GET /api/advertisers?fit=high&limit=50</code>
-            <p class="text-gray-400 mt-1">Get advertisers with optional filtering by fit, category, source</p>
-        </div>
-        <div class="p-3 bg-gray-800/50 rounded border border-gray-700">
-            <code class="text-indigo-400">GET /api/advertisers/export</code>
-            <p class="text-gray-400 mt-1">Download all advertisers as CSV</p>
-        </div>
-    </div>
-</div>
 {% endblock %}

@@ -301,11 +301,17 @@ NOT relevant:
 - Terms/privacy/legal pages
 - Career/job listing pages"""
 
-        # Only send first 2k chars (Haiku is fast but we want minimal latency)
+        # Include both head AND tail of page content (contact info often in footer)
+        # First 2000 chars + last 2000 chars to catch footer contact links
+        if len(text) > 4500:
+            content_preview = text[:2000] + "\n...[middle omitted]...\n" + text[-2000:]
+        else:
+            content_preview = text[:4000]
+
         user_prompt = f"""Page URL: {page_url}
 
-Content preview (first 2000 chars):
-{text[:2000]}
+Content preview (first 2000 + last 2000 chars):
+{content_preview}
 
 Does this page contain contact information worth extracting?"""
 

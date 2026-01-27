@@ -343,17 +343,21 @@
                 cancelBtn.classList.add('hidden');
             }
 
-            // Show completion actions in the progress panel
+            // Show completion actions in the progress panel with countdown
             const currentAction = document.getElementById('currentAction');
             if (currentAction) {
                 currentAction.innerHTML = `
                     <span class="text-green-400 font-medium">✅ Scan Complete!</span>
+                    <div class="text-gray-400 text-xs mt-1">Auto-refreshing in <span id="refreshCountdown">3</span>s...</div>
                     <div class="flex gap-2 mt-2">
                         <button onclick="copyLogs()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs">
                             📋 Copy Logs
                         </button>
                         <button onclick="location.reload()" class="bg-primary hover:bg-indigo-500 text-white px-3 py-1 rounded text-xs">
-                            🔄 View Results
+                            🔄 View Results Now
+                        </button>
+                        <button onclick="cancelAutoRefresh()" class="bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded text-xs">
+                            ✕ Cancel
                         </button>
                     </div>
                 `;
@@ -364,6 +368,9 @@
             const progressPercent = document.getElementById('progressPercent');
             if (progressBar) progressBar.style.width = '100%';
             if (progressPercent) progressPercent.textContent = '100%';
+
+            // Auto-refresh after 3 seconds with countdown
+            startAutoRefreshCountdown(3);
         }
 
         function showScanStopped() {
@@ -380,24 +387,66 @@
                 cancelBtn.classList.add('hidden');
             }
 
-            // Show stopped state actions in the progress panel
+            // Show stopped state actions in the progress panel with countdown
             const currentAction = document.getElementById('currentAction');
             if (currentAction) {
                 currentAction.innerHTML = `
                     <span class="text-yellow-400 font-medium">⛔ Scan Stopped</span>
-                    <div class="text-gray-400 text-xs mt-1">Partial results have been saved</div>
+                    <div class="text-gray-400 text-xs mt-1">Partial results saved. Auto-refreshing in <span id="refreshCountdown">3</span>s...</div>
                     <div class="flex gap-2 mt-2">
                         <button onclick="copyLogs()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs">
                             📋 Copy Logs
                         </button>
                         <button onclick="location.reload()" class="bg-primary hover:bg-indigo-500 text-white px-3 py-1 rounded text-xs">
-                            🔄 View Results
+                            🔄 View Results Now
                         </button>
                         <button onclick="retryFailed()" class="bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-1 rounded text-xs">
                             🔁 Retry Failed
                         </button>
+                        <button onclick="cancelAutoRefresh()" class="bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded text-xs">
+                            ✕ Cancel
+                        </button>
                     </div>
                 `;
+            }
+
+            // Auto-refresh after 3 seconds with countdown
+            startAutoRefreshCountdown(3);
+        }
+
+        // Auto-refresh countdown
+        let autoRefreshTimer = null;
+        let countdownTimer = null;
+
+        function startAutoRefreshCountdown(seconds) {
+            let remaining = seconds;
+            const countdownEl = document.getElementById('refreshCountdown');
+
+            // Update countdown every second
+            countdownTimer = setInterval(() => {
+                remaining--;
+                if (countdownEl) countdownEl.textContent = remaining;
+            }, 1000);
+
+            // Refresh after countdown
+            autoRefreshTimer = setTimeout(() => {
+                clearInterval(countdownTimer);
+                location.reload();
+            }, seconds * 1000);
+        }
+
+        function cancelAutoRefresh() {
+            if (autoRefreshTimer) {
+                clearTimeout(autoRefreshTimer);
+                autoRefreshTimer = null;
+            }
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+            const countdownEl = document.getElementById('refreshCountdown');
+            if (countdownEl) {
+                countdownEl.parentElement.textContent = 'Auto-refresh cancelled';
             }
         }
 
