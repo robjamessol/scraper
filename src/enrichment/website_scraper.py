@@ -1539,7 +1539,7 @@ class WebsiteScraper:
                 # Use a mutable queue to allow adding deep drill targets
                 url_queue = list(filtered_urls)
                 processed_count = 0
-                max_urls = 12  # Allow a few extra for deep drill
+                max_urls = 15  # Allow more for deep drill on difficult sites
 
                 while url_queue and processed_count < max_urls:
                     url = url_queue.pop(0)
@@ -1618,21 +1618,41 @@ class WebsiteScraper:
 
                         # DEEP DRILL: Look for "Press/Newsroom" links if no advertising emails yet
                         has_ad_email = any(c.email_type == "advertising" for c in all_emails.values())
-                        if not has_ad_email and len(deep_drill_visited) < 3:
+                        if not has_ad_email and len(deep_drill_visited) < 5:
                             try:
                                 from bs4 import BeautifulSoup
                                 soup = BeautifulSoup(html, "lxml")
                                 for a_tag in soup.find_all("a", href=True):
-                                    link_text = a_tag.get_text().lower()
-                                    href = a_tag['href']
-                                    # Look for press/newsroom/media links
-                                    drill_keywords = ["press", "newsroom", "media kit", "media-kit", "news room", "press room"]
-                                    if any(k in link_text or k in href.lower() for k in drill_keywords):
-                                        full_url = urljoin(url, href)
+                                    link_text = a_tag.get_text().lower().strip()
+                                    href = a_tag['href'].lower()
+                                    # Expanded keywords for press/media/contact pages
+                                    drill_keywords = [
+                                        # Press/news variations
+                                        "press", "newsroom", "news room", "press room", "press-room",
+                                        "media room", "media-room", "news center", "press center",
+                                        "press release", "media release", "press contact",
+                                        # Media kit variations
+                                        "media kit", "media-kit", "mediakit", "press kit", "press-kit",
+                                        # Contact variations
+                                        "media contact", "pr contact", "media inquir", "press inquir",
+                                        "media relation", "public relation", "corporate communication",
+                                        # About variations that often lead to contact
+                                        "about us", "about-us", "our company", "who we are",
+                                        "company info", "corporate", "/about/",
+                                        # Direct contact indicators
+                                        "contact us", "contact-us", "get in touch", "reach us",
+                                    ]
+                                    if any(k in link_text or k in href for k in drill_keywords):
+                                        full_url = urljoin(url, a_tag['href'])  # Use original href for urljoin
                                         parsed_full = urlparse(full_url)
                                         parsed_current = urlparse(url)
-                                        # Only add if same domain and not already visited
-                                        if (parsed_full.netloc == parsed_current.netloc and
+                                        # Allow same domain OR www variant
+                                        same_domain = (
+                                            parsed_full.netloc == parsed_current.netloc or
+                                            parsed_full.netloc == f"www.{parsed_current.netloc}" or
+                                            f"www.{parsed_full.netloc}" == parsed_current.netloc
+                                        )
+                                        if (same_domain and
                                             full_url not in deep_drill_visited and
                                             full_url not in url_queue):
                                             self._log(f"  Deep drill target found: {full_url}")
@@ -2403,6 +2423,66 @@ class WebsiteScraper:
 
         # NOTE: Claude agent is NOT closed here - reused across multiple scrape_domain() calls
         # Call scraper.close() when done with all scraping to clean up
+
+        # Phase 5: TLD Fallback - Try alternative TLDs when zero contacts found
+        # This handles cases like collectly.com → collectly.co where the .com exists but has no contacts
+        if len(all_emails) == 0 and not is_time_exceeded() and not self._is_cancelled():
+            base_name = domain.split('.')[0]
+            current_tld = '.'.join(domain.split('.')[1:])
+
+            # Common TLD alternatives for tech/business sites
+            tld_alternatives = [
+                f"{base_name}.co",
+                f"{base_name}.io",
+                f"{base_name}.com",
+                f"{base_name}.org",
+                f"{base_name}.net",
+            ]
+
+            # Filter out the current domain
+            tld_alternatives = [d for d in tld_alternatives if d != domain]
+
+            self._log(f"Zero contacts, trying TLD alternatives...")
+
+            for alt_domain in tld_alternatives[:4]:
+                if len(all_emails) > 0 or is_time_exceeded():
+                    break
+
+                alt_base_url = f"https://{alt_domain}"
+                try:
+                    response = client.get(alt_base_url, timeout=5.0)
+                    if response.status_code == 200:
+                        self._log(f"  TLD alternative reachable: {alt_domain}")
+                        html = response.text
+
+                        # Extract from homepage
+                        page_contacts = self._extract_contacts_from_html(html, alt_base_url, alt_domain)
+                        for contact in page_contacts:
+                            if contact.email not in all_emails:
+                                all_emails[contact.email] = contact
+
+                        # Try key pages on alternative TLD
+                        for pattern in ["/contact", "/contact-us", "/press", "/about", "/about-us"]:
+                            if len(all_emails) >= 2:
+                                break
+                            alt_url = urljoin(alt_base_url, pattern)
+                            try:
+                                resp = client.get(alt_url, timeout=5.0)
+                                if resp.status_code == 200:
+                                    page_contacts = self._extract_contacts_from_html(resp.text, alt_url, alt_domain)
+                                    for contact in page_contacts:
+                                        if contact.email not in all_emails:
+                                            all_emails[contact.email] = contact
+                                            self._log(f"  Found on {alt_domain}: {contact.email}")
+                            except Exception:
+                                continue
+
+                        if all_emails:
+                            result.domain = alt_domain
+                            self._log(f"  Using TLD alternative: {alt_domain}")
+                            break
+                except Exception:
+                    continue
 
         # Phase N: Vision fallback - take screenshot if no contacts found
         # This uses Claude Vision to OCR contact info that might be rendered
