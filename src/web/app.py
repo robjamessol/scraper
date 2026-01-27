@@ -500,9 +500,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             completed = [0]  # Use list to allow mutation in nested function
             results_lock = threading.Lock()
 
-            # Per-domain timeout (25 seconds - failed domains go to retry queue)
-            # Reduced from 30s since we have faster redirect handling now
-            DOMAIN_TIMEOUT = 25
+            # FIX: Increased from 25s to 120s to allow Deep Drill to finish
+            DOMAIN_TIMEOUT = 120
 
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
@@ -527,15 +526,14 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 # Use a nested function with timeout tracking
                 scraper = None
                 try:
-                    # Each thread gets its own scraper (thread-safe)
-                    # SPEED: Reduced timeouts, fewer pages - slow domains go to retry queue
+                    # FIX: Increased timeout from 2.5 to 10.0
                     scraper = WebsiteScraper(
-                        timeout=2.5,           # Reduced from 3.0 for speed
-                        max_pages=5,           # Reduced from 6 - get quick wins
+                        timeout=10.0,
+                        max_pages=10,
                         use_browser=True,
                         use_claude=True,
                         log_callback=add_log,
-                        cancel_check=is_scan_cancelled,  # Pass cancellation check
+                        cancel_check=is_scan_cancelled,
                     )
                     result = scraper.scrape_domain(domain)
 
@@ -589,10 +587,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
             import time
 
-            # Maximum total time for Phase 2 - prevents infinite hangs
-            # With 5 workers and faster timeouts, we can process more domains
-            # Slow domains go to retry queue for later processing
-            MAX_PHASE2_TIME = 240  # 4 minutes - increased since workers are faster now
+            # FIX: Increased total phase time to 15 minutes
+            MAX_PHASE2_TIME = 900
             phase2_start = time.time()
 
             with ThreadPoolExecutor(max_workers=5) as pool:  # Increased to 5 workers for better throughput
