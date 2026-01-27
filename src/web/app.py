@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -894,8 +894,8 @@ async def api_get_scanned_issues():
 @app.post("/api/scan")
 async def api_start_scan(
     background_tasks: BackgroundTasks,
-    newsletters: list[str] | None = None,
-    limit: int | None = None,
+    newsletters: list[str] | None = Query(default=None),
+    limit: int | None = Query(default=None),
 ):
     """
     Start a new scan.
