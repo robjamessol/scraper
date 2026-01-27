@@ -363,3 +363,21 @@ class WebsiteScraper:
             contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
 
         return contacts
+
+
+def scrape_website_for_contacts(domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
+    """
+    Convenience function to scrape a website for contacts.
+
+    Args:
+        domain: The domain to scrape
+        company_name: Optional company name for context
+
+    Returns:
+        WebsiteScrapeResult with found contacts
+    """
+    scraper = WebsiteScraper()
+    try:
+        return scraper.scrape_domain(domain, company_name)
+    finally:
+        scraper.close()
