@@ -19,9 +19,9 @@ def get_http_client() -> httpx.Client:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None:
         _HTTP_CLIENT = httpx.Client(
-            timeout=3.0,  # Fast default timeout
+            timeout=2.5,  # Reduced from 3.0 for faster failures
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),  # Increased for more parallelism
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
@@ -116,7 +116,7 @@ MARKETING_SUBDOMAINS = {
 }
 
 
-def resolve_redirect_url(url: str, timeout: float = 2.5) -> str | None:
+def resolve_redirect_url(url: str, timeout: float = 1.5) -> str | None:
     """
     Follow redirects to get the final destination URL.
 
@@ -124,10 +124,11 @@ def resolve_redirect_url(url: str, timeout: float = 2.5) -> str | None:
     links.morningbrew.com/c/xxx → actual-advertiser.com
 
     Uses a global connection pool for efficiency at scale.
+    Falls back from HEAD to GET if HEAD returns 405 (Method Not Allowed).
 
     Args:
         url: URL that may redirect
-        timeout: Request timeout in seconds (default 2.5s for fast failures)
+        timeout: Request timeout in seconds (default 1.5s for fast failures)
 
     Returns:
         Final destination URL, or original URL if no redirects
@@ -137,9 +138,18 @@ def resolve_redirect_url(url: str, timeout: float = 2.5) -> str | None:
 
     try:
         client = get_http_client()
-        # Use HEAD request to follow redirects without downloading content
-        response = client.head(url, timeout=timeout)
-        final_url = str(response.url)
+
+        # Try HEAD first (faster, no body download)
+        try:
+            response = client.head(url, timeout=timeout)
+            # If HEAD returns 405, fall back to GET
+            if response.status_code == 405:
+                raise httpx.HTTPStatusError("HEAD not allowed", request=response.request, response=response)
+            final_url = str(response.url)
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            # Fall back to GET with stream=True to avoid downloading body
+            response = client.get(url, timeout=timeout)
+            final_url = str(response.url)
 
         # If we got redirected somewhere useful, return it
         if final_url and final_url != url:
@@ -640,18 +650,21 @@ def verify_domain_accessible(domain: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def resolve_domain_redirect(domain: str, timeout: float = 3.0) -> str | None:
+def resolve_domain_redirect(domain: str, timeout: float = 2.0) -> str | None:
     """
     Check if a domain redirects to a different domain.
 
     E.g., projectmanagementinstitute.com might redirect to pmi.org
 
+    Falls back from HEAD to GET if HEAD returns 405 (Method Not Allowed).
+    Also strips marketing subdomains from the redirected domain.
+
     Args:
         domain: Domain to check
-        timeout: Request timeout
+        timeout: Request timeout (reduced to 2.0s for speed)
 
     Returns:
-        Final domain after redirects, or None if error
+        Final domain after redirects, or original domain if no redirect/error
     """
     if not domain:
         return None
@@ -659,16 +672,33 @@ def resolve_domain_redirect(domain: str, timeout: float = 3.0) -> str | None:
     try:
         client = get_http_client()
         url = f"https://{domain}"
-        response = client.head(url, timeout=timeout)
-        final_url = str(response.url)
+
+        # Try HEAD first (faster, no body download)
+        try:
+            response = client.head(url, timeout=timeout)
+            # If HEAD returns 405, fall back to GET
+            if response.status_code == 405:
+                raise httpx.HTTPStatusError("HEAD not allowed", request=response.request, response=response)
+            final_url = str(response.url)
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            # Fall back to GET
+            response = client.get(url, timeout=timeout)
+            final_url = str(response.url)
 
         # Extract domain from final URL
         final_domain = extract_domain(final_url, strip_marketing=True)
 
-        if final_domain and final_domain != domain:
-            logger.info(f"Domain redirect detected: {domain} → {final_domain}")
-            return final_domain
+        # Check if we actually redirected to a different domain (not just path change)
+        if final_domain and final_domain.lower() != domain.lower():
+            # Also strip marketing subdomain from original for fair comparison
+            original_stripped = strip_marketing_subdomain(domain.lower())
+            if final_domain.lower() != original_stripped:
+                logger.info(f"Domain redirect detected: {domain} → {final_domain}")
+                return final_domain
 
+        return domain
+    except httpx.TimeoutException:
+        logger.debug(f"Timeout checking domain redirect for {domain}")
         return domain
     except Exception as e:
         logger.debug(f"Error checking domain redirect for {domain}: {e}")

@@ -977,8 +977,8 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 3.0,  # Reduced for speed (was 5.0)
-        max_pages: int = 6,    # Reduced for speed (was 12) - slow sites go to retry
+        timeout: float = 2.5,  # Reduced for speed (was 3.0)
+        max_pages: int = 5,    # Reduced for speed (was 6) - slow sites go to retry
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
@@ -1322,7 +1322,7 @@ class WebsiteScraper:
 
         import time
         browser_start = time.time()
-        max_browser_time = 12  # Max 12 seconds for browser phase (reduced for speed)
+        max_browser_time = 10  # Max 10 seconds for browser phase (reduced for speed)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1494,7 +1494,7 @@ class WebsiteScraper:
 
         import time
         nav_start = time.time()
-        max_nav_time = 8  # Max 8 seconds for click-through navigation (reduced for speed)
+        max_nav_time = 6  # Max 6 seconds for click-through navigation (reduced for speed)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1709,7 +1709,7 @@ class WebsiteScraper:
         # Track timing - prevent any single domain from taking too long
         import time
         domain_start_time = time.time()
-        max_domain_time = 25  # Max 25 seconds per domain (was 60) - slow sites go to retry
+        max_domain_time = 20  # Max 20 seconds per domain - slow sites go to retry queue
 
         def is_time_exceeded() -> bool:
             """Check if we've spent too long on this domain."""
@@ -1757,6 +1757,20 @@ class WebsiteScraper:
                     pages_scraped += 1
                     html = response.text
                     visited_urls.add(base_url)
+
+                    # Check if we were redirected to a different domain
+                    # This catches redirects that resolve_domain_redirect might have missed
+                    final_url = str(response.url)
+                    final_domain = urlparse(final_url).netloc.lower()
+                    if final_domain.startswith("www."):
+                        final_domain = final_domain[4:]
+                    final_domain = strip_marketing_subdomain(final_domain)
+
+                    if final_domain and final_domain != domain.lower():
+                        self._log(f"Homepage redirected: {domain} → {final_domain}")
+                        domain = final_domain
+                        base_url = f"https://{domain}"
+                        result.domain = domain  # Update result with actual domain
 
                     # Extract contacts from homepage
                     page_contacts = self._extract_contacts_from_html(html, base_url, domain)

@@ -450,8 +450,9 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             completed = [0]  # Use list to allow mutation in nested function
             results_lock = threading.Lock()
 
-            # Per-domain timeout (30 seconds - failed domains go to retry queue)
-            DOMAIN_TIMEOUT = 30
+            # Per-domain timeout (25 seconds - failed domains go to retry queue)
+            # Reduced from 30s since we have faster redirect handling now
+            DOMAIN_TIMEOUT = 25
 
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
@@ -479,8 +480,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                     # Each thread gets its own scraper (thread-safe)
                     # SPEED: Reduced timeouts, fewer pages - slow domains go to retry queue
                     scraper = WebsiteScraper(
-                        timeout=3.0,           # Reduced from 5.0 for speed
-                        max_pages=6,           # Reduced from 10 - get quick wins
+                        timeout=2.5,           # Reduced from 3.0 for speed
+                        max_pages=5,           # Reduced from 6 - get quick wins
                         use_browser=True,
                         use_claude=True,
                         log_callback=add_log,
@@ -539,11 +540,12 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             import time
 
             # Maximum total time for Phase 2 - prevents infinite hangs
-            # For 500 issues: ~50 unique domains, 3 workers, 30s each = ~8 min max
-            MAX_PHASE2_TIME = 180  # 3 minutes - slow domains go to retry queue
+            # With 5 workers and faster timeouts, we can process more domains
+            # Slow domains go to retry queue for later processing
+            MAX_PHASE2_TIME = 240  # 4 minutes - increased since workers are faster now
             phase2_start = time.time()
 
-            with ThreadPoolExecutor(max_workers=3) as pool:  # 3 workers for better throughput
+            with ThreadPoolExecutor(max_workers=5) as pool:  # Increased to 5 workers for better throughput
                 # Submit all tasks
                 futures = {
                     pool.submit(scrape_company, (idx, company)): (idx, company)
