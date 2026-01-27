@@ -511,8 +511,13 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                             progress=50 + int((completed[0] / max(total, 1)) * 50),
                         )
 
-            # Run in parallel with 3 workers, with per-domain timeout
-            from concurrent.futures import as_completed, TimeoutError as FuturesTimeoutError
+            # Run in parallel with 2 workers, with proper timeout handling
+            from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
+            import time
+
+            # Maximum total time for Phase 2 (5 minutes) - prevents infinite hangs
+            MAX_PHASE2_TIME = 300
+            phase2_start = time.time()
 
             with ThreadPoolExecutor(max_workers=2) as pool:  # Reduced from 3 to prevent browser hangs
                 # Submit all tasks
@@ -520,42 +525,74 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                     pool.submit(scrape_company, (idx, company)): (idx, company)
                     for idx, company in enumerate(unique)
                 }
+                pending = set(futures.keys())
 
-                # Wait for completion with per-task timeout
+                # Process tasks as they complete, with overall time limit
                 cancelled_during_phase2 = False
-                for future in as_completed(futures, timeout=DOMAIN_TIMEOUT * total):
-                    # Check for cancellation between futures
+                timed_out = False
+
+                while pending:
+                    # Check for cancellation
                     if is_scan_cancelled():
                         add_log("⛔ Stopping contact scraping due to cancellation...")
                         cancelled_during_phase2 = True
-                        # Cancel remaining futures
-                        for f in futures:
+                        for f in pending:
                             f.cancel()
                         break
 
-                    idx, company = futures[future]
-                    try:
-                        future.result(timeout=DOMAIN_TIMEOUT)
-                    except FuturesTimeoutError:
+                    # Check total time limit
+                    elapsed = time.time() - phase2_start
+                    if elapsed > MAX_PHASE2_TIME:
+                        add_log(f"⏰ Phase 2 time limit reached ({int(elapsed)}s), finishing up...", level="warning")
+                        timed_out = True
+                        for f in pending:
+                            f.cancel()
+                        # Add remaining domains to retry queue
+                        for f in pending:
+                            idx, company = futures[f]
+                            domain = company.get("domain", "unknown")
+                            name = company.get("company_name", "Unknown")
+                            add_log(f"    ⏰ {domain}: Skipped (time limit)", level="warning")
+                            add_to_retry_queue(domain, name, "Phase 2 time limit reached", company.copy())
+                            for i in range(5):
+                                company[f"email_{i+1}"] = ""
+                                company[f"title_{i+1}"] = ""
+                                company[f"name_{i+1}"] = ""
+                        break
+
+                    # Wait for next task to complete (with per-task timeout)
+                    remaining_time = max(10, MAX_PHASE2_TIME - elapsed)
+                    task_timeout = min(DOMAIN_TIMEOUT, remaining_time)
+
+                    done, pending = wait(pending, timeout=task_timeout, return_when=FIRST_COMPLETED)
+
+                    if not done:
+                        # No task completed within timeout - likely stuck
+                        # This shouldn't happen often with proper timeouts in scrape_company
+                        add_log(f"⚠️ No tasks completed in {task_timeout}s, continuing...", level="warning")
+                        continue
+
+                    for future in done:
+                        idx, company = futures[future]
                         domain = company.get("domain", "unknown")
                         name = company.get("company_name", "Unknown")
-                        add_log(f"    ⏰ {domain}: Timed out after {DOMAIN_TIMEOUT}s", level="warning")
-                        # Add to retry queue for later
-                        add_to_retry_queue(domain, name, f"Timeout after {DOMAIN_TIMEOUT}s", company.copy())
-                        # Fill empty columns for timed-out domain
-                        for i in range(5):
-                            company[f"email_{i+1}"] = ""
-                            company[f"title_{i+1}"] = ""
-                            company[f"name_{i+1}"] = ""
-                    except Exception as e:
-                        domain = company.get("domain", "unknown")
-                        name = company.get("company_name", "Unknown")
-                        add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
-                        # Add to retry queue for later
-                        add_to_retry_queue(domain, name, str(e)[:100], company.copy())
+                        try:
+                            future.result(timeout=1)  # Should be instant since task is done
+                        except FuturesTimeoutError:
+                            add_log(f"    ⏰ {domain}: Timed out", level="warning")
+                            add_to_retry_queue(domain, name, f"Timeout after {DOMAIN_TIMEOUT}s", company.copy())
+                            for i in range(5):
+                                company[f"email_{i+1}"] = ""
+                                company[f"title_{i+1}"] = ""
+                                company[f"name_{i+1}"] = ""
+                        except Exception as e:
+                            add_log(f"    ❌ {domain}: {str(e)[:50]}", level="error")
+                            add_to_retry_queue(domain, name, str(e)[:100], company.copy())
 
             if cancelled_during_phase2:
                 add_log(f"📊 Phase 2 stopped: processed {completed[0]}/{total} companies before cancellation")
+            elif timed_out:
+                add_log(f"📊 Phase 2 timed out: processed {completed[0]}/{total} companies (remaining added to retry queue)")
             else:
                 add_log(f"📊 Phase 2 complete: processed {total} companies")
         else:
