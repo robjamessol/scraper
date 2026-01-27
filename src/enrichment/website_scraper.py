@@ -30,85 +30,106 @@ import httpx
 from bs4 import BeautifulSoup
 
 
-# --- GLOBAL BROWSER MANAGER (SINGLETON) ---
-# This prevents launching multiple Chrome instances. We launch 1 instance and use 8 contexts.
-class GlobalBrowserManager:
-    """
-    Singleton browser manager for high-performance parallel scraping.
+# --- THREAD-LOCAL BROWSER MANAGER ---
+# Playwright's sync API is NOT thread-safe. Each thread must have its own browser.
+# Using threading.local() ensures each thread gets its own Playwright instance.
 
-    Instead of creating a new browser per scrape, we maintain ONE global browser
-    instance and use semaphore-controlled contexts for parallelism.
-
-    This prevents:
-    - Memory exhaustion from multiple Chrome instances
-    - CPU thrashing from too many concurrent browser contexts
-    - Slow startup times from repeated browser launches
+class ThreadLocalBrowserManager:
     """
-    _instance = None
-    _playwright = None
-    _browser = None
-    _lock = threading.Lock()
-    # Limit concurrent contexts to 8 (matches 8 vCPUs) to prevent CPU thrashing
-    _semaphore = threading.Semaphore(8)
-    _initialized = False
+    Thread-local browser manager for safe parallel scraping.
+
+    CRITICAL: Playwright's sync API cannot be used across threads.
+    This manager creates a separate browser instance per thread to avoid
+    "cannot switch to a different thread" errors.
+
+    Each thread gets its own:
+    - Playwright instance
+    - Browser instance
+    - Contexts are created/destroyed per-scrape
+
+    A global semaphore still limits total concurrent contexts across all threads.
+    """
+    _thread_local = threading.local()
+    _global_semaphore = threading.Semaphore(8)  # Limit total concurrent contexts
+    _init_lock = threading.Lock()
 
     @classmethod
-    def get_browser(cls):
-        """Get the shared browser instance, initializing if necessary."""
+    def _get_thread_browser(cls):
+        """Get or create browser for current thread."""
+        # Check if this thread already has a browser
+        if hasattr(cls._thread_local, 'browser') and cls._thread_local.browser is not None:
+            return cls._thread_local.browser, cls._thread_local.playwright
+
         # Import here to handle optional dependency
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            return None
+            return None, None
 
-        with cls._lock:
-            if cls._browser is None:
-                try:
-                    logging.getLogger(__name__).info("🚀 Launching Global Headless Browser (High-Performance Mode)...")
-                    cls._playwright = sync_playwright().start()
-                    cls._browser = cls._playwright.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-features=IsolateOrigins,site-per-process",
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage",  # Crucial for Docker/Railway
-                            "--disable-gpu",
-                        ],
-                    )
-                    cls._initialized = True
-                except Exception as e:
-                    logging.getLogger(__name__).error(f"Failed to launch global browser: {e}")
-                    return None
-            return cls._browser
+        # Create new browser for this thread
+        try:
+            thread_id = threading.current_thread().name
+            logging.getLogger(__name__).info(f"🚀 Launching browser for thread: {thread_id}")
+            cls._thread_local.playwright = sync_playwright().start()
+            cls._thread_local.browser = cls._thread_local.playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            return cls._thread_local.browser, cls._thread_local.playwright
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Failed to launch browser: {e}")
+            return None, None
+
+    @classmethod
+    def get_browser(cls):
+        """Get browser for current thread."""
+        browser, _ = cls._get_thread_browser()
+        return browser
 
     @classmethod
     def acquire_context_slot(cls, timeout: float = 30.0) -> bool:
         """Acquire a semaphore slot for a browser context."""
-        return cls._semaphore.acquire(timeout=timeout)
+        return cls._global_semaphore.acquire(timeout=timeout)
 
     @classmethod
     def release_context_slot(cls):
         """Release a semaphore slot after context is closed."""
-        cls._semaphore.release()
+        try:
+            cls._global_semaphore.release()
+        except ValueError:
+            pass  # Already released
 
     @classmethod
-    def close(cls):
-        """Clean up resources. Call this when shutting down the application."""
-        with cls._lock:
-            if cls._browser:
-                try:
-                    cls._browser.close()
-                except Exception:
-                    pass
-                cls._browser = None
-            if cls._playwright:
-                try:
-                    cls._playwright.stop()
-                except Exception:
-                    pass
-                cls._playwright = None
-            cls._initialized = False
+    def close_thread_browser(cls):
+        """Close browser for current thread. Call when thread is done scraping."""
+        if hasattr(cls._thread_local, 'browser') and cls._thread_local.browser:
+            try:
+                cls._thread_local.browser.close()
+            except Exception:
+                pass
+            cls._thread_local.browser = None
+
+        if hasattr(cls._thread_local, 'playwright') and cls._thread_local.playwright:
+            try:
+                cls._thread_local.playwright.stop()
+            except Exception:
+                pass
+            cls._thread_local.playwright = None
+
+    @classmethod
+    def close_all(cls):
+        """Close browser for current thread (alias for compatibility)."""
+        cls.close_thread_browser()
+
+
+# Alias for backward compatibility
+GlobalBrowserManager = ThreadLocalBrowserManager
 
 
 # Legacy lock for backward compatibility (used by some functions)
