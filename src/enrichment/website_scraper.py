@@ -1532,11 +1532,19 @@ class WebsiteScraper:
                     pass  # Continue without route interception if it fails
 
                 crash_count = 0  # Track consecutive crashes
+                deep_drill_visited = set()  # Track deep drill URLs to avoid loops
 
                 # Increased URL limit for balanced mode (was 5, now 10)
                 filtered_urls = [u for u in urls if is_url_worth_visiting(u)][:10]
+                # Use a mutable queue to allow adding deep drill targets
+                url_queue = list(filtered_urls)
+                processed_count = 0
+                max_urls = 12  # Allow a few extra for deep drill
 
-                for url in filtered_urls:
+                while url_queue and processed_count < max_urls:
+                    url = url_queue.pop(0)
+                    processed_count += 1
+
                     # Skip if too many crashes (browser is unstable)
                     if crash_count >= 3:
                         self._log(f"Stopping browser - too many crashes", "warning")
@@ -1607,6 +1615,31 @@ class WebsiteScraper:
                                         source_page=url,
                                         email_type="generic",
                                     )
+
+                        # DEEP DRILL: Look for "Press/Newsroom" links if no advertising emails yet
+                        has_ad_email = any(c.email_type == "advertising" for c in all_emails.values())
+                        if not has_ad_email and len(deep_drill_visited) < 3:
+                            try:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(html, "lxml")
+                                for a_tag in soup.find_all("a", href=True):
+                                    link_text = a_tag.get_text().lower()
+                                    href = a_tag['href']
+                                    # Look for press/newsroom/media links
+                                    drill_keywords = ["press", "newsroom", "media kit", "media-kit", "news room", "press room"]
+                                    if any(k in link_text or k in href.lower() for k in drill_keywords):
+                                        full_url = urljoin(url, href)
+                                        parsed_full = urlparse(full_url)
+                                        parsed_current = urlparse(url)
+                                        # Only add if same domain and not already visited
+                                        if (parsed_full.netloc == parsed_current.netloc and
+                                            full_url not in deep_drill_visited and
+                                            full_url not in url_queue):
+                                            self._log(f"  Deep drill target found: {full_url}")
+                                            deep_drill_visited.add(full_url)
+                                            url_queue.insert(0, full_url)  # Visit NEXT (priority)
+                            except Exception as e:
+                                self._log(f"  Deep drill parsing error: {e}", "warning")
 
                         # Stop if we found high-quality contacts (advertising emails)
                         ad_emails = [e for e in all_emails.values() if e.email_type == "advertising"]
