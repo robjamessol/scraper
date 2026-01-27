@@ -1,25 +1,110 @@
-"""Website contact scraper - extracts contact info directly from company websites.
+"""Website contact scraper - High Performance Parallel Version.
 
-Uses a hybrid approach:
-1. Try fast httpx requests first
-2. Fall back to Playwright (headless browser) for JavaScript-rendered sites
+Optimized for 8 vCPU / 8GB RAM environments.
+Uses a Global Browser Singleton to manage parallel contexts efficiently.
+
+Approach:
+1. Try fast httpx requests first (with increased parallelism)
+2. Fall back to Playwright with Global Browser Singleton for JS-rendered sites
+3. Semaphore controls concurrent browser contexts (one per vCPU)
 """
 
 import re
 import logging
 import base64
 import random
+import threading
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from contextlib import contextmanager
-from threading import Lock
 
 import httpx
 from bs4 import BeautifulSoup
 
-# Global lock to prevent multiple browser instances from running simultaneously
-# This is critical for low-resource environments (e.g., Railway Free Tier)
-BROWSER_LOCK = Lock()
+
+# --- GLOBAL BROWSER MANAGER (SINGLETON) ---
+# This prevents launching multiple Chrome instances. We launch 1 instance and use 8 contexts.
+class GlobalBrowserManager:
+    """
+    Singleton browser manager for high-performance parallel scraping.
+
+    Instead of creating a new browser per scrape, we maintain ONE global browser
+    instance and use semaphore-controlled contexts for parallelism.
+
+    This prevents:
+    - Memory exhaustion from multiple Chrome instances
+    - CPU thrashing from too many concurrent browser contexts
+    - Slow startup times from repeated browser launches
+    """
+    _instance = None
+    _playwright = None
+    _browser = None
+    _lock = threading.Lock()
+    # Limit concurrent contexts to 8 (matches 8 vCPUs) to prevent CPU thrashing
+    _semaphore = threading.Semaphore(8)
+    _initialized = False
+
+    @classmethod
+    def get_browser(cls):
+        """Get the shared browser instance, initializing if necessary."""
+        # Import here to handle optional dependency
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None
+
+        with cls._lock:
+            if cls._browser is None:
+                try:
+                    logging.getLogger(__name__).info("🚀 Launching Global Headless Browser (High-Performance Mode)...")
+                    cls._playwright = sync_playwright().start()
+                    cls._browser = cls._playwright.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-features=IsolateOrigins,site-per-process",
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",  # Crucial for Docker/Railway
+                            "--disable-gpu",
+                        ],
+                    )
+                    cls._initialized = True
+                except Exception as e:
+                    logging.getLogger(__name__).error(f"Failed to launch global browser: {e}")
+                    return None
+            return cls._browser
+
+    @classmethod
+    def acquire_context_slot(cls, timeout: float = 30.0) -> bool:
+        """Acquire a semaphore slot for a browser context."""
+        return cls._semaphore.acquire(timeout=timeout)
+
+    @classmethod
+    def release_context_slot(cls):
+        """Release a semaphore slot after context is closed."""
+        cls._semaphore.release()
+
+    @classmethod
+    def close(cls):
+        """Clean up resources. Call this when shutting down the application."""
+        with cls._lock:
+            if cls._browser:
+                try:
+                    cls._browser.close()
+                except Exception:
+                    pass
+                cls._browser = None
+            if cls._playwright:
+                try:
+                    cls._playwright.stop()
+                except Exception:
+                    pass
+                cls._playwright = None
+            cls._initialized = False
+
+
+# Legacy lock for backward compatibility (used by some functions)
+BROWSER_LOCK = threading.Lock()
 
 # Playwright is optional - import with fallback
 try:
@@ -993,12 +1078,12 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 10.0,  # Increased for corporate sites (was 2.5)
-        max_pages: int = 5,    # Reduced for speed (was 6) - slow sites go to retry
+        timeout: float = 10.0,  # 10s HTTP timeout (Increased for reliability)
+        max_pages: int = 8,     # Increased depth for high performance (was 5)
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
-        verify_emails: bool = False,  # SMTP verification (slow but accurate)
+        verify_emails: bool = True,  # Enable verification on high-perf plan (was False)
         log_callback: callable = None,
         cancel_check: callable = None,  # Optional callback to check for cancellation
     ):
@@ -1038,44 +1123,34 @@ class WebsiteScraper:
         }
 
     def _get_http_client(self):
-        """Get or create HTTP client (reused across all domains)."""
+        """Get or create HTTP client (reused across all domains).
+
+        High-Performance Mode: Increased connection limits for parallel scraping.
+        """
         if self._http_client is None:
             self._http_client = httpx.Client(
                 timeout=self.timeout,
                 headers=self.headers,
                 follow_redirects=True,
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                # Increased limits for high-performance (was 10/5)
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             )
         return self._http_client
 
     def _get_browser(self):
-        """Get or create browser (reused across all JS-rendered domains).
+        """Get browser from Global Browser Singleton (shared across all scrapers).
 
-        Uses global BROWSER_LOCK to prevent multiple browser instances from
-        being created simultaneously on low-resource environments.
+        High-Performance Mode: Uses GlobalBrowserManager singleton instead of
+        creating a new browser per instance. This dramatically reduces memory
+        usage and startup time.
         """
         if not PLAYWRIGHT_AVAILABLE:
             return None
 
-        # Acquire lock before checking/creating browser to prevent race conditions
-        with BROWSER_LOCK:
-            if self._browser is None:
-                try:
-                    from playwright.sync_api import sync_playwright
-                    self._playwright = sync_playwright().start()
-                    self._browser = self._playwright.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-features=IsolateOrigins,site-per-process",
-                            "--no-sandbox",
-                        ],
-                    )
-                    self._log("Browser started for JS rendering")
-                except Exception as e:
-                    self._log(f"Failed to start browser: {e}", "error")
-                    return None
-            return self._browser
+        browser = GlobalBrowserManager.get_browser()
+        if browser:
+            self._log("Using Global Browser Singleton for JS rendering")
+        return browser
 
     def _get_claude_agent(self):
         """Get or create Claude agent (lazy initialization, reused across calls)."""
@@ -1092,7 +1167,12 @@ class WebsiteScraper:
         return self._claude_agent
 
     def close(self):
-        """Clean up resources (call when done with all scraping)."""
+        """Clean up resources (call when done with all scraping).
+
+        Note: Does NOT close the Global Browser Singleton, as other scrapers
+        may still be using it. Call GlobalBrowserManager.close() explicitly
+        when shutting down the application.
+        """
         if self._claude_agent:
             try:
                 self._claude_agent.close()
@@ -1107,19 +1187,8 @@ class WebsiteScraper:
                 pass
             self._http_client = None
 
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
-
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+        # Note: We do NOT close the Global Browser here, as other threads need it
+        # The GlobalBrowserManager singleton persists until application shutdown
 
     def _log(self, message: str, level: str = "info"):
         """Log a message, optionally to callback."""
@@ -1143,32 +1212,49 @@ class WebsiteScraper:
 
     @contextmanager
     def _browser_context(self):
-        """Context manager for Playwright browser."""
+        """
+        Context manager for Playwright browser using Global Browser Singleton.
+
+        High-Performance Mode:
+        - Uses shared browser instance (no startup overhead)
+        - Semaphore controls concurrent contexts (8 max = one per vCPU)
+        - Automatic cleanup on context exit
+        """
         if not PLAYWRIGHT_AVAILABLE:
             yield None
             return
 
-        playwright = None
-        browser = None
+        # Acquire semaphore slot to respect CPU limits
+        acquired = GlobalBrowserManager.acquire_context_slot(timeout=30)
+        if not acquired:
+            self._log("Could not acquire browser semaphore (load too high)", "warning")
+            yield None
+            return
+
+        context = None
         try:
-            playwright = sync_playwright().start()
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--no-sandbox",
-                ],
+            browser = GlobalBrowserManager.get_browser()
+            if not browser:
+                yield None
+                return
+
+            # Create a new context with anti-detection settings
+            context = browser.new_context(
+                user_agent=get_random_user_agent(),
+                viewport={"width": 1280, "height": 720},
+                java_script_enabled=True,
             )
-            yield browser
+            yield context
         except Exception as e:
-            self._log(f"Failed to start browser: {e}", "error")
+            self._log(f"Error creating browser context: {e}", "error")
             yield None
         finally:
-            if browser:
-                browser.close()
-            if playwright:
-                playwright.stop()
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            GlobalBrowserManager.release_context_slot()
 
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
         """

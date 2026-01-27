@@ -18,6 +18,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
+# Increase max workers for utilizing 8 vCPUs
+MAX_VERIFY_WORKERS = 20
+
+
+def verify_email_smtp_permissive(email: str, timeout: float = 5.0) -> str:
+    """
+    Permissive SMTP Verification for high-performance scraping.
+
+    This is a "soft pass" verification - we only reject emails that are
+    explicitly confirmed as invalid. Corporate servers often block SMTP
+    probing, so we assume validity for any ambiguous response.
+
+    Args:
+        email: Email address to verify
+        timeout: Connection timeout in seconds
+
+    Returns:
+        'valid': Server confirmed existence (250)
+        'invalid': Server explicitly rejected (550)
+        'unknown': Server blocked/timeout/error (Soft Pass - KEEP THESE)
+    """
+    domain = email.split('@')[-1]
+
+    try:
+        records = dns.resolver.resolve(domain, 'MX')
+        mx_record = str(records[0].exchange).rstrip('.')
+    except Exception:
+        # DNS failure - keep the email just in case
+        return 'unknown'
+
+    try:
+        server = smtplib.SMTP(timeout=timeout)
+        server.connect(mx_record, 25)
+        server.helo('verify.com')
+        server.mail('check@verify.com')
+        code, _ = server.rcpt(email)
+        server.quit()
+
+        if code == 250:
+            return 'valid'
+        elif code == 550:
+            return 'invalid'
+        else:
+            # Graylisted or other code - soft pass
+            return 'unknown'
+
+    except Exception:
+        # Timeout, Connection Refused, etc. -> Assume Valid (Soft Pass)
+        # Corporate firewalls often block this, so we assume it's good
+        # if we can't prove it's bad.
+        return 'unknown'
+
 
 @dataclass
 class FoundEmail:
@@ -61,7 +113,7 @@ class EmailFinder:
         self,
         verify_smtp: bool = True,
         timeout: float = 3.0,  # Reduced from 5s for speed
-        max_workers: int = 5,
+        max_workers: int = MAX_VERIFY_WORKERS,  # Increased for high-performance (was 5)
         log_callback: callable = None,
         priority_prefixes: list[str] | None = None,
     ):
