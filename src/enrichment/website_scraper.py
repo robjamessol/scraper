@@ -232,13 +232,24 @@ RELEVANT_JOB_TITLES = [
 
 # Job titles to EXCLUDE (not relevant for advertising outreach)
 EXCLUDED_JOB_TITLES = [
+    # Technical roles
     "engineer", "developer", "software", "technical", "tech",
+    "designer", "ux", "ui",
+    # Legal
     "legal", "counsel", "attorney", "lawyer",
+    # HR/recruiting
     "hr", "human resources", "recruiting", "talent",
+    # Finance
     "finance", "accounting", "cfo", "controller",
+    # IT/ops
     "it ", "information technology", "security", "devops",
-    "product manager", "product owner", "ux", "design",
+    "product manager", "product owner",
+    # Customer-facing support roles (not decision-makers)
     "customer support", "customer service", "support",
+    "customer success", "technical support",
+    # Implementation/onboarding (service delivery, not buying)
+    "implementation", "onboarding",
+    # Operations
     "operations", "logistics", "supply chain",
 ]
 
@@ -977,7 +988,7 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 2.5,  # Reduced for speed (was 3.0)
+        timeout: float = 10.0,  # Increased for corporate sites (was 2.5)
         max_pages: int = 5,    # Reduced for speed (was 6) - slow sites go to retry
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
@@ -1339,9 +1350,9 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
-            # Set aggressive default timeouts to prevent hangs
-            page.set_default_timeout(5000)  # 5s max for any operation
-            page.set_default_navigation_timeout(5000)  # 5s max for navigation
+            # Set timeouts appropriate for corporate sites (increased from 5s)
+            page.set_default_timeout(15000)  # 15s max for any operation
+            page.set_default_navigation_timeout(15000)  # 15s max for navigation
 
             # Network interception: block unnecessary resources for faster loads
             # This dramatically speeds up scraping while preserving contact info
@@ -1510,9 +1521,9 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
-            # Set aggressive default timeouts to prevent hangs
-            page.set_default_timeout(5000)  # 5s max for any operation
-            page.set_default_navigation_timeout(5000)  # 5s max for navigation
+            # Set timeouts appropriate for corporate sites (increased from 5s)
+            page.set_default_timeout(15000)  # 15s max for any operation
+            page.set_default_navigation_timeout(15000)  # 15s max for navigation
 
             # Keywords to look for in links (for clicking through) - EXPANDED
             click_keywords = [
@@ -1709,7 +1720,7 @@ class WebsiteScraper:
         # Track timing - prevent any single domain from taking too long
         import time
         domain_start_time = time.time()
-        max_domain_time = 20  # Max 20 seconds per domain - slow sites go to retry queue
+        max_domain_time = 60  # Max 60 seconds per domain - increased for corporate sites
 
         def is_time_exceeded() -> bool:
             """Check if we've spent too long on this domain."""
@@ -2197,8 +2208,8 @@ class WebsiteScraper:
         # This uses Claude Vision to OCR contact info that might be rendered
         # in canvas, shadow DOM, or image-based text
         # SKIP if: site was heavily blocked, time exceeded, or cancelled
-        # SPEED: Skip Vision if we've already spent > 15s on this domain (slow sites go to retry)
-        time_for_vision = (time.time() - domain_start_time) < 15
+        # Allow Vision if we're under 50s (relative to 60s max_domain_time)
+        time_for_vision = (time.time() - domain_start_time) < 50
         if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5 and time_for_vision and not self._is_cancelled():
             self._log("No contacts found via text. Trying Vision/screenshot fallback...")
             try:
@@ -2402,8 +2413,23 @@ class WebsiteScraper:
                 emails.update(email_matches)
 
         # Filter out emails from the same domain (internal emails only)
-        # and skip obvious non-contact emails
-        skip_patterns = ["noreply", "no-reply", "donotreply", "unsubscribe", "example.com", "test@", "demo@", "wixpress.com"]
+        # and skip obvious non-contact emails (expanded list of non-buyer prefixes)
+        skip_patterns = [
+            # System/automated emails
+            "noreply", "no-reply", "donotreply", "unsubscribe", "example.com", "test@", "demo@", "wixpress.com",
+            # Support/help (not decision-makers)
+            "support", "help", "helpdesk", "customerservice", "customer-service",
+            # Finance/billing (not ad buyers)
+            "billing", "invoice", "invoices", "payments", "accounts",
+            # Legal/compliance
+            "legal", "privacy", "compliance", "gdpr",
+            # HR/careers (not relevant for ad sales)
+            "jobs", "career", "careers", "recruiting", "hr", "humanresources", "talent",
+            # Account/auth (system emails)
+            "account", "accounts", "login", "signin", "signup", "registration",
+            # Operations (not decision-makers)
+            "returns", "shipping", "orders", "fulfillment",
+        ]
 
         # Skip file extensions that look like emails (image@2x.png, etc.)
         skip_extensions = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"]

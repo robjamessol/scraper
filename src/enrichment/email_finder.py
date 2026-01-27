@@ -115,18 +115,27 @@ class EmailFinder:
 
     def _verify_email_smtp(self, email: str) -> bool:
         """
-        Verify if an email exists via SMTP.
+        Verify if an email exists via SMTP using "Permissive Verification".
 
         This checks if the mail server accepts the recipient without
         actually sending an email. Many servers support this.
 
-        Returns True if verified, False if rejected or couldn't verify.
+        Permissive Verification Logic:
+        - 250 (OK): Return True (Verified)
+        - 550 (User Unknown): Return False (Invalid)
+        - Timeout/Disconnect/Unknown: Return True (Soft Pass)
+
+        Reason: We'd rather keep an unverified email than delete a valid
+        high-value email from a corporate server that blocks probing.
+
+        Returns True if verified or unknown, False only if definitively rejected.
         """
         domain = email.split('@')[-1]
         mx_hosts = self._get_mx_records(domain)
 
         if not mx_hosts:
-            return False
+            # No MX records - can't verify, but don't reject (soft pass)
+            return True
 
         # Try each MX server
         for mx_host in mx_hosts[:2]:  # Try top 2 MX servers
@@ -145,27 +154,32 @@ class EmailFinder:
 
                 # 250 = OK, email exists
                 # 251 = User not local, will forward
-                # 550 = User not found
+                # 550 = User not found (ONLY case where we reject)
                 # 552 = Mailbox full (but exists)
                 if code in [250, 251, 552]:
                     return True
                 elif code == 550:
                     return False
+                else:
+                    # Unknown response code - soft pass (don't reject)
+                    return True
 
             except smtplib.SMTPServerDisconnected:
-                # Server disconnected - might be blocking verification
-                continue
+                # Server disconnected - likely blocking verification, soft pass
+                return True
             except smtplib.SMTPRecipientsRefused:
-                # Email definitely doesn't exist
+                # Email definitively doesn't exist
                 return False
             except socket.timeout:
-                continue
+                # Timeout - corporate servers often block, soft pass
+                return True
             except Exception as e:
                 self._log(f"SMTP check failed for {email}: {e}", "warning")
-                continue
+                # On any error, soft pass (don't reject potentially valid email)
+                return True
 
-        # Couldn't verify - return None to indicate unknown
-        return False
+        # Couldn't connect to any MX server - soft pass
+        return True
 
     def generate_emails(self, domain: str) -> list[FoundEmail]:
         """
