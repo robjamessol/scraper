@@ -977,13 +977,14 @@ class WebsiteScraper:
 
     def __init__(
         self,
-        timeout: float = 5.0,  # Reduced for speed
-        max_pages: int = 12,   # Enough to check all important contact pages
+        timeout: float = 3.0,  # Reduced for speed (was 5.0)
+        max_pages: int = 6,    # Reduced for speed (was 12) - slow sites go to retry
         max_errors: int = 3,   # More tolerant of errors
         use_browser: bool = True,  # Use Playwright as fallback for JS sites
         use_claude: bool = True,  # Use Claude for intelligent navigation/extraction
         verify_emails: bool = False,  # SMTP verification (slow but accurate)
         log_callback: callable = None,
+        cancel_check: callable = None,  # Optional callback to check for cancellation
     ):
         """
         Initialize the website scraper.
@@ -996,6 +997,7 @@ class WebsiteScraper:
             use_claude: Use Claude for intelligent page discovery and extraction
             verify_emails: Verify emails via SMTP (disabled by default - adds latency)
             log_callback: Optional callback for live logging
+            cancel_check: Optional callback that returns True if operation should cancel
         """
         self.timeout = timeout
         self.max_pages = max_pages
@@ -1004,6 +1006,7 @@ class WebsiteScraper:
         self.use_claude = use_claude
         self.verify_emails = verify_emails
         self._log_callback = log_callback
+        self._cancel_check = cancel_check
         self._claude_agent = None
         self._http_client = None  # Lazy-initialized, reused across all domains
         self._browser = None      # Lazy-initialized browser for JS fallback
@@ -1107,6 +1110,15 @@ class WebsiteScraper:
         else:
             logger.info(message)
 
+    def _is_cancelled(self) -> bool:
+        """Check if operation should be cancelled."""
+        if self._cancel_check:
+            try:
+                return self._cancel_check()
+            except Exception:
+                return False
+        return False
+
     @contextmanager
     def _browser_context(self):
         """Context manager for Playwright browser."""
@@ -1177,11 +1189,11 @@ class WebsiteScraper:
 
         try:
             page = context.new_page()
-            page.set_default_timeout(5000)  # Prevent hangs
-            page.set_default_navigation_timeout(5000)
+            page.set_default_timeout(3000)  # Reduced from 5000 for speed
+            page.set_default_navigation_timeout(3000)
             self._log(f"Browser reading links from: {base_url}")
-            page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
-            page.wait_for_timeout(1000)  # Wait for JS to render
+            page.goto(base_url, wait_until="domcontentloaded", timeout=3000)
+            page.wait_for_timeout(500)  # Reduced from 1000 - quick JS render check
 
             # Find all links on the page
             links = page.query_selector_all('a[href]')
@@ -1310,7 +1322,7 @@ class WebsiteScraper:
 
         import time
         browser_start = time.time()
-        max_browser_time = 20  # Max 20 seconds for browser phase (reduced from 30)
+        max_browser_time = 12  # Max 12 seconds for browser phase (reduced for speed)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1372,6 +1384,11 @@ class WebsiteScraper:
                     self._log(f"Stopping browser - too many crashes", "warning")
                     break
 
+                # CANCELLATION CHECK
+                if self._is_cancelled():
+                    self._log(f"Cancelled, stopping browser", "warning")
+                    break
+
                 # TIME CHECK: Don't let browser phase run too long
                 if (time.time() - browser_start) > max_browser_time:
                     self._log(f"Browser time limit reached", "warning")
@@ -1379,7 +1396,7 @@ class WebsiteScraper:
 
                 try:
                     self._log(f"Browser loading: {url}")
-                    page.goto(url, wait_until="domcontentloaded", timeout=5000)
+                    page.goto(url, wait_until="domcontentloaded", timeout=3000)
 
                     # Brief wait for dynamic content (reduced for speed)
                     page.wait_for_timeout(500)
@@ -1477,7 +1494,7 @@ class WebsiteScraper:
 
         import time
         nav_start = time.time()
-        max_nav_time = 15  # Max 15 seconds for click-through navigation (reduced from 20)
+        max_nav_time = 8  # Max 8 seconds for click-through navigation (reduced for speed)
 
         all_emails: dict[str, WebsiteContact] = {}
 
@@ -1526,7 +1543,7 @@ class WebsiteScraper:
 
                 try:
                     self._log(f"Browser navigating: {start_url}")
-                    page.goto(start_url, wait_until="domcontentloaded", timeout=5000)
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=3000)
                     page.wait_for_timeout(800)
 
                     # First extract any contacts on this page
@@ -1590,8 +1607,8 @@ class WebsiteScraper:
                             self._log(f"  Clicking: '{text[:30]}' -> {href[:50]}")
 
                             # Navigate to the link (8s timeout, not 30s default)
-                            link.click(timeout=5000)
-                            page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            link.click(timeout=3000)
+                            page.wait_for_load_state("domcontentloaded", timeout=3000)
                             page.wait_for_timeout(500)
 
                             # Extract contacts from new page
@@ -1618,7 +1635,7 @@ class WebsiteScraper:
                                         self._log(f"    Found: {email}")
 
                             # Go back to try next link
-                            page.go_back(wait_until="domcontentloaded", timeout=5000)
+                            page.go_back(wait_until="domcontentloaded", timeout=3000)
                             page.wait_for_timeout(300)
 
                         except Exception as e:
@@ -1692,11 +1709,15 @@ class WebsiteScraper:
         # Track timing - prevent any single domain from taking too long
         import time
         domain_start_time = time.time()
-        max_domain_time = 60  # Max 60 seconds per domain
+        max_domain_time = 25  # Max 25 seconds per domain (was 60) - slow sites go to retry
 
         def is_time_exceeded() -> bool:
             """Check if we've spent too long on this domain."""
             return (time.time() - domain_start_time) > max_domain_time
+
+        def should_stop() -> bool:
+            """Check if we should stop (time exceeded or cancelled)."""
+            return is_time_exceeded() or self._is_cancelled()
 
         # Track visited URLs to avoid duplicates
         visited_urls: set[str] = set()
@@ -1788,9 +1809,12 @@ class WebsiteScraper:
             # Early exit only if we have high-quality contacts
             if has_good_contacts():
                 break
-            # TIME CHECK: Don't spend more than max_domain_time on one domain
-            if is_time_exceeded():
-                self._log(f"Time limit exceeded for {domain}, moving on", "warning")
+            # TIME/CANCEL CHECK: Don't spend too long or continue if cancelled
+            if should_stop():
+                if self._is_cancelled():
+                    self._log(f"Cancelled, stopping {domain}", "warning")
+                else:
+                    self._log(f"Time limit exceeded for {domain}, moving on", "warning")
                 break
 
             if url in visited_urls:
@@ -2158,8 +2182,10 @@ class WebsiteScraper:
         # Phase N: Vision fallback - take screenshot if no contacts found
         # This uses Claude Vision to OCR contact info that might be rendered
         # in canvas, shadow DOM, or image-based text
-        # SKIP if site was heavily blocked (Vision won't help either)
-        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5:
+        # SKIP if: site was heavily blocked, time exceeded, or cancelled
+        # SPEED: Skip Vision if we've already spent > 15s on this domain (slow sites go to retry)
+        time_for_vision = (time.time() - domain_start_time) < 15
+        if not all_emails and self.use_browser and PLAYWRIGHT_AVAILABLE and consecutive_errors < 5 and time_for_vision and not self._is_cancelled():
             self._log("No contacts found via text. Trying Vision/screenshot fallback...")
             try:
                 screenshot_contacts = self._try_vision_fallback(base_url, domain)
@@ -2747,7 +2773,7 @@ class WebsiteScraper:
             page.set_default_timeout(5000)  # Prevent hangs
             page.set_default_navigation_timeout(5000)
             # Use domcontentloaded instead of networkidle (much faster)
-            page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=3000)
             page.wait_for_timeout(1000)  # Brief wait for JS rendering
 
             # Take screenshot (skip scrolling to save time)

@@ -431,8 +431,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             completed = [0]  # Use list to allow mutation in nested function
             results_lock = threading.Lock()
 
-            # Per-domain timeout (90 seconds max per domain to prevent hanging)
-            DOMAIN_TIMEOUT = 90
+            # Per-domain timeout (30 seconds - failed domains go to retry queue)
+            DOMAIN_TIMEOUT = 30
 
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
@@ -458,12 +458,14 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 scraper = None
                 try:
                     # Each thread gets its own scraper (thread-safe)
+                    # SPEED: Reduced timeouts, fewer pages - slow domains go to retry queue
                     scraper = WebsiteScraper(
-                        timeout=5.0,
-                        max_pages=10,  # Reduced from 12 for speed
+                        timeout=3.0,           # Reduced from 5.0 for speed
+                        max_pages=6,           # Reduced from 10 - get quick wins
                         use_browser=True,
                         use_claude=True,
                         log_callback=add_log,
+                        cancel_check=is_scan_cancelled,  # Pass cancellation check
                     )
                     result = scraper.scrape_domain(domain)
 
@@ -511,15 +513,16 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                             progress=50 + int((completed[0] / max(total, 1)) * 50),
                         )
 
-            # Run in parallel with 2 workers, with proper timeout handling
+            # Run in parallel with proper timeout handling
             from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
             import time
 
-            # Maximum total time for Phase 2 (5 minutes) - prevents infinite hangs
-            MAX_PHASE2_TIME = 300
+            # Maximum total time for Phase 2 - prevents infinite hangs
+            # For 500 issues: ~50 unique domains, 3 workers, 30s each = ~8 min max
+            MAX_PHASE2_TIME = 180  # 3 minutes - slow domains go to retry queue
             phase2_start = time.time()
 
-            with ThreadPoolExecutor(max_workers=2) as pool:  # Reduced from 3 to prevent browser hangs
+            with ThreadPoolExecutor(max_workers=3) as pool:  # 3 workers for better throughput
                 # Submit all tasks
                 futures = {
                     pool.submit(scrape_company, (idx, company)): (idx, company)
