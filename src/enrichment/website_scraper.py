@@ -1,9 +1,8 @@
-"""Website contact scraper - Unchained High Performance.
+"""Website contact scraper - Unified Master Version.
 
-Fixes:
-1. REMOVED BROWSER_LOCK (was causing parallel threads to block)
-2. Increased max_browser_time to 60s (was 25s) for Deep Drilling
-3. Increased max_domain_time to 100s to match App timeout
+Combines:
+1. Thread-Safe High Performance (ThreadLocalBrowser)
+2. Smart Logic (Click-Reveal, Vision, Redirects, TLD Fallback)
 """
 
 import re
@@ -213,6 +212,7 @@ class WebsiteScraper:
                 user_agent=get_random_user_agent(),
                 viewport={"width": 1280, "height": 720},
                 java_script_enabled=True,
+                bypass_csp=True,
             )
             yield context
         except Exception as e:
@@ -225,14 +225,23 @@ class WebsiteScraper:
                 except: pass
             GlobalBrowserManager.release_context_slot()
 
+    def _click_reveal_email_buttons(self, page):
+        """Click 'Show Email' buttons."""
+        try:
+            selectors = ['button:has-text("Show Email")', 'a:has-text("Show Email")', '[class*="reveal"]', '[id*="reveal"]']
+            for sel in selectors:
+                if page.is_visible(sel):
+                    page.click(sel, timeout=500)
+                    page.wait_for_timeout(200)
+        except: pass
+
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
         """Load homepage and find real links. NO LOCKING."""
         if not PLAYWRIGHT_AVAILABLE: return []
 
         contact_urls = []
-        keywords = ["contact", "about", "team", "advertise", "partner", "press", "media"]
+        keywords = ["contact", "about", "team", "advertise", "partner", "press", "media", "news"]
 
-        # NO BROWSER_LOCK HERE - Parallel execution enabled
         with self._browser_context() as context:
             if not context: return []
             try:
@@ -255,12 +264,12 @@ class WebsiteScraper:
         return list(set(contact_urls))[:15]
 
     def _scrape_with_browser(self, domain: str, urls: list[str]) -> list[WebsiteContact]:
-        """Main browser scraper."""
+        """Main browser scraper with Click-Reveal logic."""
         if not PLAYWRIGHT_AVAILABLE: return []
 
         import time
         browser_start = time.time()
-        max_browser_time = 60 # INCREASED to 60s for Deep Drill
+        max_browser_time = 60 # 60s for Deep Drill
 
         all_emails = {}
 
@@ -291,68 +300,139 @@ class WebsiteScraper:
                     page.goto(url, wait_until="domcontentloaded")
                     page.wait_for_timeout(1000) # Hydration wait
 
+                    # RESTORED: Click "Show Email" buttons
+                    self._click_reveal_email_buttons(page)
+
                     content = page.content()
                     contacts = self._extract_contacts_from_html(content, url, domain)
                     for c in contacts: all_emails[c.email] = c
+
+                    # Stop if we found good emails
+                    if any(c.email_type == "advertising" for c in contacts):
+                        break
 
                 except Exception:
                     continue
 
         return list(all_emails.values())
 
+    def _try_vision_fallback(self, base_url: str, domain: str) -> list[WebsiteContact]:
+        """Use Claude Vision to find contacts on hard sites."""
+        contacts = []
+        if not self.use_claude: return []
+
+        with self._browser_context() as context:
+            if not context: return []
+            try:
+                page = context.new_page()
+                page.goto(base_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+
+                # RESTORED: Vision Fallback
+                screenshot = page.screenshot(type='jpeg', quality=60)
+                b64_img = base64.b64encode(screenshot).decode('utf-8')
+
+                # NOTE: This assumes extract_contacts_from_screenshot is imported or available
+                from .website_scraper import extract_contacts_from_screenshot
+                data = extract_contacts_from_screenshot(b64_img, base_url, self._get_claude_agent().api_key)
+
+                for c in data:
+                    email = c.get('email')
+                    if email:
+                        contacts.append(WebsiteContact(email=email, source_page=base_url, email_type="vision"))
+            except Exception as e:
+                pass
+
+        return contacts
+
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         import time
         domain_start_time = time.time()
-        max_domain_time = 100 # INCREASED to 100s to match App
+        max_domain_time = 100
 
-        result = WebsiteScrapeResult(domain=domain)
+        # RESTORED: Redirect & TLD Handling
         if domain.startswith("www."): domain = domain[4:]
         domain = strip_marketing_subdomain(domain)
+        final_domain = domain
         base_url = f"https://{domain}"
 
-        # ... (rest of standard scraping logic logic omitted for brevity, logic follows standard pattern) ...
-        # Assume standard structure: HTTP Phase -> Browser Phase -> Vision Phase
-
-        # Simplified for prompt - ensure we call the browser if needed
         client = self._get_http_client()
+        try:
+            resp = client.get(base_url, timeout=10.0)
+            final_host = urlparse(resp.url).netloc
+            if final_host.startswith("www."): final_host = final_host[4:]
+            if final_host != domain:
+                self._log(f"Redirect detected: {domain} -> {final_host}")
+                final_domain = final_host
+                base_url = str(resp.url)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            # TLD Fallback
+            alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.co', '.io', '.org']]
+            for alt in alternatives:
+                try:
+                    resp = client.get(f"https://{alt}", timeout=5.0)
+                    if resp.status_code == 200:
+                        self._log(f"Swapping {domain} -> {alt}")
+                        final_domain = alt
+                        base_url = f"https://{alt}"
+                        break
+                except: continue
+
+        result = WebsiteScrapeResult(domain=final_domain)
         all_emails = {}
 
         # 1. HTTP Scan
         try:
-            resp = client.get(base_url)
-            if resp.status_code == 200:
-                contacts = self._extract_contacts_from_html(resp.text, base_url, domain)
+            if resp and resp.status_code == 200:
+                contacts = self._extract_contacts_from_html(resp.text, base_url, final_domain)
                 for c in contacts: all_emails[c.email] = c
         except: pass
 
         # 2. Browser Scan (if needed)
-        if len(all_emails) < 2 and self.use_browser:
+        has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
+        if (len(all_emails) < 2 or not has_good_email) and self.use_browser:
             browser_urls = [base_url]
-            # Add known patterns
-            for p in ["/contact", "/about", "/press", "/advertise"]:
+            for p in ["/contact", "/about", "/press", "/advertise", "/media-kit"]:
                 browser_urls.append(urljoin(base_url, p))
 
-            # Find real links (Un-locked now!)
-            real_links = self._find_links_with_browser(base_url, domain)
+            real_links = self._find_links_with_browser(base_url, final_domain)
             browser_urls.extend(real_links)
 
-            browser_contacts = self._scrape_with_browser(domain, list(set(browser_urls)))
+            browser_contacts = self._scrape_with_browser(final_domain, list(set(browser_urls)))
             for c in browser_contacts: all_emails[c.email] = c
 
-        result.contacts = list(all_emails.values())
+            # 3. Vision Fallback (RESTORED)
+            if not all_emails:
+                self._log("Vision AI Fallback...")
+                vision_contacts = self._try_vision_fallback(base_url, final_domain)
+                for c in vision_contacts: all_emails[c.email] = c
+
+        # 4. SMTP Verification (RESTORED)
+        contacts_list = list(all_emails.values())
+        if self.verify_emails:
+            from .email_finder import verify_email_smtp_permissive
+            verified = []
+            for c in contacts_list:
+                status = verify_email_smtp_permissive(c.email)
+                if status != "invalid": # Keep valid + unknown
+                    verified.append(c)
+            result.contacts = verified
+        else:
+            result.contacts = contacts_list
+
+        result.contacts = list({c.email: c for c in result.contacts}.values()) # Dedup
+        self._log(f"Finished {final_domain}: Found {len(result.contacts)} contacts")
         return result
 
     def _extract_contacts_from_html(self, html: str, source_url: str, domain: str) -> list[WebsiteContact]:
-        # ... (Standard extraction logic, kept same as provided file) ...
         contacts = []
         emails = set(EMAIL_PATTERN.findall(html))
 
-        # Relaxed filtering for High Yield
         for email in emails:
             email = email.lower()
             if any(s in email for s in SKIP_PATTERNS): continue
 
-            # Allow priority prefixes even if domain doesn't match
+            # Relaxed matching
             prefix = email.split('@')[0]
             is_priority = any(p in prefix for p in ["ads", "media", "press", "marketing", "partner"])
 
@@ -363,21 +443,3 @@ class WebsiteScraper:
             contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
 
         return contacts
-
-
-def scrape_website_for_contacts(domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
-    """
-    Convenience function to scrape a website for contacts.
-
-    Args:
-        domain: The domain to scrape
-        company_name: Optional company name for context
-
-    Returns:
-        WebsiteScrapeResult with found contacts
-    """
-    scraper = WebsiteScraper()
-    try:
-        return scraper.scrape_domain(domain, company_name)
-    finally:
-        scraper.close()
