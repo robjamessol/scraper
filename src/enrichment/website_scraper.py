@@ -360,6 +360,8 @@ class WebsiteScraper:
         base_url = f"https://{domain}"
 
         client = self._get_http_client()
+        resp = None  # Initialize resp to avoid UnboundLocalError
+
         try:
             resp = client.get(base_url, timeout=10.0)
             final_host = urlparse(resp.url).netloc
@@ -368,8 +370,9 @@ class WebsiteScraper:
                 self._log(f"Redirect detected: {domain} -> {final_host}")
                 final_domain = final_host
                 base_url = str(resp.url)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            # TLD Fallback
+        except Exception as e:
+            # TLD Fallback for any connection error
+            self._log(f"Connection failed for {domain}: {type(e).__name__}, trying alternatives...")
             alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.co', '.io', '.org']]
             for alt in alternatives:
                 try:
@@ -386,10 +389,11 @@ class WebsiteScraper:
 
         # 1. HTTP Scan
         try:
-            if resp and resp.status_code == 200:
+            if resp is not None and resp.status_code == 200:
                 contacts = self._extract_contacts_from_html(resp.text, base_url, final_domain)
                 for c in contacts: all_emails[c.email] = c
-        except: pass
+        except Exception as e:
+            self._log(f"HTTP scan error: {e}", "warning")
 
         # 2. Browser Scan (if needed)
         has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
