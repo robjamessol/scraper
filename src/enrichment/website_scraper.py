@@ -226,13 +226,26 @@ class WebsiteScraper:
             GlobalBrowserManager.release_context_slot()
 
     def _click_reveal_email_buttons(self, page):
-        """Click 'Show Email' buttons."""
+        """Click buttons that reveal hidden emails."""
         try:
-            selectors = ['button:has-text("Show Email")', 'a:has-text("Show Email")', '[class*="reveal"]', '[id*="reveal"]']
+            selectors = [
+                'button:has-text("Show Email")', 'a:has-text("Show Email")',
+                'button:has-text("View Email")', 'a:has-text("View Email")',
+                'button:has-text("Get Email")', 'a:has-text("Get Email")',
+                'button:has-text("Reveal")', 'a:has-text("Reveal")',
+                'button:has-text("Contact")',
+                '[class*="reveal"]', '[id*="reveal"]',
+                '[class*="show-email"]', '[class*="email-btn"]',
+                '[data-email]', '[data-contact]',
+                '.email-toggle', '.contact-toggle',
+            ]
             for sel in selectors:
-                if page.is_visible(sel):
-                    page.click(sel, timeout=500)
-                    page.wait_for_timeout(200)
+                try:
+                    if page.is_visible(sel):
+                        page.click(sel, timeout=500)
+                        page.wait_for_timeout(300)
+                except:
+                    continue
         except: pass
 
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
@@ -240,7 +253,12 @@ class WebsiteScraper:
         if not PLAYWRIGHT_AVAILABLE: return []
 
         contact_urls = []
-        keywords = ["contact", "about", "team", "advertise", "partner", "press", "media", "news"]
+        # Expanded keywords to find contact/advertising pages
+        keywords = [
+            "contact", "about", "team", "advertise", "partner", "press", "media", "news",
+            "sponsor", "business", "sales", "commercial", "marketing", "reach", "connect",
+            "inquir", "hello", "leadership", "staff", "get-in-touch", "email"
+        ]
 
         with self._browser_context() as context:
             if not context: return []
@@ -399,7 +417,19 @@ class WebsiteScraper:
         has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
         if (len(all_emails) < 2 or not has_good_email) and self.use_browser:
             browser_urls = [base_url]
-            for p in ["/contact", "/about", "/press", "/advertise", "/media-kit"]:
+            # Expanded list of common contact/advertising pages
+            contact_paths = [
+                "/contact", "/contact-us", "/contactus", "/contact_us",
+                "/about", "/about-us", "/aboutus", "/about_us",
+                "/press", "/press-room", "/pressroom", "/media",
+                "/advertise", "/advertising", "/advertise-with-us",
+                "/media-kit", "/mediakit", "/media_kit",
+                "/sponsors", "/sponsorship", "/partnerships", "/partner",
+                "/business", "/sales", "/commercial",
+                "/team", "/our-team", "/leadership", "/staff",
+                "/connect", "/get-in-touch", "/reach-us",
+            ]
+            for p in contact_paths:
                 browser_urls.append(urljoin(base_url, p))
 
             real_links = self._find_links_with_browser(base_url, final_domain)
@@ -435,19 +465,54 @@ class WebsiteScraper:
         contacts = []
         emails = set(EMAIL_PATTERN.findall(html))
 
+        # Extract base domain name (e.g., "acme" from "acme.com" or "acme.co.uk")
+        domain_parts = domain.replace('www.', '').split('.')
+        base_name = domain_parts[0] if domain_parts else domain
+
+        # Priority prefixes that indicate advertising/marketing contacts
+        priority_prefixes = [
+            "ads", "ad", "advertising", "media", "press", "pr",
+            "marketing", "partner", "partnerships", "sponsor", "sponsorship",
+            "business", "biz", "sales", "commercial", "brand", "brands",
+            "inquir", "contact", "hello", "info", "general",
+            "communications", "comms", "outreach", "collab"
+        ]
+
         for email in emails:
-            email = email.lower()
-            if any(s in email for s in SKIP_PATTERNS): continue
+            email = email.lower().strip()
 
-            # Relaxed matching
-            prefix = email.split('@')[0]
-            is_priority = any(p in prefix for p in ["ads", "media", "press", "marketing", "partner"])
-
-            if not email.endswith(domain) and domain not in email and not is_priority:
+            # Skip obviously bad emails
+            if any(s in email for s in SKIP_PATTERNS):
                 continue
 
-            etype = "advertising" if is_priority else "generic"
-            contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
+            # Skip image/file extensions that got picked up
+            if any(email.endswith(ext) for ext in ['.png', '.jpg', '.gif', '.svg', '.webp']):
+                continue
+
+            prefix = email.split('@')[0]
+            email_domain = email.split('@')[1] if '@' in email else ''
+            email_base = email_domain.split('.')[0] if email_domain else ''
+
+            # Check if this is a priority email (advertising-related prefix)
+            is_priority = any(p in prefix for p in priority_prefixes)
+
+            # Check domain relevance - MUCH more flexible now
+            is_domain_match = (
+                email.endswith(domain) or                    # Exact domain match
+                domain in email_domain or                    # Domain appears in email domain
+                base_name in email_base or                   # Base name match (acme in acme.com)
+                email_base in base_name or                   # Reverse match
+                len(base_name) > 3 and base_name in email    # Company name anywhere in email
+            )
+
+            # Accept if: priority email OR domain matches OR it's a common business email format
+            if is_priority or is_domain_match:
+                etype = "advertising" if is_priority else "generic"
+                contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
+            # Also accept ANY email if we're on the company's own website (we trust it)
+            elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com']):
+                # It's a corporate email on their site - probably relevant
+                contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
 
         return contacts
 
