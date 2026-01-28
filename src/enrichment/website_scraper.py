@@ -176,6 +176,10 @@ class WebsiteScraper:
             try: self._claude_agent.close()
             except: pass
 
+    def close_thread_browser(self):
+        """Force close thread browser to prevent memory leaks."""
+        GlobalBrowserManager.close_thread_browser()
+
     def _log(self, message: str, level: str = "info"):
         if self._log_callback: self._log_callback(message, level)
         if level == "error": logger.error(message)
@@ -287,7 +291,7 @@ class WebsiteScraper:
 
         import time
         browser_start = time.time()
-        max_browser_time = 60 # 60s for Deep Drill
+        max_browser_time = 120  # Increased for Advertiser-Or-Die deep scan
 
         all_emails = {}
 
@@ -369,7 +373,7 @@ class WebsiteScraper:
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         import time
         domain_start_time = time.time()
-        max_domain_time = 100
+        max_domain_time = 160  # Increased for Advertiser-Or-Die deep scan
 
         # RESTORED: Redirect & TLD Handling
         if domain.startswith("www."): domain = domain[4:]
@@ -438,9 +442,11 @@ class WebsiteScraper:
             browser_contacts = self._scrape_with_browser(final_domain, list(set(browser_urls)))
             for c in browser_contacts: all_emails[c.email] = c
 
-            # 3. Vision Fallback (RESTORED)
-            if not all_emails:
-                self._log("Vision AI Fallback...")
+            # 3. Vision Fallback - ADVERTISER-OR-DIE LOGIC
+            # Re-check if we have a GOOD email after browser scan
+            has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
+            if not has_good_email:
+                self._log("No advertising contacts found. Trying Vision AI...")
                 vision_contacts = self._try_vision_fallback(base_url, final_domain)
                 for c in vision_contacts: all_emails[c.email] = c
 

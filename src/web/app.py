@@ -500,8 +500,8 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             completed = [0]  # Use list to allow mutation in nested function
             results_lock = threading.Lock()
 
-            # FIX: Increased from 25s to 120s to allow Deep Drill to finish
-            DOMAIN_TIMEOUT = 120
+            # Advertiser-Or-Die: 180s allows full Deep Drill + Vision fallback
+            DOMAIN_TIMEOUT = 180
 
             def scrape_company(idx_company):
                 """Scrape a single company - runs in thread pool."""
@@ -573,6 +573,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                     if scraper:
                         try:
                             scraper.close()
+                            scraper.close_thread_browser()  # Force memory cleanup
                         except Exception:
                             pass
 
@@ -591,7 +592,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             MAX_PHASE2_TIME = 900
             phase2_start = time.time()
 
-            with ThreadPoolExecutor(max_workers=5) as pool:  # Increased to 5 workers for better throughput
+            with ThreadPoolExecutor(max_workers=3) as pool:  # Reduced to 3 to prevent OOM on Railway
                 # Submit all tasks
                 futures = {
                     pool.submit(scrape_company, (idx, company)): (idx, company)
