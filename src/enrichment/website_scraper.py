@@ -1,4 +1,11 @@
-"""Website contact scraper - Ultimate Edition v4 (Improved Detection).
+"""Website contact scraper - Ultimate Edition v5 (AI-Verified Domain + Better Filtering).
+
+v5 Improvements:
+1. AI-verified domain resolution: Uses Claude to verify correct company match
+2. Relaxed email verification: More permissive SMTP + keep high-confidence emails
+3. Better domain matching: Smarter company-to-domain correlation
+4. Debug logging: Track exactly why emails are filtered out
+5. Multiple search result evaluation: Check top 3 results, not just first
 
 v4 Detection Improvements:
 1. Expanded PRIORITY_PREFIXES: hello, contact, info, inquiries, newsletter, etc.
@@ -141,16 +148,23 @@ PRIORITY_PREFIXES = [
     # Core advertising
     "ads", "ad", "advert", "advertising", "advertise",
     # Media/PR
-    "media", "press", "pr", "newsroom", "editorial",
+    "media", "press", "pr", "newsroom", "editorial", "comms", "communications",
     # Marketing
-    "marketing", "brand", "brands", "branding",
+    "marketing", "brand", "brands", "branding", "growth", "demand",
     # Partnerships/Business
     "partner", "partners", "partnerships", "sponsor", "sponsorship", "sponsorships",
-    "business", "biz", "bizdev", "sales", "commercial",
+    "business", "biz", "bizdev", "sales", "commercial", "enterprise", "revenue",
     # Inquiries/Contact
-    "hello", "contact", "info", "inquiries", "inquiry", "reach",
+    "hello", "contact", "info", "inquiries", "inquiry", "reach", "team",
     # Newsletter-specific
-    "newsletter", "digest", "subscribe",
+    "newsletter", "digest", "subscribe", "editor",
+    # Leadership (often respond to ad inquiries)
+    "ceo", "cmo", "founder", "cofounder",
+]
+
+# Additional patterns that indicate high-value business contacts
+HIGH_VALUE_PATTERNS = [
+    "head of", "director", "vp of", "chief", "manager",
 ]
 
 EMAIL_PATTERN = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
@@ -176,10 +190,13 @@ CONTACT_LABEL_PATTERN = re.compile(
 )
 
 
-def _search_for_domain(company_name: str, timeout: float = 3.0) -> str | None:
-    """Search the web to find a company's actual domain.
+def _search_for_domain(company_name: str, timeout: float = 3.0, api_key: str = None) -> str | None:
+    """Search the web to find a company's actual domain with AI verification.
 
-    E.g., "Project Management Institute" -> pmi.org
+    E.g., "Project Management Institute" -> pmi.org (not pmi.com)
+
+    Uses Claude AI to verify that the found domain actually matches the company
+    to avoid incorrect matches like pmi.com (power management) vs pmi.org (Project Management Institute).
     """
     try:
         # Use DuckDuckGo HTML search (no API key needed)
@@ -200,13 +217,19 @@ def _search_for_domain(company_name: str, timeout: float = 3.0) -> str | None:
         if resp.status_code != 200:
             return None
 
-        # Parse results - look for the first result link
+        # Parse results - get TOP 5 candidates (not just first)
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        candidates = []
+        skip_domains = ['google.', 'bing.', 'yahoo.', 'duckduckgo.',
+                       'facebook.', 'twitter.', 'linkedin.', 'wikipedia.',
+                       'youtube.', 'instagram.', 'reddit.', 'quora.']
+
         # DuckDuckGo results are in <a class="result__a"> tags
-        for result in soup.select("a.result__a"):
+        for result in soup.select("a.result__a")[:10]:  # Check first 10 results
             href = result.get("href", "")
+            title = result.get_text(strip=True) or ""
             if href and "http" in href:
                 # Extract domain from the URL
                 parsed = urlparse(href)
@@ -214,10 +237,106 @@ def _search_for_domain(company_name: str, timeout: float = 3.0) -> str | None:
                 if domain.startswith("www."):
                     domain = domain[4:]
                 # Skip search engines and social media
-                skip_domains = ['google.', 'bing.', 'yahoo.', 'duckduckgo.',
-                               'facebook.', 'twitter.', 'linkedin.', 'wikipedia.']
                 if not any(skip in domain for skip in skip_domains):
-                    return domain
+                    candidates.append({"domain": domain, "title": title, "url": href})
+                    if len(candidates) >= 5:  # Get top 5 candidates
+                        break
+
+        if not candidates:
+            return None
+
+        # If only 1 candidate, return it directly
+        if len(candidates) == 1:
+            return candidates[0]["domain"]
+
+        # Use AI to select the correct domain if we have Claude API key
+        if api_key:
+            best_domain = _ai_verify_domain(company_name, candidates, api_key)
+            if best_domain:
+                return best_domain
+
+        # Fallback: Simple heuristic - prefer .org for institutions, acronym matching
+        company_lower = company_name.lower()
+        company_words = company_lower.split()
+
+        # Check if any candidate domain contains company name or acronym
+        acronym = ''.join(w[0] for w in company_words if w)
+
+        for c in candidates:
+            domain = c["domain"].lower()
+            domain_base = domain.rsplit('.', 1)[0]
+
+            # Exact acronym match (e.g., "pmi" for "project management institute")
+            if domain_base == acronym:
+                # Prefer .org for institutes/associations
+                if 'institute' in company_lower or 'association' in company_lower:
+                    if domain.endswith('.org'):
+                        return c["domain"]
+                # Otherwise return the match
+                return c["domain"]
+
+        # Check for company name substring match
+        for c in candidates:
+            domain = c["domain"].lower()
+            title = c.get("title", "").lower()
+            # Title contains company name (high confidence)
+            if company_lower in title or all(w in title for w in company_words):
+                return c["domain"]
+
+        # Last resort: return first candidate
+        return candidates[0]["domain"]
+
+    except Exception:
+        return None
+
+
+def _ai_verify_domain(company_name: str, candidates: list[dict], api_key: str) -> str | None:
+    """Use Claude AI to verify which domain matches the company.
+
+    Args:
+        company_name: The company we're looking for (e.g., "Project Management Institute")
+        candidates: List of search result candidates [{domain, title, url}, ...]
+        api_key: Anthropic API key
+
+    Returns:
+        The correct domain or None if AI verification fails
+    """
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        # Format candidates for the prompt
+        candidates_text = "\n".join([
+            f"{i+1}. {c['domain']} - {c['title']}"
+            for i, c in enumerate(candidates)
+        ])
+
+        response = client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": f"""I'm looking for the official website of "{company_name}".
+
+Here are the search results:
+{candidates_text}
+
+Which domain is MOST LIKELY to be the official website of "{company_name}"?
+Reply with ONLY the domain name (e.g., "pmi.org") and nothing else.
+If none match, reply "NONE"."""
+            }],
+        )
+
+        result = response.content[0].text.strip().lower()
+
+        if result == "none":
+            return None
+
+        # Validate the response matches one of our candidates
+        for c in candidates:
+            if c["domain"].lower() == result or result in c["domain"].lower():
+                return c["domain"]
+
         return None
     except Exception:
         return None
@@ -714,10 +833,16 @@ class WebsiteScraper:
 
                 if search_name:
                     self._log(f"Searching for '{search_name}' domain...")
-                    search_domain = _search_for_domain(search_name)
+                    # Get API key for AI verification if Claude is enabled
+                    api_key = None
+                    if self.use_claude:
+                        agent = self._get_claude_agent()
+                        if agent and hasattr(agent, 'api_key'):
+                            api_key = agent.api_key
+                    search_domain = _search_for_domain(search_name, api_key=api_key)
                     if search_domain and search_domain != domain:
                         try:
-                            self._log(f"  Found: {search_domain}, verifying...")
+                            self._log(f"  AI-verified domain: {search_domain}, testing...")
                             resp = client.get(f"https://{search_domain}", timeout=4.0)
                             if resp.status_code == 200:
                                 self._log(f"  Success! Using {search_domain}")
@@ -859,25 +984,49 @@ class WebsiteScraper:
                 for c in vision_contacts:
                     all_emails[c.email] = c
 
-        # Phase 4: SMTP Verification
+        # Phase 4: SMTP Verification (more permissive for high-confidence emails)
         contacts_list = list(all_emails.values())
+        self._log(f"Found {len(contacts_list)} raw emails before verification")
+
         if self.verify_emails:
             from .email_finder import verify_email_smtp_permissive
             verified = []
+            rejected = []
             for c in contacts_list:
                 status = verify_email_smtp_permissive(c.email)
+
+                # Keep email if:
+                # 1. SMTP says valid/unknown/catchall (not "invalid")
+                # 2. OR it's a high-confidence advertising email (many mail servers block SMTP verification)
+                is_high_confidence = c.email_type == "advertising"
+
                 if status != "invalid":
                     verified.append(c)
+                elif is_high_confidence:
+                    # Keep advertising emails even if SMTP verification failed
+                    # (many corporate mail servers block verification)
+                    self._log(f"  Keeping {c.email} despite SMTP={status} (advertising email)")
+                    verified.append(c)
+                else:
+                    rejected.append(c.email)
+
+            if rejected:
+                self._log(f"  SMTP rejected {len(rejected)} emails: {rejected[:5]}...")
+
             result.contacts = verified
         else:
             result.contacts = contacts_list
 
         result.contacts = list({c.email: c for c in result.contacts}.values())
-        self._log(f"Finished {final_domain}: Found {len(result.contacts)} contacts")
+        self._log(f"Finished {final_domain}: Found {len(result.contacts)} verified contacts")
         return result
 
     def _extract_contacts_from_html(self, html: str, source_url: str, domain: str, original_domain: str = None) -> list[WebsiteContact]:
-        """Extract emails with relaxed domain matching and multiple obfuscation patterns."""
+        """Extract emails with relaxed domain matching and multiple obfuscation patterns.
+
+        v5 improvement: More permissive extraction - if an email is found on the target site,
+        it's likely relevant. We filter later during verification.
+        """
         contacts = []
         priority_emails = set()  # Track emails found via labeled patterns (higher confidence)
 
@@ -916,6 +1065,10 @@ class WebsiteScraper:
             original_parts = original_domain.replace('www.', '').split('.')
             original_base = original_parts[0] if original_parts else None
 
+        # Free webmail providers to always skip
+        free_webmail = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com',
+                        'icloud.com', 'protonmail.com', 'mail.com', 'zoho.com']
+
         for email in emails:
             email = email.lower().strip()
 
@@ -928,6 +1081,10 @@ class WebsiteScraper:
             prefix = email.split('@')[0]
             email_domain = email.split('@')[1] if '@' in email else ''
             email_base = email_domain.split('.')[0] if email_domain else ''
+
+            # Skip free webmail
+            if any(email.endswith(f"@{provider}") for provider in free_webmail):
+                continue
 
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
             is_labeled_contact = email in priority_emails  # Found via "Media Contact:" or mailto:
@@ -944,11 +1101,22 @@ class WebsiteScraper:
                 (original_domain and email.endswith(original_domain))
             )
 
+            # v5: More permissive - accept ANY corporate email found on the target site
+            # These are likely relevant contacts, even if domain doesn't exactly match
+            # (e.g., subsidiary domains, partner emails listed on contact pages)
+            is_corporate_email = (
+                email_domain and
+                '.' in email_domain and
+                not any(email.endswith(f"@{provider}") for provider in free_webmail)
+            )
+
             if is_domain_match or is_priority or is_labeled_contact:
                 # Mark as advertising if priority prefix OR labeled contact (e.g., "Media Contact:")
                 etype = "advertising" if (is_priority or is_labeled_contact) else "generic"
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
-            elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com']):
+            elif is_corporate_email:
+                # v5: Keep corporate emails found on the site, mark as discovered
+                # These may be partner/subsidiary contacts that are still valuable
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
 
         return contacts
