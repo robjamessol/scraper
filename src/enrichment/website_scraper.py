@@ -261,23 +261,27 @@ def _search_for_domain(company_name: str, timeout: float = 3.0, api_key: str = N
 
         # Check if any candidate domain contains company name or acronym
         acronym = ''.join(w[0] for w in company_words if w)
+        prefer_org = any(w in company_lower for w in ['institute', 'institution', 'association', 'foundation', 'society'])
 
+        # Collect all acronym-matching domains
+        acronym_matches = []
         for c in candidates:
             domain = c["domain"].lower()
             domain_base = domain.rsplit('.', 1)[0]
-
-            # Exact acronym match (e.g., "pmi" for "project management institute")
             if domain_base == acronym:
-                # Prefer .org for institutes/associations
-                if 'institute' in company_lower or 'association' in company_lower:
-                    if domain.endswith('.org'):
-                        return c["domain"]
-                # Otherwise return the match
-                return c["domain"]
+                acronym_matches.append(c)
 
-        # Check for company name substring match
+        if acronym_matches:
+            # For institutes/associations, strongly prefer .org
+            if prefer_org:
+                for m in acronym_matches:
+                    if m["domain"].lower().endswith('.org'):
+                        return m["domain"]
+            # Return first acronym match if no .org preference or no .org found
+            return acronym_matches[0]["domain"]
+
+        # Check for company name substring match in result titles
         for c in candidates:
-            domain = c["domain"].lower()
             title = c.get("title", "").lower()
             # Title contains company name (high confidence)
             if company_lower in title or all(w in title for w in company_words):
@@ -340,6 +344,80 @@ If none match, reply "NONE"."""
         return None
     except Exception:
         return None
+
+
+def _domain_to_company_name(base: str) -> str:
+    """Convert a domain base name to a readable company name.
+
+    E.g., "projectmanagementinstitute" -> "Project Management Institute"
+    Uses dictionary-based word splitting for concatenated lowercase strings.
+    """
+    # First try camelCase or hyphen splitting
+    import re as re_mod
+    words = re_mod.findall(r'[A-Z][a-z]+|[a-z]+', base)
+
+    # If we got a single long word (all lowercase, no boundaries), try dictionary splitting
+    if len(words) == 1 and len(words[0]) > 12:
+        split_words = _split_concatenated_words(words[0])
+        if len(split_words) > 1:
+            words = split_words
+
+    if words:
+        return ' '.join(w.capitalize() for w in words)
+    return base
+
+
+def _split_concatenated_words(text: str) -> list[str]:
+    """Split a concatenated string into words using a dictionary approach.
+
+    E.g., "projectmanagementinstitute" -> ["project", "management", "institute"]
+    """
+    # Common words found in company/organization names
+    known_words = [
+        'international', 'institute', 'institution', 'association', 'foundation',
+        'management', 'technology', 'technologies', 'solutions', 'services',
+        'corporation', 'company', 'enterprise', 'software', 'systems',
+        'american', 'national', 'federal', 'global', 'world', 'united',
+        'project', 'product', 'professional', 'digital', 'medical', 'health',
+        'healthcare', 'financial', 'insurance', 'education', 'research',
+        'marketing', 'advertising', 'communications', 'consulting',
+        'development', 'engineering', 'security', 'network', 'data',
+        'science', 'energy', 'power', 'electric', 'group', 'partners',
+        'capital', 'media', 'creative', 'design', 'strategic', 'advanced',
+        'general', 'standard', 'quality', 'industrial', 'commercial',
+        'business', 'corporate', 'community', 'resources', 'human',
+        'supply', 'chain', 'logistics', 'manufacturing', 'defense',
+    ]
+
+    text = text.lower()
+    result = []
+    remaining = text
+
+    while remaining:
+        # Try to match the longest known word at the start
+        best_match = None
+        for word in sorted(known_words, key=len, reverse=True):
+            if remaining.startswith(word):
+                best_match = word
+                break
+
+        if best_match:
+            result.append(best_match)
+            remaining = remaining[len(best_match):]
+        else:
+            # No known word match - take single character and continue
+            # Or if we have enough words, take the rest as one word
+            if result and len(remaining) < 10:
+                result.append(remaining)
+                remaining = ""
+            elif not result:
+                # No matches at all - return original
+                return [text]
+            else:
+                result.append(remaining)
+                remaining = ""
+
+    return result if len(result) > 1 else [text]
 
 
 def _generate_acronym_domains(domain: str) -> list[str]:
@@ -833,17 +911,9 @@ class WebsiteScraper:
         except Exception as e:
             self._log(f"Email search error: {e}", "warning")
 
-        # If no emails found via search, generate common patterns as last resort
+        # No pattern generation - only return real emails found via web search
         if not contacts:
-            self._log(f"Generating common email patterns for {domain}...")
-            common_prefixes = ["advertising", "ads", "media", "press", "partnerships",
-                               "marketing", "hello", "contact", "info", "sales"]
-            for prefix in common_prefixes:
-                contacts.append(WebsiteContact(
-                    email=f"{prefix}@{domain}",
-                    source_page="pattern_generated",
-                    email_type="advertising",
-                ))
+            self._log(f"No emails found for {domain} via web search either")
 
         return contacts
 
@@ -899,13 +969,7 @@ class WebsiteScraper:
                 if not search_name:
                     # Convert domain to readable name: projectmanagementinstitute -> Project Management Institute
                     base = domain.rsplit('.', 1)[0]
-                    # Try to split on common word patterns
-                    import re as re_mod
-                    words = re_mod.findall(r'[A-Z][a-z]+|[a-z]+', base)
-                    if words:
-                        search_name = ' '.join(w.capitalize() for w in words)
-                    else:
-                        search_name = base
+                    search_name = _domain_to_company_name(base)
 
                 if search_name:
                     self._log(f"Searching for '{search_name}' domain...")
@@ -1196,16 +1260,15 @@ class WebsiteScraper:
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
             is_labeled_contact = email in priority_emails  # Found via "Media Contact:" or mailto:
 
-            # Domain matching - check target domain and original domain for redirects
+            # Domain matching - tightened to avoid regional subsidiaries (e.g., hsbcmalta.com)
+            # Use exact matches and suffix checks instead of loose substring matching
             is_domain_match = (
-                email.endswith(domain) or
-                domain in email_domain or
-                base_name in email_base or
-                email_base in base_name or
-                (len(base_name) > 3 and base_name in email) or
-                # Original domain matching for redirects
-                (original_base and (original_base in email_base or email_base in original_base)) or
-                (original_domain and email.endswith(original_domain))
+                email_domain == domain or                              # exact: hsbc.com == hsbc.com
+                email_domain.endswith(f".{domain}") or                 # subdomain: mail.hsbc.com
+                email_base == base_name or                             # exact base: hsbc == hsbc
+                # Original domain matching for redirects (e.g., projectmanagementinstitute.com -> pmi.org)
+                (original_domain and (email_domain == original_domain or email_domain.endswith(f".{original_domain}"))) or
+                (original_base and email_base == original_base)
             )
 
             # Only accept emails that match the domain OR have priority prefixes + labeled contacts
