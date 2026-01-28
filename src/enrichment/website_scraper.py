@@ -8,6 +8,9 @@ v4 Detection Improvements:
 5. Less aggressive early exit: Collect 3+ ad emails before stopping
 6. Expanded page paths: /team, /leadership, /advertising, /sponsor, etc.
 7. Expanded deep drill keywords: advertise, sponsor, partner with us
+8. Acronym-based domain guessing (projectmanagementinstitute.com -> pmi.org)
+9. Structured contact text extraction ("Media Contact:", "Press Contact:")
+10. Additional paths: /investor-relations, /media/contacts, /corporate
 
 v3 Speed Optimizations:
 - Fast-path exit after 2+ ad emails on homepage, 3+ overall
@@ -163,6 +166,62 @@ EMAIL_OBFUSCATED_PATTERNS = [
 
 # mailto: link pattern
 MAILTO_PATTERN = re.compile(r'mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})', re.IGNORECASE)
+
+# Structured contact patterns (e.g., "Media Contact: email@domain.com")
+CONTACT_LABEL_PATTERN = re.compile(
+    r'(?:media\s*contact|press\s*contact|pr\s*contact|for\s*(?:media\s*)?inquiries|'
+    r'contact\s*us|advertising\s*contact|sponsor\s*contact)[:\s]*'
+    r'([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})',
+    re.IGNORECASE
+)
+
+
+def _generate_acronym_domains(domain: str) -> list[str]:
+    """Generate acronym-based domain alternatives for long company names.
+
+    E.g., projectmanagementinstitute.com -> pmi.org, pmi.com
+    """
+    base = domain.rsplit('.', 1)[0]  # Remove TLD
+
+    # Skip if already short (likely already an acronym)
+    if len(base) < 15:
+        return []
+
+    # Try to extract acronym from camelCase or word boundaries
+    # Split on common word boundaries
+    words = re.split(r'(?=[A-Z])|[-_]', base)
+    words = [w for w in words if w and len(w) > 0]
+
+    # If no clear word boundaries, try splitting on common words
+    if len(words) <= 1:
+        # Common word patterns in company names
+        word_patterns = [
+            'project', 'management', 'institute', 'international', 'association',
+            'american', 'national', 'health', 'medical', 'software', 'technology',
+            'solutions', 'services', 'group', 'corporation', 'company', 'systems'
+        ]
+        temp_base = base.lower()
+        words = []
+        for pattern in word_patterns:
+            if pattern in temp_base:
+                words.append(pattern)
+
+    if len(words) < 2:
+        return []
+
+    # Generate acronym from first letters
+    acronym = ''.join(w[0].lower() for w in words if w)
+
+    if len(acronym) < 2 or len(acronym) > 6:
+        return []
+
+    # Return possible domain variations
+    return [
+        f"{acronym}.org",
+        f"{acronym}.com",
+        f"{acronym}.io",
+        f"{acronym}.net",
+    ]
 
 
 class WebsiteScraper:
@@ -333,7 +392,9 @@ class WebsiteScraper:
 
         links = []
         keywords = ["contact", "about", "team", "advertise", "partner", "press",
-                    "media", "news", "newsroom", "company", "sponsor"]
+                    "media", "news", "newsroom", "company", "sponsor",
+                    # Additional corporate keywords
+                    "investor", "corporate", "who-we-are", "leadership", "reach"]
 
         for a in soup.find_all("a", href=True):
             href = a.get('href', '')
@@ -353,7 +414,9 @@ class WebsiteScraper:
 
         contact_urls = []
         keywords = ["contact", "about", "team", "advertise", "partner", "press",
-                    "media", "news", "newsroom", "brand", "sales", "sponsorship"]
+                    "media", "news", "newsroom", "brand", "sales", "sponsorship",
+                    # Additional corporate keywords
+                    "investor", "corporate", "who-we-are", "leadership", "reach"]
 
         with self._browser_context() as context:
             if not context: return []
@@ -586,7 +649,24 @@ class WebsiteScraper:
                     except:
                         pass
 
-            # If browser didn't help, try TLD fallback
+            # If browser didn't help, try acronym domains first (e.g., pmi.org for projectmanagementinstitute.com)
+            if http_failed:
+                acronym_domains = _generate_acronym_domains(domain)
+                if acronym_domains:
+                    self._log(f"Trying acronym-based domains...")
+                    for alt in acronym_domains:
+                        try:
+                            self._log(f"  Trying {alt}...")
+                            resp = client.get(f"https://{alt}", timeout=3.0)
+                            if resp.status_code == 200:
+                                self._log(f"  Success! Using {alt}")
+                                final_domain = alt
+                                base_url = f"https://{alt}"
+                                http_failed = False
+                                break
+                        except: continue
+
+            # If acronym didn't help, try standard TLD fallback
             if http_failed:
                 self._log(f"Trying TLD alternatives...")
                 alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.org', '.co', '.io', '.net']]
@@ -594,7 +674,7 @@ class WebsiteScraper:
                 for alt in alternatives:
                     try:
                         self._log(f"  Trying {alt}...")
-                        resp = client.get(f"https://{alt}", timeout=3.0)  # Optimized: Reduced from 5.0
+                        resp = client.get(f"https://{alt}", timeout=3.0)
                         if resp.status_code == 200:
                             self._log(f"  Success! Using {alt}")
                             final_domain = alt
@@ -618,11 +698,15 @@ class WebsiteScraper:
 
                 contact_urls = self._find_contact_links_http(resp.text, base_url)
 
-                # Expanded contact page paths
+                # Expanded contact page paths (including corporate/investor pages for large companies)
                 for p in ["/contact", "/about", "/advertise", "/media-kit", "/press",
                           "/partners", "/company", "/newsroom", "/about-us", "/contact-us",
                           "/team", "/leadership", "/our-team", "/get-in-touch", "/reach-us",
-                          "/inquiries", "/media-inquiries", "/advertising", "/sponsor"]:
+                          "/inquiries", "/media-inquiries", "/advertising", "/sponsor",
+                          # Corporate/investor pages (for large companies like HSBC, Lilly)
+                          "/investor-relations", "/investors", "/corporate", "/media",
+                          "/media/contacts", "/news/media-contacts", "/press-releases",
+                          "/who-we-are", "/about/contact", "/corporate/contact"]:
                     contact_urls.append(urljoin(base_url, p))
 
                 contact_urls = list(set(contact_urls))
@@ -659,10 +743,13 @@ class WebsiteScraper:
             self._log(f"Deep scraping {final_domain} with browser...")
 
             browser_urls = [base_url]
-            # Expanded browser paths
+            # Expanded browser paths (including corporate pages for large companies)
             for p in ["/contact", "/about", "/press", "/advertise", "/media-kit",
                       "/partners", "/newsroom", "/company", "/news", "/team",
-                      "/leadership", "/advertising", "/sponsor", "/media-inquiries"]:
+                      "/leadership", "/advertising", "/sponsor", "/media-inquiries",
+                      # Corporate/investor pages
+                      "/investor-relations", "/investors", "/corporate", "/media",
+                      "/media/contacts", "/press-releases", "/who-we-are"]:
                 browser_urls.append(urljoin(base_url, p))
 
             real_links = self._find_links_with_browser(base_url, final_domain)
@@ -701,6 +788,7 @@ class WebsiteScraper:
     def _extract_contacts_from_html(self, html: str, source_url: str, domain: str, original_domain: str = None) -> list[WebsiteContact]:
         """Extract emails with relaxed domain matching and multiple obfuscation patterns."""
         contacts = []
+        priority_emails = set()  # Track emails found via labeled patterns (higher confidence)
 
         # Standard email pattern
         emails = set(EMAIL_PATTERN.findall(html))
@@ -708,6 +796,12 @@ class WebsiteScraper:
         # mailto: links (high priority - explicitly linked emails)
         for match in MAILTO_PATTERN.findall(html):
             emails.add(match)
+            priority_emails.add(match.lower())  # Mark as high priority
+
+        # Structured contact patterns (e.g., "Media Contact: email@domain.com")
+        for match in CONTACT_LABEL_PATTERN.findall(html):
+            emails.add(match)
+            priority_emails.add(match.lower())  # Mark as high priority
 
         # Multiple obfuscation patterns
         for pattern in EMAIL_OBFUSCATED_PATTERNS:
@@ -745,6 +839,7 @@ class WebsiteScraper:
             email_base = email_domain.split('.')[0] if email_domain else ''
 
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
+            is_labeled_contact = email in priority_emails  # Found via "Media Contact:" or mailto:
 
             # Relaxed domain matching - also check original domain for redirects
             is_domain_match = (
@@ -758,8 +853,9 @@ class WebsiteScraper:
                 (original_domain and email.endswith(original_domain))
             )
 
-            if is_domain_match or is_priority:
-                etype = "advertising" if is_priority else "generic"
+            if is_domain_match or is_priority or is_labeled_contact:
+                # Mark as advertising if priority prefix OR labeled contact (e.g., "Media Contact:")
+                etype = "advertising" if (is_priority or is_labeled_contact) else "generic"
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
             elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com']):
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
@@ -826,7 +922,14 @@ def extract_contacts_from_screenshot(b64_image: str, source_url: str, api_key: s
                     },
                     {
                         "type": "text",
-                        "text": "Extract any email addresses visible in this screenshot. Return as JSON array: [{\"email\": \"...\"}]. If none found, return []."
+                        "text": """Extract ALL email addresses visible in this screenshot. Look carefully for:
+1. Email addresses in the footer
+2. "Contact us" or "Media Contact" sections
+3. Emails next to labels like "Press:", "Media:", "Advertising:", "Sales:"
+4. Partially visible or small text emails
+5. Emails that may be formatted with spaces or obfuscation like "email [at] domain.com"
+
+Return as JSON array: [{"email": "..."}]. If no emails found, return []."""
                     }
                 ],
             }],
