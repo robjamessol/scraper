@@ -721,11 +721,15 @@ class WebsiteScraper:
         visited_deep_links = set()
         blocked_count = 0
 
+        # Detect homepage URL for redirect detection
+        base_url_parsed = urlparse(urls[0] if urls else f"https://{domain}")
+        homepage_path = base_url_parsed.path.rstrip('/') or '/'
+
         with self._browser_context() as context:
             if not context: return [], 0
 
             page = context.new_page()
-            page.set_default_timeout(10000)  # Optimized: Reduced from 15000
+            page.set_default_timeout(10000)
 
             def handle_route(route):
                 if route.request.resource_type in ["image", "media", "font"]:
@@ -735,10 +739,10 @@ class WebsiteScraper:
             try: page.route("**/*", handle_route)
             except: pass
 
-            queue = list(urls[:10])  # Increased: visit more pages for better coverage
-            processed = 0
+            queue = list(urls[:15])  # Increased to cover more paths
+            content_pages = 0  # Only count pages with actual content
 
-            while queue and processed < 10:  # Increased: allow more pages
+            while queue and content_pages < 12:
                 if (time.time() - browser_start) > max_browser_time:
                     self._log("Browser time limit reached", "warning")
                     break
@@ -757,8 +761,20 @@ class WebsiteScraper:
 
                 try:
                     self._log(f"Browser visiting: {url}")
-                    page.goto(url, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1000)  # Optimized: Reduced from 1500
+                    response = page.goto(url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1000)
+
+                    # Skip 404/error pages without counting against limit
+                    if response and response.status >= 400 and response.status != 403:
+                        self._log(f"  Skipping {url} (HTTP {response.status})")
+                        continue
+
+                    # Skip pages that redirected back to homepage
+                    final_path = urlparse(page.url).path.rstrip('/') or '/'
+                    requested_path = urlparse(url).path.rstrip('/') or '/'
+                    if final_path == homepage_path and requested_path != homepage_path:
+                        self._log(f"  Skipping {url} (redirected to homepage)")
+                        continue
 
                     self._click_reveal_email_buttons(page)
 
@@ -783,7 +799,7 @@ class WebsiteScraper:
 
                     # DEEP DRILL: Look for press/newsroom links
                     has_good_email = any(c.email_type == "advertising" for c in all_emails.values())
-                    if not has_good_email and processed < 8:
+                    if not has_good_email and content_pages < 10:
                         try:
                             soup = BeautifulSoup(content, "lxml")
                         except:
@@ -813,7 +829,7 @@ class WebsiteScraper:
                                     queue.insert(0, full)
                                     break
 
-                    processed += 1
+                    content_pages += 1
 
                 except Exception as e:
                     self._log(f"Browser error on {url}: {str(e)[:60]}", "warning")
@@ -856,12 +872,18 @@ class WebsiteScraper:
         """Search the web to find email addresses for a company.
 
         Used as a last resort when no emails are found on the website itself.
-        Two-phase approach:
+        Multi-phase approach:
         1. Extract emails from DuckDuckGo search result snippets
-        2. Follow top result URLs and scrape those pages for emails
+        2. Follow top result URLs (including third-party pages) and scrape for emails
+        3. Try targeted email pattern searches on third-party aggregators
         """
         contacts = []
         search_name = company_name or domain.rsplit('.', 1)[0]
+
+        def _is_target_email(email: str) -> bool:
+            """Check if email belongs to the target domain."""
+            email_domain = email.split('@')[1] if '@' in email else ''
+            return email_domain == domain or email_domain.endswith(f".{domain}")
 
         try:
             self._log(f"Searching web for {search_name} contact emails...")
@@ -881,9 +903,11 @@ class WebsiteScraper:
             found_emails = set()
             result_urls = []  # Collect URLs from search results to scrape
 
-            for query in queries:
+            for i, query in enumerate(queries):
                 if found_emails:
                     break  # Stop if we already found emails
+                if i > 0:
+                    time.sleep(0.5)  # Rate limit DDG queries for scale
 
                 try:
                     resp = httpx.get(
@@ -898,60 +922,65 @@ class WebsiteScraper:
                         emails = set(EMAIL_PATTERN.findall(resp.text))
                         for email in emails:
                             email = email.lower().strip()
-                            email_domain = email.split('@')[1] if '@' in email else ''
+                            if _is_target_email(email) and not any(s in email for s in SKIP_PATTERNS):
+                                found_emails.add(email)
 
-                            # Only accept emails matching the target domain
-                            if email_domain == domain or email_domain.endswith(f".{domain}"):
-                                if not any(s in email for s in SKIP_PATTERNS):
-                                    found_emails.add(email)
-
-                        # Also collect search result URLs for phase 2 scraping
+                        # Collect search result URLs for phase 2 scraping
+                        # Include ANY result (not just target domain) - third-party pages
+                        # mentioning the company's email are valuable
                         if not found_emails and not result_urls:
                             soup = BeautifulSoup(resp.text, "html.parser")
-                            for link in soup.select("a.result__a")[:5]:
+                            skip_domains = ['google.', 'bing.', 'duckduckgo.', 'facebook.',
+                                          'twitter.', 'instagram.', 'youtube.']
+                            for link in soup.select("a.result__a")[:8]:
                                 href = link.get("href", "")
                                 if href and "http" in href:
                                     parsed = urlparse(href)
-                                    link_domain = parsed.netloc.replace("www.", "")
-                                    # Only follow links to the target domain
-                                    if domain in link_domain or link_domain in domain:
+                                    link_host = parsed.netloc.replace("www.", "")
+                                    if not any(s in link_host for s in skip_domains):
                                         result_urls.append(href)
                 except Exception:
                     continue
 
-            # Phase 2: If no emails from snippets, scrape the actual result pages
+            # Phase 2: If no emails from snippets, scrape the result pages
+            # Follow ANY page (including third-party) that might mention target emails
             if not found_emails and result_urls:
                 self._log(f"  Scraping {len(result_urls)} search result pages...")
                 client = self._get_http_client()
-                for url in result_urls[:3]:
+                for url in result_urls[:5]:
                     try:
                         r = client.get(url, timeout=5.0)
                         if r.status_code == 200:
                             page_emails = set(EMAIL_PATTERN.findall(r.text))
-                            # Also check mailto links
                             for m in MAILTO_PATTERN.findall(r.text):
                                 page_emails.add(m)
                             for email in page_emails:
                                 email = email.lower().strip()
-                                email_domain = email.split('@')[1] if '@' in email else ''
-                                if email_domain == domain or email_domain.endswith(f".{domain}"):
-                                    if not any(s in email for s in SKIP_PATTERNS):
-                                        found_emails.add(email)
+                                if _is_target_email(email) and not any(s in email for s in SKIP_PATTERNS):
+                                    found_emails.add(email)
                             if found_emails:
                                 break
                     except Exception:
                         continue
 
-            # Phase 3: If still nothing, try third-party sites that aggregate contact info
+            # Phase 3: Targeted email pattern searches
             if not found_emails:
+                # Build common email patterns for this domain
+                common_prefixes = ["press", "media", "pr", "marketing", "advertising",
+                                  "ads", "info", "contact", "hello", "partnerships",
+                                  "sales", "business", "comms", "communications"]
+                # Search for specific email patterns
+                email_patterns = " OR ".join(f'"{p}@{domain}"' for p in common_prefixes[:6])
                 third_party_queries = [
+                    f'{email_patterns}',
                     f'site:rocketreach.co "{search_name}" email',
                     f'site:hunter.io "{domain}"',
-                    f'"{search_name}" "press@{domain}" OR "media@{domain}" OR "pr@{domain}"',
                 ]
-                for query in third_party_queries:
+                for i, query in enumerate(third_party_queries):
                     if found_emails:
                         break
+                    if i > 0:
+                        time.sleep(0.5)  # Rate limit
                     try:
                         resp = httpx.get(
                             "https://html.duckduckgo.com/html/",
@@ -964,10 +993,8 @@ class WebsiteScraper:
                             emails = set(EMAIL_PATTERN.findall(resp.text))
                             for email in emails:
                                 email = email.lower().strip()
-                                email_domain = email.split('@')[1] if '@' in email else ''
-                                if email_domain == domain or email_domain.endswith(f".{domain}"):
-                                    if not any(s in email for s in SKIP_PATTERNS):
-                                        found_emails.add(email)
+                                if _is_target_email(email) and not any(s in email for s in SKIP_PATTERNS):
+                                    found_emails.add(email)
                     except Exception:
                         continue
 
@@ -983,7 +1010,6 @@ class WebsiteScraper:
         except Exception as e:
             self._log(f"Email search error: {e}", "warning")
 
-        # No pattern generation - only return real emails found via web search
         if not contacts:
             self._log(f"No emails found for {domain} via web search either")
 
