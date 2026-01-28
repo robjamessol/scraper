@@ -386,14 +386,14 @@ class WebsiteScraper:
 
         try:
             resp = client.get(base_url, timeout=10.0)
-            final_host = urlparse(resp.url).netloc
+            final_host = urlparse(str(resp.url)).netloc  # Cast httpx URL to string
             if final_host.startswith("www."): final_host = final_host[4:]
             if final_host != domain:
                 self._log(f"Redirect detected: {domain} -> {final_host}")
                 final_domain = final_host
                 base_url = str(resp.url)
-        except Exception as e:
-            # TLD Fallback for any connection error
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            # TLD Fallback ONLY for actual network errors, not code bugs
             self._log(f"Connection failed for {domain}: {type(e).__name__}, trying alternatives...")
             alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.co', '.io', '.org']]
             for alt in alternatives:
