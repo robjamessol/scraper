@@ -209,12 +209,12 @@ class HealthcareBrewScraper(BaseScraper):
                     "priority": 1,
                 },
                 "presented_by_section": {
-                    "pattern": r'Presented By\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z]?[A-Za-z0-9]+)*)',
+                    "pattern": r'Presented By\s+([A-Z][A-Za-z0-9&\'\-\.]+(?:\s+[A-Z]?[A-Za-z0-9&\'\-\.]+)*)',
                     "placement_type": "presented_by_section",
                     "priority": 1,
                 },
                 "together_with": {
-                    "pattern": r'Together With\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z]?[A-Za-z0-9]+)*)',
+                    "pattern": r'Together With\s+([A-Z][A-Za-z0-9&\'\-\.]+(?:\s+[A-Z]?[A-Za-z0-9&\'\-\.]+)*)',
                     "placement_type": "together_with",
                     "priority": 2,
                 },
@@ -455,7 +455,7 @@ class HealthcareBrewScraper(BaseScraper):
         )
         sponsor_name = sponsor_name.strip()
 
-        if not sponsor_name or len(sponsor_name) < 2 or len(sponsor_name) > 50:
+        if not sponsor_name or len(sponsor_name) < 3 or len(sponsor_name) > 50:
             return None
 
         # Find sponsor URL and domain
@@ -838,12 +838,12 @@ class MorningBrewScraper(BaseScraper):
                     "priority": 1,
                 },
                 "presented_by_section": {
-                    "pattern": r'Presented By\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z]?[A-Za-z0-9]+)*)',
+                    "pattern": r'Presented By\s+([A-Z][A-Za-z0-9&\'\-\.]+(?:\s+[A-Z]?[A-Za-z0-9&\'\-\.]+)*)',
                     "placement_type": "presented_by_section",
                     "priority": 1,
                 },
                 "together_with": {
-                    "pattern": r'Together With\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z]?[A-Za-z0-9]+)*)',
+                    "pattern": r'Together With\s+([A-Z][A-Za-z0-9&\'\-\.]+(?:\s+[A-Z]?[A-Za-z0-9&\'\-\.]+)*)',
                     "placement_type": "together_with",
                     "priority": 2,
                 },
@@ -974,7 +974,7 @@ class MorningBrewScraper(BaseScraper):
             '', sponsor_name, flags=re.IGNORECASE
         ).strip()
 
-        if not sponsor_name or len(sponsor_name) < 2 or len(sponsor_name) > 50:
+        if not sponsor_name or len(sponsor_name) < 3 or len(sponsor_name) > 50:
             return None
 
         sponsor_domain = self._find_sponsor_domain(html, sponsor_name, match.start())

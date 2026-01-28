@@ -536,7 +536,7 @@ def guess_domain_from_name(company_name: str) -> str | None:
     # Remove spaces and special characters for domain
     domain_name = re.sub(r'[^a-z0-9]', '', name)
 
-    if not domain_name or len(domain_name) < 2:
+    if not domain_name or len(domain_name) < 3:
         return None
 
     # Return guessed .com domain

@@ -205,16 +205,25 @@ def _search_for_domain(company_name: str, timeout: float = 3.0, api_key: str = N
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
-        # DuckDuckGo HTML search
-        resp = httpx.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": search_query},
-            headers=headers,
-            timeout=timeout,
-            follow_redirects=True
-        )
+        # DuckDuckGo HTML search with retry (DDG may rate limit)
+        resp = None
+        for attempt in range(2):
+            if attempt > 0:
+                time.sleep(1.5)  # Wait before retry
+            try:
+                resp = httpx.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": search_query},
+                    headers=headers,
+                    timeout=timeout,
+                    follow_redirects=True
+                )
+                if resp.status_code == 200:
+                    break
+            except (httpx.ConnectError, httpx.ReadTimeout):
+                continue
 
-        if resp.status_code != 200:
+        if not resp or resp.status_code != 200:
             return None
 
         # Parse results - get TOP 5 candidates (not just first)
@@ -765,6 +774,7 @@ class WebsiteScraper:
 
             queue = list(urls[:15])  # Increased to cover more paths
             content_pages = 0  # Only count pages with actual content
+            consecutive_404s = 0  # Track consecutive 404s for bail-out
 
             while queue and content_pages < 12:
                 if (time.time() - browser_start) > max_browser_time:
@@ -777,6 +787,17 @@ class WebsiteScraper:
                 if blocked_count >= 5:
                     self._log("Too many blocks, stopping browser scan", "warning")
                     break
+
+                # If too many consecutive 404s on standard paths, bail out
+                if consecutive_404s >= 4:
+                    self._log("  4+ consecutive 404s, skipping remaining standard paths")
+                    # Remove remaining standard paths but keep deep drill links
+                    queue = [u for u in queue if u in visited_deep_links or
+                             any(k in u.lower() for k in ['press-release', 'newsroom/', 'sponsor', 'partner'])]
+                    consecutive_404s = 0  # Reset for deep drill links
+                    if not queue:
+                        break
+                    continue
 
                 url = queue.pop(0)
                 if url in visited_deep_links:
@@ -791,6 +812,7 @@ class WebsiteScraper:
                     # Skip 404/error pages without counting against limit
                     if response and response.status >= 400 and response.status != 403:
                         self._log(f"  Skipping {url} (HTTP {response.status})")
+                        consecutive_404s += 1
                         continue
 
                     # Skip pages that redirected back to homepage
@@ -798,7 +820,11 @@ class WebsiteScraper:
                     requested_path = urlparse(url).path.rstrip('/') or '/'
                     if final_path == homepage_path and requested_path != homepage_path:
                         self._log(f"  Skipping {url} (redirected to homepage)")
+                        consecutive_404s += 1
                         continue
+
+                    # Reset consecutive 404 counter on successful page
+                    consecutive_404s = 0
 
                     self._click_reveal_email_buttons(page)
 
@@ -897,8 +923,10 @@ class WebsiteScraper:
 
         When a site is completely Cloudflare-blocked, try to find contact emails
         from archived versions of their contact/press/about pages.
+        Tries multiple years and both www/non-www variants.
         """
         contacts = []
+        seen_emails = set()
         client = self._get_http_client()
 
         # Pages most likely to contain contact emails
@@ -906,29 +934,45 @@ class WebsiteScraper:
                        "/media", "/advertise", "/about-us"]
 
         try:
+            archive_pages_checked = 0
             for path in paths_to_try:
-                if contacts:
-                    break  # Found emails, stop
+                if len(contacts) >= 3:
+                    break  # Found enough emails
+                if archive_pages_checked >= 12:
+                    break  # Limit total archive.org requests
 
-                target_url = f"https://www.{domain}{path}"
-                # Wayback Machine format: /web/TIMESTAMP_id_/URL
-                # Use "2" suffix for the raw archived page
-                archive_url = f"https://web.archive.org/web/2024/{target_url}"
+                # Try multiple years and www/non-www for each path
+                path_found = False
+                for year in ["2025", "2024", "2023"]:
+                    if path_found:
+                        break
+                    for prefix in [f"www.{domain}", domain]:
+                        if archive_pages_checked >= 12:
+                            break
 
-                try:
-                    self._log(f"  Archive.org: {domain}{path}")
-                    resp = client.get(archive_url, timeout=8.0)
-                    if resp.status_code == 200 and len(resp.text) > 500:
-                        found = self._extract_contacts_from_html(
-                            resp.text, archive_url, domain, original_domain
-                        )
-                        for c in found:
-                            c.source_page = f"archive:{domain}{path}"
-                            contacts.append(c)
-                except Exception:
-                    continue
+                        target_url = f"https://{prefix}{path}"
+                        archive_url = f"https://web.archive.org/web/{year}/{target_url}"
 
-                time.sleep(0.3)  # Be polite to archive.org
+                        try:
+                            self._log(f"  Archive.org: {domain}{path} ({year})")
+                            resp = client.get(archive_url, timeout=8.0)
+                            archive_pages_checked += 1
+                            if resp.status_code == 200 and len(resp.text) > 500:
+                                found = self._extract_contacts_from_html(
+                                    resp.text, archive_url, domain, original_domain
+                                )
+                                for c in found:
+                                    if c.email not in seen_emails:
+                                        seen_emails.add(c.email)
+                                        c.source_page = f"archive:{domain}{path}"
+                                        contacts.append(c)
+                                if found:
+                                    path_found = True
+                                    break  # Got emails for this path, try next path
+                        except Exception:
+                            continue
+
+                        time.sleep(0.3)  # Be polite to archive.org
 
         except Exception as e:
             self._log(f"Archive.org error: {e}", "warning")
