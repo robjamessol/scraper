@@ -636,8 +636,22 @@ class WebsiteScraper:
             http_failed = True
             self._log(f"HTTP failed for {domain}: {type(e).__name__}")
 
-            # FIX: Try browser-based redirect detection first (catches PMI -> pmi.org)
-            if self.use_browser:
+            # Try with www. prefix first (some domains only work with www)
+            try:
+                self._log(f"Trying www.{domain}...")
+                resp = client.get(f"https://www.{domain}", timeout=4.0)
+                if resp.status_code == 200:
+                    final_host = urlparse(str(resp.url)).netloc
+                    if final_host.startswith("www."): final_host = final_host[4:]
+                    self._log(f"Success with www prefix -> {final_host}")
+                    final_domain = final_host
+                    base_url = str(resp.url)
+                    http_failed = False
+            except:
+                pass
+
+            # If www didn't work, try browser-based redirect detection
+            if http_failed and self.use_browser:
                 self._log(f"Trying browser redirect detection for {domain}...")
                 browser_result = self._resolve_domain_with_browser(domain)
                 if browser_result:
