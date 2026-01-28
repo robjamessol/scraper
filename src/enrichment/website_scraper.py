@@ -1,11 +1,18 @@
-"""Website contact scraper - Ultimate Edition v3 (Speed Optimized).
+"""Website contact scraper - Ultimate Edition v4 (Improved Detection).
+
+v4 Detection Improvements:
+1. Expanded PRIORITY_PREFIXES: hello, contact, info, inquiries, newsletter, etc.
+2. Multiple obfuscation patterns: [at], (at), {at}, HTML entities (&#64;)
+3. Explicit mailto: link extraction
+4. Original domain tracking for redirect matching (PMI case)
+5. Less aggressive early exit: Collect 3+ ad emails before stopping
+6. Expanded page paths: /team, /leadership, /advertising, /sponsor, etc.
+7. Expanded deep drill keywords: advertise, sponsor, partner with us
 
 v3 Speed Optimizations:
-1. Fast-path exit: Skip browser/vision when HTTP finds advertising email
-2. Reduced timeouts: HTTP 5s, browser 10s, per-domain 100s total
-3. Reduced wait times: 1000ms hydration, 1500ms vision, 500ms scroll
-4. Fewer pages: Max 8 browser pages, 6 initial URLs
-5. Browser time limit: 60s instead of 90s
+- Fast-path exit after 2+ ad emails on homepage, 3+ overall
+- Reduced timeouts: HTTP 5s, browser 10s, per-domain 100s total
+- Browser time limit: 60s
 
 Previous fixes (v2):
 - PMI Redirect: Browser-based redirect detection when HTTP times out
@@ -128,13 +135,34 @@ SKIP_PATTERNS = [
 ]
 
 PRIORITY_PREFIXES = [
-    "ads", "ad", "advert", "advertising", "media", "press", "pr",
-    "marketing", "partner", "partnerships", "sponsor", "sponsorship",
-    "business", "biz", "sales", "commercial", "brand", "brands",
+    # Core advertising
+    "ads", "ad", "advert", "advertising", "advertise",
+    # Media/PR
+    "media", "press", "pr", "newsroom", "editorial",
+    # Marketing
+    "marketing", "brand", "brands", "branding",
+    # Partnerships/Business
+    "partner", "partners", "partnerships", "sponsor", "sponsorship", "sponsorships",
+    "business", "biz", "bizdev", "sales", "commercial",
+    # Inquiries/Contact
+    "hello", "contact", "info", "inquiries", "inquiry", "reach",
+    # Newsletter-specific
+    "newsletter", "digest", "subscribe",
 ]
 
 EMAIL_PATTERN = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
-EMAIL_OBFUSCATED = re.compile(r'([a-zA-Z0-9._-]+)\s*\[at\]\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
+
+# Multiple obfuscation patterns
+EMAIL_OBFUSCATED_PATTERNS = [
+    re.compile(r'([a-zA-Z0-9._-]+)\s*\[at\]\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'),  # [at]
+    re.compile(r'([a-zA-Z0-9._-]+)\s*\(at\)\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'),  # (at)
+    re.compile(r'([a-zA-Z0-9._-]+)\s*\{at\}\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'),  # {at}
+    re.compile(r'([a-zA-Z0-9._-]+)\s+at\s+([a-zA-Z0-9.-]+)\s*\.\s*([a-zA-Z]{2,})', re.IGNORECASE),  # "at" with spaces
+    re.compile(r'([a-zA-Z0-9._-]+)\s*\[dot\]\s*([a-zA-Z0-9.-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'),  # [dot] in local part
+]
+
+# mailto: link pattern
+MAILTO_PATTERN = re.compile(r'mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})', re.IGNORECASE)
 
 
 class WebsiteScraper:
@@ -367,10 +395,14 @@ class WebsiteScraper:
             return False
         # Path must look like a real page
         path = parsed.path.lower()
-        good_paths = ['/press', '/newsroom', '/media', '/news', '/about', '/contact']
+        good_paths = [
+            '/press', '/newsroom', '/media', '/news', '/about', '/contact',
+            '/advertise', '/advertising', '/sponsor', '/partner', '/team',
+            '/leadership', '/company', '/inquiries'
+        ]
         return any(p in path for p in good_paths)
 
-    def _scrape_with_browser(self, domain: str, urls: list[str]) -> tuple[list[WebsiteContact], int]:
+    def _scrape_with_browser(self, domain: str, urls: list[str], original_domain: str = None) -> tuple[list[WebsiteContact], int]:
         """Deep Drilling Browser Scraper. Returns (contacts, blocked_count)."""
         if not PLAYWRIGHT_AVAILABLE: return [], 0
 
@@ -430,13 +462,14 @@ class WebsiteScraper:
                         continue
 
                     # Extract emails
-                    found = self._extract_contacts_from_html(content, url, domain)
+                    found = self._extract_contacts_from_html(content, url, domain, original_domain)
                     for c in found:
                         all_emails[c.email] = c
 
-                    # Early exit if we found advertising email
-                    if any(c.email_type == "advertising" for c in found):
-                        self._log("Found advertising contact, stopping early")
+                    # Only early exit if we have 3+ advertising emails (collect more contacts)
+                    ad_count = sum(1 for c in all_emails.values() if c.email_type == "advertising")
+                    if ad_count >= 3:
+                        self._log(f"Found {ad_count} advertising contacts, stopping")
                         break
 
                     # DEEP DRILL: Look for press/newsroom links
@@ -457,8 +490,13 @@ class WebsiteScraper:
                             if not isinstance(href, str):
                                 continue
 
-                            # Look for actual press/newsroom paths (not query params)
-                            if any(k in txt for k in ["press", "newsroom", "media kit", "media-kit", "news room"]):
+                            # Expanded deep drill keywords
+                            deep_drill_keywords = [
+                                "press", "newsroom", "media kit", "media-kit", "news room",
+                                "advertise", "advertising", "sponsor", "sponsorship",
+                                "partner with us", "media inquiries", "contact us"
+                            ]
+                            if any(k in txt for k in deep_drill_keywords):
                                 full = urljoin(url, href)
                                 if self._is_valid_deep_drill_url(full, base_domain) and full not in visited_deep_links:
                                     self._log(f"  Deep Drill target found: {full}")
@@ -512,6 +550,7 @@ class WebsiteScraper:
         # Clean domain
         if domain.startswith("www."): domain = domain[4:]
         domain = strip_marketing_subdomain(domain)
+        original_domain = domain  # Track for redirect matching (e.g., projectmanagementinstitute.com)
         final_domain = domain
         base_url = f"https://{domain}"
 
@@ -574,35 +613,39 @@ class WebsiteScraper:
         # Phase 1: Fast HTTP Scan
         try:
             if resp and resp.status_code == 200:
-                for c in self._extract_contacts_from_html(resp.text, base_url, final_domain):
+                for c in self._extract_contacts_from_html(resp.text, base_url, final_domain, original_domain):
                     all_emails[c.email] = c
 
                 contact_urls = self._find_contact_links_http(resp.text, base_url)
 
+                # Expanded contact page paths
                 for p in ["/contact", "/about", "/advertise", "/media-kit", "/press",
-                          "/partners", "/company", "/newsroom", "/about-us", "/contact-us"]:
+                          "/partners", "/company", "/newsroom", "/about-us", "/contact-us",
+                          "/team", "/leadership", "/our-team", "/get-in-touch", "/reach-us",
+                          "/inquiries", "/media-inquiries", "/advertising", "/sponsor"]:
                     contact_urls.append(urljoin(base_url, p))
 
                 contact_urls = list(set(contact_urls))
 
-                # Fast-path: check if homepage already has advertising email
-                http_has_ad_email = any(c.email_type == "advertising" for c in all_emails.values())
-                if http_has_ad_email:
-                    self._log(f"Fast-path: Found advertising email on homepage, skipping deep scan")
+                # Fast-path: check if homepage has 2+ advertising emails (we have enough)
+                ad_email_count = sum(1 for c in all_emails.values() if c.email_type == "advertising")
+                if ad_email_count >= 2:
+                    self._log(f"Fast-path: Found {ad_email_count} advertising emails on homepage")
                 else:
-                    for url in contact_urls[:8]:  # Optimized: Reduced from 10
+                    for url in contact_urls[:10]:  # Increased back to 10 for better coverage
                         if self._is_cancelled(): break
                         if url in visited_urls: continue
                         visited_urls.add(url)
 
                         try:
-                            r = client.get(url, timeout=4.0)  # Optimized: Reduced from 6
+                            r = client.get(url, timeout=4.0)
                             if r.status_code == 200:
-                                for c in self._extract_contacts_from_html(r.text, url, final_domain):
+                                for c in self._extract_contacts_from_html(r.text, url, final_domain, original_domain):
                                     all_emails[c.email] = c
-                                # Early exit on advertising email
-                                if any(c.email_type == "advertising" for c in all_emails.values()):
-                                    self._log(f"Fast-path: Found advertising email in HTTP scan")
+                                # Only exit early if we have 3+ advertising emails
+                                ad_count = sum(1 for c in all_emails.values() if c.email_type == "advertising")
+                                if ad_count >= 3:
+                                    self._log(f"Fast-path: Found {ad_count} advertising emails in HTTP scan")
                                     break
                         except: continue
         except Exception as e:
@@ -616,15 +659,17 @@ class WebsiteScraper:
             self._log(f"Deep scraping {final_domain} with browser...")
 
             browser_urls = [base_url]
+            # Expanded browser paths
             for p in ["/contact", "/about", "/press", "/advertise", "/media-kit",
-                      "/partners", "/newsroom", "/company", "/news"]:
+                      "/partners", "/newsroom", "/company", "/news", "/team",
+                      "/leadership", "/advertising", "/sponsor", "/media-inquiries"]:
                 browser_urls.append(urljoin(base_url, p))
 
             real_links = self._find_links_with_browser(base_url, final_domain)
             browser_urls.extend(real_links)
             browser_urls = list(set(browser_urls))
 
-            browser_contacts, blocked_count = self._scrape_with_browser(final_domain, browser_urls)
+            browser_contacts, blocked_count = self._scrape_with_browser(final_domain, browser_urls, original_domain)
             for c in browser_contacts:
                 all_emails[c.email] = c
 
@@ -653,16 +698,38 @@ class WebsiteScraper:
         self._log(f"Finished {final_domain}: Found {len(result.contacts)} contacts")
         return result
 
-    def _extract_contacts_from_html(self, html: str, source_url: str, domain: str) -> list[WebsiteContact]:
-        """Extract emails with relaxed domain matching and [at] obfuscation detection."""
+    def _extract_contacts_from_html(self, html: str, source_url: str, domain: str, original_domain: str = None) -> list[WebsiteContact]:
+        """Extract emails with relaxed domain matching and multiple obfuscation patterns."""
         contacts = []
 
+        # Standard email pattern
         emails = set(EMAIL_PATTERN.findall(html))
-        for match in EMAIL_OBFUSCATED.findall(html):
-            emails.add(f"{match[0]}@{match[1]}")
+
+        # mailto: links (high priority - explicitly linked emails)
+        for match in MAILTO_PATTERN.findall(html):
+            emails.add(match)
+
+        # Multiple obfuscation patterns
+        for pattern in EMAIL_OBFUSCATED_PATTERNS:
+            for match in pattern.findall(html):
+                if len(match) == 2:
+                    emails.add(f"{match[0]}@{match[1]}")
+                elif len(match) == 3:
+                    # "at" with spaces pattern: local, domain, tld
+                    emails.add(f"{match[0]}@{match[1]}.{match[2]}")
+
+        # Decode HTML entities and look for more emails
+        html_decoded = html.replace('&#64;', '@').replace('&#46;', '.').replace('&commat;', '@')
+        emails.update(EMAIL_PATTERN.findall(html_decoded))
 
         domain_parts = domain.replace('www.', '').split('.')
         base_name = domain_parts[0] if domain_parts else domain
+
+        # Also consider original domain for redirect cases (e.g., projectmanagementinstitute.com -> pmi.org)
+        original_base = None
+        if original_domain and original_domain != domain:
+            original_parts = original_domain.replace('www.', '').split('.')
+            original_base = original_parts[0] if original_parts else None
 
         for email in emails:
             email = email.lower().strip()
@@ -679,18 +746,22 @@ class WebsiteScraper:
 
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
 
+            # Relaxed domain matching - also check original domain for redirects
             is_domain_match = (
                 email.endswith(domain) or
                 domain in email_domain or
                 base_name in email_base or
                 email_base in base_name or
-                (len(base_name) > 3 and base_name in email)
+                (len(base_name) > 3 and base_name in email) or
+                # Original domain matching for redirects
+                (original_base and (original_base in email_base or email_base in original_base)) or
+                (original_domain and email.endswith(original_domain))
             )
 
             if is_domain_match or is_priority:
                 etype = "advertising" if is_priority else "generic"
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
-            elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com']):
+            elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com']):
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
 
         return contacts
