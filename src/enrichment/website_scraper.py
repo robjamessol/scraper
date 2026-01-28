@@ -1,11 +1,17 @@
-"""Website contact scraper - Ultimate Edition v2.
+"""Website contact scraper - Ultimate Edition v3 (Speed Optimized).
 
-Fixes from v1:
-1. PMI Redirect: Browser-based redirect detection when HTTP times out
-2. Indeed Blocking: Track blocked pages, skip Vision if all blocked
-3. Link Discovery Bug: Ensure href/text are strings before .lower()
-4. Deep Drill: Filter out query-string URLs, look for real press paths
-5. Speed: Reduced waits, better early exits
+v3 Speed Optimizations:
+1. Fast-path exit: Skip browser/vision when HTTP finds advertising email
+2. Reduced timeouts: HTTP 5s, browser 10s, per-domain 100s total
+3. Reduced wait times: 1000ms hydration, 1500ms vision, 500ms scroll
+4. Fewer pages: Max 8 browser pages, 6 initial URLs
+5. Browser time limit: 60s instead of 90s
+
+Previous fixes (v2):
+- PMI Redirect: Browser-based redirect detection when HTTP times out
+- Indeed Blocking: Track blocked pages, skip Vision if all blocked
+- Link Discovery Bug: Ensure href/text are strings before .lower()
+- Deep Drill: Filter out query-string URLs, look for real press paths
 """
 
 import re
@@ -253,9 +259,9 @@ class WebsiteScraper:
                 return None
             try:
                 page = context.new_page()
-                page.set_default_timeout(15000)
+                page.set_default_timeout(10000)  # Optimized: Reduced from 15000
                 page.goto(f"https://{domain}", wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)  # Wait for JS redirects
+                page.wait_for_timeout(1500)  # Optimized: Reduced from 2000
 
                 final_url = page.url
                 final_host = urlparse(final_url).netloc
@@ -325,7 +331,7 @@ class WebsiteScraper:
             if not context: return []
             try:
                 page = context.new_page()
-                page.set_default_timeout(12000)
+                page.set_default_timeout(8000)  # Optimized: Reduced from 12000
                 page.goto(base_url, wait_until="domcontentloaded")
 
                 raw_links = page.evaluate("""() => {
@@ -369,7 +375,7 @@ class WebsiteScraper:
         if not PLAYWRIGHT_AVAILABLE: return [], 0
 
         browser_start = time.time()
-        max_browser_time = 90  # Reduced from 120
+        max_browser_time = 60  # Optimized: Reduced from 90
         all_emails = {}
         visited_deep_links = set()
         blocked_count = 0
@@ -378,7 +384,7 @@ class WebsiteScraper:
             if not context: return [], 0
 
             page = context.new_page()
-            page.set_default_timeout(15000)  # Reduced from 20000
+            page.set_default_timeout(10000)  # Optimized: Reduced from 15000
 
             def handle_route(route):
                 if route.request.resource_type in ["image", "media", "font"]:
@@ -388,10 +394,10 @@ class WebsiteScraper:
             try: page.route("**/*", handle_route)
             except: pass
 
-            queue = list(urls[:8])  # Reduced from 10
+            queue = list(urls[:6])  # Optimized: Reduced from 8
             processed = 0
 
-            while queue and processed < 12:  # Reduced from 15
+            while queue and processed < 8:  # Optimized: Reduced from 12
                 if (time.time() - browser_start) > max_browser_time:
                     self._log("Browser time limit reached", "warning")
                     break
@@ -411,7 +417,7 @@ class WebsiteScraper:
                 try:
                     self._log(f"Browser visiting: {url}")
                     page.goto(url, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1500)  # Reduced from 2000
+                    page.wait_for_timeout(1000)  # Optimized: Reduced from 1500
 
                     self._click_reveal_email_buttons(page)
 
@@ -477,11 +483,11 @@ class WebsiteScraper:
             try:
                 page = context.new_page()
                 page.goto(base_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(2500)  # Reduced from 3000
+                page.wait_for_timeout(1500)  # Optimized: Reduced from 2500
 
                 # Scroll to bottom
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(800)  # Reduced from 1000
+                page.wait_for_timeout(500)  # Optimized: Reduced from 800
 
                 screenshot = page.screenshot(type='jpeg', quality=60)
                 b64_img = base64.b64encode(screenshot).decode('utf-8')
@@ -501,7 +507,7 @@ class WebsiteScraper:
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """Main scraping method with improved redirect handling."""
         domain_start_time = time.time()
-        max_domain_time = 150  # Reduced from 160
+        max_domain_time = 100  # Optimized: Reduced from 150
 
         # Clean domain
         if domain.startswith("www."): domain = domain[4:]
@@ -515,7 +521,7 @@ class WebsiteScraper:
 
         # Phase 0: Resolve domain (handle redirects and TLD fallback)
         try:
-            resp = client.get(base_url, timeout=8.0)  # Reduced from 10
+            resp = client.get(base_url, timeout=5.0)  # Optimized: Reduced from 8
             final_host = urlparse(str(resp.url)).netloc
             if final_host.startswith("www."): final_host = final_host[4:]
 
@@ -537,7 +543,7 @@ class WebsiteScraper:
                     http_failed = False
                     # Try HTTP again with resolved domain
                     try:
-                        resp = client.get(base_url, timeout=8.0)
+                        resp = client.get(base_url, timeout=5.0)  # Optimized
                     except:
                         pass
 
@@ -549,7 +555,7 @@ class WebsiteScraper:
                 for alt in alternatives:
                     try:
                         self._log(f"  Trying {alt}...")
-                        resp = client.get(f"https://{alt}", timeout=5.0)
+                        resp = client.get(f"https://{alt}", timeout=3.0)  # Optimized: Reduced from 5.0
                         if resp.status_code == 200:
                             self._log(f"  Success! Using {alt}")
                             final_domain = alt
@@ -579,17 +585,26 @@ class WebsiteScraper:
 
                 contact_urls = list(set(contact_urls))
 
-                for url in contact_urls[:10]:  # Reduced from 12
-                    if self._is_cancelled(): break
-                    if url in visited_urls: continue
-                    visited_urls.add(url)
+                # Fast-path: check if homepage already has advertising email
+                http_has_ad_email = any(c.email_type == "advertising" for c in all_emails.values())
+                if http_has_ad_email:
+                    self._log(f"Fast-path: Found advertising email on homepage, skipping deep scan")
+                else:
+                    for url in contact_urls[:8]:  # Optimized: Reduced from 10
+                        if self._is_cancelled(): break
+                        if url in visited_urls: continue
+                        visited_urls.add(url)
 
-                    try:
-                        r = client.get(url, timeout=6.0)  # Reduced from 8
-                        if r.status_code == 200:
-                            for c in self._extract_contacts_from_html(r.text, url, final_domain):
-                                all_emails[c.email] = c
-                    except: continue
+                        try:
+                            r = client.get(url, timeout=4.0)  # Optimized: Reduced from 6
+                            if r.status_code == 200:
+                                for c in self._extract_contacts_from_html(r.text, url, final_domain):
+                                    all_emails[c.email] = c
+                                # Early exit on advertising email
+                                if any(c.email_type == "advertising" for c in all_emails.values()):
+                                    self._log(f"Fast-path: Found advertising email in HTTP scan")
+                                    break
+                        except: continue
         except Exception as e:
             self._log(f"HTTP scan error: {e}", "warning")
 
