@@ -1,16 +1,11 @@
-"""Website contact scraper - Ultimate Edition.
+"""Website contact scraper - Ultimate Edition v2.
 
-Combines ALL working features:
-1. Thread-Safe Browser (ThreadLocalBrowserManager)
-2. Safe Link Discovery (page.evaluate - no ElementHandle crash)
-3. Vision with Scroll (reveals footer emails)
-4. Redirect Detection (PMI.org case)
-5. TLD Fallback (.org first for PMI, then .co, .io, .net)
-6. Deep Drill Navigation (Indeed case - 3 clicks deep)
-7. [at] Obfuscation Detection
-8. Fast HTTP Scan before Browser fallback
-9. Click-Reveal Buttons
-10. Relaxed Domain Matching with Priority Prefixes
+Fixes from v1:
+1. PMI Redirect: Browser-based redirect detection when HTTP times out
+2. Indeed Blocking: Track blocked pages, skip Vision if all blocked
+3. Link Discovery Bug: Ensure href/text are strings before .lower()
+4. Deep Drill: Filter out query-string URLs, look for real press paths
+5. Speed: Reduced waits, better early exits
 """
 
 import re
@@ -30,7 +25,7 @@ from bs4 import BeautifulSoup
 class ThreadLocalBrowserManager:
     """Thread-safe browser management - each thread gets its own browser."""
     _thread_local = threading.local()
-    _global_semaphore = threading.Semaphore(6)  # Max 6 concurrent browser contexts
+    _global_semaphore = threading.Semaphore(6)
 
     @classmethod
     def get_browser(cls):
@@ -67,7 +62,6 @@ class ThreadLocalBrowserManager:
             except: pass
             cls._thread_local.playwright = None
 
-# Alias for backward compatibility
 GlobalBrowserManager = ThreadLocalBrowserManager
 
 try:
@@ -127,7 +121,6 @@ SKIP_PATTERNS = [
     'sentry', 'bugsnag', 'wixpress', 'example.com', 'email.com'
 ]
 
-# Priority prefixes that indicate advertising/marketing contacts
 PRIORITY_PREFIXES = [
     "ads", "ad", "advert", "advertising", "media", "press", "pr",
     "marketing", "partner", "partnerships", "sponsor", "sponsorship",
@@ -135,7 +128,6 @@ PRIORITY_PREFIXES = [
 ]
 
 EMAIL_PATTERN = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
-# Pattern for obfuscated emails like "email [at] domain.com"
 EMAIL_OBFUSCATED = re.compile(r'([a-zA-Z0-9._-]+)\s*\[at\]\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
 
 
@@ -200,7 +192,6 @@ class WebsiteScraper:
             except: pass
 
     def close_thread_browser(self):
-        """Force close thread browser to prevent memory leaks."""
         GlobalBrowserManager.close_thread_browser()
 
     def _log(self, message: str, level: str = "info"):
@@ -217,7 +208,6 @@ class WebsiteScraper:
 
     @contextmanager
     def _browser_context(self):
-        """Get a browser context with semaphore protection."""
         if not PLAYWRIGHT_AVAILABLE:
             yield None
             return
@@ -253,6 +243,33 @@ class WebsiteScraper:
                 except: pass
             GlobalBrowserManager.release_context_slot()
 
+    def _resolve_domain_with_browser(self, domain: str) -> tuple[str, str] | None:
+        """Use browser to detect redirects (handles JS/meta redirects)."""
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+
+        with self._browser_context() as context:
+            if not context:
+                return None
+            try:
+                page = context.new_page()
+                page.set_default_timeout(15000)
+                page.goto(f"https://{domain}", wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)  # Wait for JS redirects
+
+                final_url = page.url
+                final_host = urlparse(final_url).netloc
+                if final_host.startswith("www."):
+                    final_host = final_host[4:]
+
+                if final_host != domain:
+                    self._log(f"Browser detected redirect: {domain} -> {final_host}")
+                    return (final_host, final_url)
+                return (domain, f"https://{domain}")
+            except Exception as e:
+                self._log(f"Browser redirect check failed: {e}", "warning")
+                return None
+
     def _click_reveal_email_buttons(self, page):
         """Click 'Show Email' / 'Reveal' buttons to uncover hidden emails."""
         try:
@@ -269,12 +286,12 @@ class WebsiteScraper:
                 try:
                     if page.is_visible(sel):
                         page.click(sel, timeout=500)
-                        page.wait_for_timeout(200)
+                        page.wait_for_timeout(150)
                 except: pass
         except: pass
 
     def _find_contact_links_http(self, html: str, base_url: str) -> list[str]:
-        """Fast HTTP-based link discovery (no browser needed)."""
+        """Fast HTTP-based link discovery."""
         try:
             soup = BeautifulSoup(html, "lxml")
         except:
@@ -285,18 +302,19 @@ class WebsiteScraper:
                     "media", "news", "newsroom", "company", "sponsor"]
 
         for a in soup.find_all("a", href=True):
-            href = a['href']
-            text = a.get_text().lower()
+            href = a.get('href', '')
+            if not isinstance(href, str):
+                continue
+            text = (a.get_text() or '').lower()
             if any(k in text or k in href.lower() for k in keywords):
                 full = urljoin(base_url, href)
-                # Same domain check
                 if urlparse(full).netloc == urlparse(base_url).netloc:
                     links.append(full)
 
         return list(set(links))
 
     def _find_links_with_browser(self, base_url: str, domain: str) -> list[str]:
-        """SAFE Link Discovery using page.evaluate() - prevents ElementHandle crash."""
+        """SAFE Link Discovery using page.evaluate()."""
         if not PLAYWRIGHT_AVAILABLE: return []
 
         contact_urls = []
@@ -307,14 +325,12 @@ class WebsiteScraper:
             if not context: return []
             try:
                 page = context.new_page()
-                page.set_default_timeout(15000)
+                page.set_default_timeout(12000)
                 page.goto(base_url, wait_until="domcontentloaded")
 
-                # CRITICAL: Use JS evaluation instead of Python ElementHandle loop
-                # This prevents "ElementHandle.inner_text: Node is not an HTMLElement" crash
                 raw_links = page.evaluate("""() => {
                     return Array.from(document.querySelectorAll('a[href]')).map(a => ({
-                        href: a.href,
+                        href: a.href || '',
                         text: (a.innerText || '').toLowerCase()
                     }));
                 }""")
@@ -322,6 +338,9 @@ class WebsiteScraper:
                 for link in raw_links:
                     href = link.get('href', '')
                     text = link.get('text', '')
+                    # FIX: Ensure href and text are strings
+                    if not isinstance(href, str) or not isinstance(text, str):
+                        continue
                     if any(k in text or k in href.lower() for k in keywords):
                         if urlparse(href).netloc == urlparse(base_url).netloc:
                             contact_urls.append(href)
@@ -329,24 +348,38 @@ class WebsiteScraper:
             except Exception as e:
                 self._log(f"Link discovery error: {e}", "warning")
 
-        return list(set(contact_urls))[:20]
+        return list(set(contact_urls))[:15]
 
-    def _scrape_with_browser(self, domain: str, urls: list[str]) -> list[WebsiteContact]:
-        """Deep Drilling Browser Scraper - follows press/newsroom links."""
-        if not PLAYWRIGHT_AVAILABLE: return []
+    def _is_valid_deep_drill_url(self, url: str, base_domain: str) -> bool:
+        """Check if URL is a valid deep drill target (not a query param mess)."""
+        parsed = urlparse(url)
+        # Reject URLs with query params that look like tracking
+        if parsed.query and any(x in parsed.query for x in ['from=', 'utm_', 'ref=', 'source=']):
+            return False
+        # Must be same domain
+        if parsed.netloc != base_domain and parsed.netloc != f"www.{base_domain}":
+            return False
+        # Path must look like a real page
+        path = parsed.path.lower()
+        good_paths = ['/press', '/newsroom', '/media', '/news', '/about', '/contact']
+        return any(p in path for p in good_paths)
+
+    def _scrape_with_browser(self, domain: str, urls: list[str]) -> tuple[list[WebsiteContact], int]:
+        """Deep Drilling Browser Scraper. Returns (contacts, blocked_count)."""
+        if not PLAYWRIGHT_AVAILABLE: return [], 0
 
         browser_start = time.time()
-        max_browser_time = 120
+        max_browser_time = 90  # Reduced from 120
         all_emails = {}
         visited_deep_links = set()
+        blocked_count = 0
 
         with self._browser_context() as context:
-            if not context: return []
+            if not context: return [], 0
 
             page = context.new_page()
-            page.set_default_timeout(20000)
+            page.set_default_timeout(15000)  # Reduced from 20000
 
-            # Block heavy resources
             def handle_route(route):
                 if route.request.resource_type in ["image", "media", "font"]:
                     route.abort()
@@ -355,15 +388,20 @@ class WebsiteScraper:
             try: page.route("**/*", handle_route)
             except: pass
 
-            queue = list(urls[:10])
+            queue = list(urls[:8])  # Reduced from 10
             processed = 0
 
-            while queue and processed < 15:
+            while queue and processed < 12:  # Reduced from 15
                 if (time.time() - browser_start) > max_browser_time:
                     self._log("Browser time limit reached", "warning")
                     break
 
                 if self._is_cancelled(): break
+
+                # If too many blocks, give up
+                if blocked_count >= 5:
+                    self._log("Too many blocks, stopping browser scan", "warning")
+                    break
 
                 url = queue.pop(0)
                 if url in visited_deep_links:
@@ -373,15 +411,16 @@ class WebsiteScraper:
                 try:
                     self._log(f"Browser visiting: {url}")
                     page.goto(url, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2000)  # Hydration wait
+                    page.wait_for_timeout(1500)  # Reduced from 2000
 
                     self._click_reveal_email_buttons(page)
 
                     content = page.content()
 
-                    # Check for Cloudflare block
+                    # Check for Cloudflare/bot block
                     if "cf-browser-verification" in content or "just a moment" in content.lower():
                         self._log(f"Block detected on {url}", "warning")
+                        blocked_count += 1
                         continue
 
                     # Extract emails
@@ -389,37 +428,44 @@ class WebsiteScraper:
                     for c in found:
                         all_emails[c.email] = c
 
-                    # DEEP DRILL: If we haven't found good emails, look for press/newsroom links
-                    has_good_email = any(c.email_type == "advertising" for c in all_emails.values())
-                    if not has_good_email and processed < 10:
-                        try:
-                            soup = BeautifulSoup(content, "lxml")
-                        except:
-                            soup = BeautifulSoup(content, "html.parser")
-
-                        for a in soup.find_all("a", href=True):
-                            txt = a.get_text().lower()
-                            href = a['href']
-                            # Look for press/newsroom/media-kit links
-                            if any(k in txt or k in href.lower() for k in ["press", "newsroom", "media kit", "media-kit", "news room"]):
-                                full = urljoin(url, href)
-                                if urlparse(full).netloc == urlparse(url).netloc and full not in visited_deep_links:
-                                    self._log(f"  Deep Drill target found: {full}")
-                                    queue.insert(0, full)  # Priority visit
-                                    break  # Only add one deep link per page
-
                     # Early exit if we found advertising email
                     if any(c.email_type == "advertising" for c in found):
                         self._log("Found advertising contact, stopping early")
                         break
 
+                    # DEEP DRILL: Look for press/newsroom links
+                    has_good_email = any(c.email_type == "advertising" for c in all_emails.values())
+                    if not has_good_email and processed < 8:
+                        try:
+                            soup = BeautifulSoup(content, "lxml")
+                        except:
+                            soup = BeautifulSoup(content, "html.parser")
+
+                        base_domain = urlparse(url).netloc
+                        if base_domain.startswith("www."):
+                            base_domain = base_domain[4:]
+
+                        for a in soup.find_all("a", href=True):
+                            txt = (a.get_text() or '').lower()
+                            href = a.get('href', '')
+                            if not isinstance(href, str):
+                                continue
+
+                            # Look for actual press/newsroom paths (not query params)
+                            if any(k in txt for k in ["press", "newsroom", "media kit", "media-kit", "news room"]):
+                                full = urljoin(url, href)
+                                if self._is_valid_deep_drill_url(full, base_domain) and full not in visited_deep_links:
+                                    self._log(f"  Deep Drill target found: {full}")
+                                    queue.insert(0, full)
+                                    break
+
                     processed += 1
 
                 except Exception as e:
-                    self._log(f"Browser error on {url}: {str(e)[:80]}", "warning")
+                    self._log(f"Browser error on {url}: {str(e)[:60]}", "warning")
                     continue
 
-        return list(all_emails.values())
+        return list(all_emails.values()), blocked_count
 
     def _try_vision_fallback(self, base_url: str, domain: str) -> list[WebsiteContact]:
         """Use Claude Vision to find contacts - scrolls to reveal footer emails."""
@@ -431,11 +477,11 @@ class WebsiteScraper:
             try:
                 page = context.new_page()
                 page.goto(base_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(2500)  # Reduced from 3000
 
-                # CRITICAL: Scroll to bottom to reveal footer emails
+                # Scroll to bottom
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(800)  # Reduced from 1000
 
                 screenshot = page.screenshot(type='jpeg', quality=60)
                 b64_img = base64.b64encode(screenshot).decode('utf-8')
@@ -453,9 +499,9 @@ class WebsiteScraper:
         return contacts
 
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
-        """Main scraping method with redirect handling and TLD fallback."""
+        """Main scraping method with improved redirect handling."""
         domain_start_time = time.time()
-        max_domain_time = 160
+        max_domain_time = 150  # Reduced from 160
 
         # Clean domain
         if domain.startswith("www."): domain = domain[4:]
@@ -465,11 +511,11 @@ class WebsiteScraper:
 
         client = self._get_http_client()
         resp = None
+        http_failed = False
 
         # Phase 0: Resolve domain (handle redirects and TLD fallback)
         try:
-            resp = client.get(base_url, timeout=10.0)
-            # CRITICAL: Cast httpx URL to string before urlparse
+            resp = client.get(base_url, timeout=8.0)  # Reduced from 10
             final_host = urlparse(str(resp.url)).netloc
             if final_host.startswith("www."): final_host = final_host[4:]
 
@@ -478,23 +524,41 @@ class WebsiteScraper:
                 final_domain = final_host
                 base_url = str(resp.url)
 
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
-            # TLD Fallback - check .org first (for PMI), then others
-            self._log(f"Domain unreachable: {domain}. Trying alternatives...")
-            alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.org', '.co', '.io', '.net']]
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            http_failed = True
+            self._log(f"HTTP failed for {domain}: {type(e).__name__}")
 
-            for alt in alternatives:
-                try:
-                    self._log(f"  Trying {alt}...")
-                    resp = client.get(f"https://{alt}", timeout=5.0)
-                    if resp.status_code == 200:
-                        self._log(f"  Success! Using {alt}")
-                        final_domain = alt
-                        base_url = f"https://{alt}"
-                        break
-                except: continue
+            # FIX: Try browser-based redirect detection first (catches PMI -> pmi.org)
+            if self.use_browser:
+                self._log(f"Trying browser redirect detection for {domain}...")
+                browser_result = self._resolve_domain_with_browser(domain)
+                if browser_result:
+                    final_domain, base_url = browser_result
+                    http_failed = False
+                    # Try HTTP again with resolved domain
+                    try:
+                        resp = client.get(base_url, timeout=8.0)
+                    except:
+                        pass
 
-            if resp is None or resp.status_code != 200:
+            # If browser didn't help, try TLD fallback
+            if http_failed:
+                self._log(f"Trying TLD alternatives...")
+                alternatives = [domain.rsplit('.', 1)[0] + ext for ext in ['.org', '.co', '.io', '.net']]
+
+                for alt in alternatives:
+                    try:
+                        self._log(f"  Trying {alt}...")
+                        resp = client.get(f"https://{alt}", timeout=5.0)
+                        if resp.status_code == 200:
+                            self._log(f"  Success! Using {alt}")
+                            final_domain = alt
+                            base_url = f"https://{alt}"
+                            http_failed = False
+                            break
+                    except: continue
+
+            if http_failed:
                 return WebsiteScrapeResult(domain=domain, errors=["Domain unreachable"])
 
         result = WebsiteScrapeResult(domain=final_domain)
@@ -504,28 +568,24 @@ class WebsiteScraper:
         # Phase 1: Fast HTTP Scan
         try:
             if resp and resp.status_code == 200:
-                # Extract from homepage
                 for c in self._extract_contacts_from_html(resp.text, base_url, final_domain):
                     all_emails[c.email] = c
 
-                # Find contact page links
                 contact_urls = self._find_contact_links_http(resp.text, base_url)
 
-                # Add common contact paths
                 for p in ["/contact", "/about", "/advertise", "/media-kit", "/press",
                           "/partners", "/company", "/newsroom", "/about-us", "/contact-us"]:
                     contact_urls.append(urljoin(base_url, p))
 
                 contact_urls = list(set(contact_urls))
 
-                # HTTP scan contact pages
-                for url in contact_urls[:12]:
+                for url in contact_urls[:10]:  # Reduced from 12
                     if self._is_cancelled(): break
                     if url in visited_urls: continue
                     visited_urls.add(url)
 
                     try:
-                        r = client.get(url, timeout=8.0)
+                        r = client.get(url, timeout=6.0)  # Reduced from 8
                         if r.status_code == 200:
                             for c in self._extract_contacts_from_html(r.text, url, final_domain):
                                 all_emails[c.email] = c
@@ -535,6 +595,7 @@ class WebsiteScraper:
 
         # Phase 2: Browser Scan (if needed)
         has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
+        blocked_count = 0
 
         if (len(all_emails) < 2 or not has_good_email) and self.use_browser:
             self._log(f"Deep scraping {final_domain} with browser...")
@@ -544,18 +605,17 @@ class WebsiteScraper:
                       "/partners", "/newsroom", "/company", "/news"]:
                 browser_urls.append(urljoin(base_url, p))
 
-            # Also find links via browser (catches JS-rendered links)
             real_links = self._find_links_with_browser(base_url, final_domain)
             browser_urls.extend(real_links)
             browser_urls = list(set(browser_urls))
 
-            browser_contacts = self._scrape_with_browser(final_domain, browser_urls)
+            browser_contacts, blocked_count = self._scrape_with_browser(final_domain, browser_urls)
             for c in browser_contacts:
                 all_emails[c.email] = c
 
-            # Phase 3: Vision Fallback
+            # Phase 3: Vision Fallback (skip if site is completely blocking us)
             has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
-            if not has_good_email:
+            if not has_good_email and blocked_count < 5:
                 self._log("No advertising contacts found. Trying Vision AI...")
                 vision_contacts = self._try_vision_fallback(base_url, final_domain)
                 for c in vision_contacts:
@@ -574,7 +634,6 @@ class WebsiteScraper:
         else:
             result.contacts = contacts_list
 
-        # Deduplicate
         result.contacts = list({c.email: c for c in result.contacts}.values())
         self._log(f"Finished {final_domain}: Found {len(result.contacts)} contacts")
         return result
@@ -583,25 +642,19 @@ class WebsiteScraper:
         """Extract emails with relaxed domain matching and [at] obfuscation detection."""
         contacts = []
 
-        # Find normal emails
         emails = set(EMAIL_PATTERN.findall(html))
-
-        # Find obfuscated emails like "email [at] domain.com"
         for match in EMAIL_OBFUSCATED.findall(html):
             emails.add(f"{match[0]}@{match[1]}")
 
-        # Extract base domain name for partial matching
         domain_parts = domain.replace('www.', '').split('.')
         base_name = domain_parts[0] if domain_parts else domain
 
         for email in emails:
             email = email.lower().strip()
 
-            # Skip garbage
             if any(s in email for s in SKIP_PATTERNS):
                 continue
 
-            # Skip image extensions that got picked up
             if any(email.endswith(ext) for ext in ['.png', '.jpg', '.gif', '.svg', '.webp']):
                 continue
 
@@ -609,30 +662,26 @@ class WebsiteScraper:
             email_domain = email.split('@')[1] if '@' in email else ''
             email_base = email_domain.split('.')[0] if email_domain else ''
 
-            # Check if this is a priority/advertising email
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
 
-            # Relaxed domain matching
             is_domain_match = (
-                email.endswith(domain) or           # Exact: @company.com
-                domain in email_domain or           # Partial: @corp.company.com
-                base_name in email_base or          # Base match: company in company.co
-                email_base in base_name or          # Reverse: co in company
-                (len(base_name) > 3 and base_name in email)  # Company name anywhere
+                email.endswith(domain) or
+                domain in email_domain or
+                base_name in email_base or
+                email_base in base_name or
+                (len(base_name) > 3 and base_name in email)
             )
 
-            # Accept if: domain matches OR priority prefix (ads@anything)
             if is_domain_match or is_priority:
                 etype = "advertising" if is_priority else "generic"
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
-            # Also accept corporate emails found on company site (not gmail/yahoo/etc)
             elif email_domain and not any(skip in email_domain for skip in ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com']):
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
 
         return contacts
 
 
-# --- REQUIRED EXPORTS (prevent 502 crash) ---
+# --- REQUIRED EXPORTS ---
 
 def scrape_website_for_contacts(domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
     """Convenience function to scrape a website for contacts."""
