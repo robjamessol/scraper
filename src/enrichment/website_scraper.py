@@ -568,7 +568,31 @@ class WebsiteScraper:
                 viewport={"width": 1366, "height": 768},
                 java_script_enabled=True,
                 bypass_csp=True,
+                locale="en-US",
+                timezone_id="America/New_York",
             )
+            # Stealth: patch navigator.webdriver and Chrome automation flags
+            # This is what Cloudflare's "Just a moment" challenge checks
+            context.add_init_script("""
+                // Remove webdriver flag
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                // Add Chrome runtime (Cloudflare checks for this)
+                window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+                // Fix permissions query
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters);
+                // Fix plugins length (headless Chrome has 0)
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                // Fix languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            """)
             yield context
         except Exception as e:
             self._log(f"Context error: {e}", "warning")
@@ -866,6 +890,51 @@ class WebsiteScraper:
             except Exception as e:
                 self._log(f"Vision fallback error: {e}", "warning")
 
+        return contacts
+
+    def _scrape_archive_org(self, domain: str, original_domain: str = None) -> list[WebsiteContact]:
+        """Scrape archive.org Wayback Machine cached pages for blocked sites.
+
+        When a site is completely Cloudflare-blocked, try to find contact emails
+        from archived versions of their contact/press/about pages.
+        """
+        contacts = []
+        client = self._get_http_client()
+
+        # Pages most likely to contain contact emails
+        paths_to_try = ["/contact", "/press", "/about", "/contact-us", "/news",
+                       "/media", "/advertise", "/about-us"]
+
+        try:
+            for path in paths_to_try:
+                if contacts:
+                    break  # Found emails, stop
+
+                target_url = f"https://www.{domain}{path}"
+                # Wayback Machine format: /web/TIMESTAMP_id_/URL
+                # Use "2" suffix for the raw archived page
+                archive_url = f"https://web.archive.org/web/2024/{target_url}"
+
+                try:
+                    self._log(f"  Archive.org: {domain}{path}")
+                    resp = client.get(archive_url, timeout=8.0)
+                    if resp.status_code == 200 and len(resp.text) > 500:
+                        found = self._extract_contacts_from_html(
+                            resp.text, archive_url, domain, original_domain
+                        )
+                        for c in found:
+                            c.source_page = f"archive:{domain}{path}"
+                            contacts.append(c)
+                except Exception:
+                    continue
+
+                time.sleep(0.3)  # Be polite to archive.org
+
+        except Exception as e:
+            self._log(f"Archive.org error: {e}", "warning")
+
+        if contacts:
+            self._log(f"  Archive.org found {len(contacts)} email(s)")
         return contacts
 
     def _search_for_emails(self, domain: str, company_name: str | None = None) -> list[WebsiteContact]:
@@ -1253,7 +1322,14 @@ class WebsiteScraper:
                 for c in vision_contacts:
                     all_emails[c.email] = c
 
-        # Phase 3.5: Web search email fallback (for sites with no visible emails)
+        # Phase 3.5a: Archive.org fallback for Cloudflare-blocked sites
+        if not all_emails and blocked_count >= 5:
+            self._log(f"Site fully blocked. Trying archive.org cached pages...")
+            archive_contacts = self._scrape_archive_org(final_domain, original_domain)
+            for c in archive_contacts:
+                all_emails[c.email] = c
+
+        # Phase 3.5b: Web search email fallback (for sites with no visible emails)
         if not all_emails:
             search_contacts = self._search_for_emails(final_domain, company_name)
             for c in search_contacts:
