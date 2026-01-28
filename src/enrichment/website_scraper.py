@@ -1084,6 +1084,18 @@ class WebsiteScraper:
 
         return contacts
 
+    # Domains that should never be scraped for contacts (social media, search engines, etc.)
+    # These will hang the browser or return no useful contact emails
+    SKIP_DOMAINS = {
+        'linkedin.com', 'facebook.com', 'twitter.com', 'x.com',
+        'instagram.com', 'youtube.com', 'tiktok.com', 'pinterest.com',
+        'reddit.com', 'quora.com', 'medium.com', 'substack.com',
+        'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com',
+        'wikipedia.org', 'amazon.com', 'apple.com', 'apps.apple.com',
+        'play.google.com', 'github.com', 'gitlab.com',
+        'crunchbase.com', 'glassdoor.com',
+    }
+
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """Main scraping method with improved redirect handling."""
         domain_start_time = time.time()
@@ -1092,6 +1104,13 @@ class WebsiteScraper:
         # Clean domain
         if domain.startswith("www."): domain = domain[4:]
         domain = strip_marketing_subdomain(domain)
+
+        # Skip domains that should never be scraped (social media, search engines, etc.)
+        base_domain = domain.split('.')[-2] + '.' + domain.split('.')[-1] if '.' in domain else domain
+        if base_domain in self.SKIP_DOMAINS or domain in self.SKIP_DOMAINS:
+            self._log(f"Skipping {domain} (non-scrapable domain)")
+            return WebsiteScrapeResult(domain=domain, contacts=[], raw_html="")
+
         original_domain = domain  # Track for redirect matching (e.g., projectmanagementinstitute.com)
         final_domain = domain
         base_url = f"https://{domain}"

@@ -9,7 +9,7 @@
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-400">Total Advertisers</p>
-                <p class="text-3xl font-bold text-gray-100 mt-1">{{ stats.total }}</p>
+                <p id="statTotal" class="text-3xl font-bold text-gray-100 mt-1">{{ stats.total }}</p>
             </div>
             <div class="bg-indigo-900/50 rounded-full p-3">
                 <svg class="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -23,7 +23,7 @@
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-400">With Emails</p>
-                <p class="text-3xl font-bold text-green-400 mt-1">{{ stats.with_emails }}</p>
+                <p id="statWithEmails" class="text-3xl font-bold text-green-400 mt-1">{{ stats.with_emails }}</p>
             </div>
             <div class="bg-green-900/50 rounded-full p-3">
                 <span class="text-2xl">&#x2709;</span>
@@ -35,7 +35,7 @@
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-400">Without Emails</p>
-                <p class="text-3xl font-bold text-yellow-400 mt-1">{{ stats.without_emails }}</p>
+                <p id="statWithoutEmails" class="text-3xl font-bold text-yellow-400 mt-1">{{ stats.without_emails }}</p>
             </div>
             <div class="bg-yellow-900/50 rounded-full p-3">
                 <span class="text-2xl">&#x2753;</span>
@@ -47,7 +47,7 @@
         <div class="flex items-center justify-between">
             <div>
                 <p class="text-sm font-medium text-gray-400">Issues Scanned (Total)</p>
-                <p class="text-3xl font-bold text-indigo-400 mt-1">{{ scanned_issues_count or 0 }}</p>
+                <p id="statIssuesScanned" class="text-3xl font-bold text-indigo-400 mt-1">{{ scanned_issues_count or 0 }}</p>
             </div>
             <div class="bg-indigo-900/50 rounded-full p-3">
                 <span class="text-2xl">&#x1F4C4;</span>

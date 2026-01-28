@@ -130,10 +130,12 @@
         function startPolling() {
             if (pollInterval) clearInterval(pollInterval);
             let isPolling = false;  // Prevent request pileup
+            let pollCount = 0;  // Track polls for periodic stat refresh
 
             pollInterval = setInterval(async () => {
                 if (isPolling) return;  // Skip if previous request still pending
                 isPolling = true;
+                pollCount++;
 
                 try {
                     // Add timeout to prevent hanging
@@ -165,6 +167,11 @@
                     // Update logs
                     if (data.logs && data.logs.length > 0) {
                         updateLogs(data.logs);
+                    }
+
+                    // Refresh dashboard stat cards every ~15s (every 10 polls)
+                    if (pollCount % 10 === 0) {
+                        refreshDashboardStats();
                     }
 
                     // Check if scan completed or was cancelled
@@ -329,6 +336,20 @@
             }
         }
 
+        async function refreshDashboardStats() {
+            try {
+                const res = await fetch('/api/dashboard-stats');
+                const data = await res.json();
+                const el = (id) => document.getElementById(id);
+                if (el('statTotal')) el('statTotal').textContent = data.total;
+                if (el('statWithEmails')) el('statWithEmails').textContent = data.with_emails;
+                if (el('statWithoutEmails')) el('statWithoutEmails').textContent = data.without_emails;
+                if (el('statIssuesScanned')) el('statIssuesScanned').textContent = data.scanned_issues;
+            } catch (e) {
+                console.error('Failed to refresh stats:', e);
+            }
+        }
+
         function showScanComplete() {
             // Update scan button to show completion state
             const btn = document.getElementById('scanButton');
@@ -366,7 +387,8 @@
             if (progressBar) progressBar.style.width = '100%';
             if (progressPercent) progressPercent.textContent = '100%';
 
-            // NO auto-refresh - let user review logs first
+            // Refresh the top stat cards with live data
+            refreshDashboardStats();
         }
 
         function showScanStopped() {
@@ -403,7 +425,8 @@
                 `;
             }
 
-            // NO auto-refresh - let user review logs first
+            // Refresh the top stat cards with live data
+            refreshDashboardStats();
         }
 
         // Auto-refresh countdown

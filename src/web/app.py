@@ -92,9 +92,9 @@ def add_log(message: str, level: str = "info"):
             "message": message,
         }
         scan_status["logs"].append(entry)
-        # Keep last 500 log entries (increased for debugging)
-        if len(scan_status["logs"]) > 500:
-            scan_status["logs"] = scan_status["logs"][-500:]
+        # Keep last 2000 log entries (scaled for large scans)
+        if len(scan_status["logs"]) > 2000:
+            scan_status["logs"] = scan_status["logs"][-2000:]
 
     # Also log to standard logger
     if level == "error":
@@ -588,8 +588,11 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
             import time
 
-            # Optimized: 12 minutes total for Phase 2
-            MAX_PHASE2_TIME = 720
+            # Scale Phase 2 timeout based on company count:
+            # ~120s per company with 4 workers = 30s per company effective
+            # Minimum 12 minutes, scales up for larger batches
+            MAX_PHASE2_TIME = max(720, total * 30)
+            add_log(f"  Phase 2 timeout: {MAX_PHASE2_TIME}s for {total} companies")
             phase2_start = time.time()
 
             with ThreadPoolExecutor(max_workers=4) as pool:  # 4 workers for better throughput
@@ -890,6 +893,19 @@ async def api_get_scanned_issues():
     """Get count of scanned issues."""
     count = get_scanned_issues_count()
     return {"count": count}
+
+
+@app.get("/api/dashboard-stats")
+async def api_dashboard_stats():
+    """Get live dashboard stats (for updating top cards without page reload)."""
+    advertisers = get_advertisers()
+    with_emails = len([a for a in advertisers if a.get("email_1")])
+    return {
+        "total": len(advertisers),
+        "with_emails": with_emails,
+        "without_emails": len(advertisers) - with_emails,
+        "scanned_issues": get_scanned_issues_count(),
+    }
 
 
 @app.post("/api/scan")
