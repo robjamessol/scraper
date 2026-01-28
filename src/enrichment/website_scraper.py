@@ -655,10 +655,10 @@ class WebsiteScraper:
             try: page.route("**/*", handle_route)
             except: pass
 
-            queue = list(urls[:6])  # Optimized: Reduced from 8
+            queue = list(urls[:10])  # Increased: visit more pages for better coverage
             processed = 0
 
-            while queue and processed < 8:  # Optimized: Reduced from 12
+            while queue and processed < 10:  # Increased: allow more pages
                 if (time.time() - browser_start) > max_browser_time:
                     self._log("Browser time limit reached", "warning")
                     break
@@ -771,6 +771,82 @@ class WebsiteScraper:
 
         return contacts
 
+    def _search_for_emails(self, domain: str, company_name: str | None = None) -> list[WebsiteContact]:
+        """Search the web to find email addresses for a company.
+
+        Used as a last resort when no emails are found on the website itself.
+        Searches for patterns like "company contact email" on DuckDuckGo.
+        """
+        contacts = []
+        search_name = company_name or domain.rsplit('.', 1)[0]
+
+        try:
+            self._log(f"Searching web for {search_name} contact emails...")
+
+            # Try multiple search queries
+            queries = [
+                f"{search_name} advertising contact email",
+                f"{search_name} media contact email",
+                f'"{domain}" email contact',
+            ]
+
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+
+            found_emails = set()
+            for query in queries:
+                if found_emails:
+                    break  # Stop if we already found emails
+
+                try:
+                    resp = httpx.get(
+                        "https://html.duckduckgo.com/html/",
+                        params={"q": query},
+                        headers=headers,
+                        timeout=4.0,
+                        follow_redirects=True,
+                    )
+                    if resp.status_code == 200:
+                        # Extract emails from search result snippets
+                        emails = set(EMAIL_PATTERN.findall(resp.text))
+                        for email in emails:
+                            email = email.lower().strip()
+                            email_domain = email.split('@')[1] if '@' in email else ''
+
+                            # Only accept emails matching the target domain
+                            if domain in email_domain or email_domain.split('.')[0] in domain:
+                                if not any(s in email for s in SKIP_PATTERNS):
+                                    found_emails.add(email)
+                except Exception:
+                    continue
+
+            for email in found_emails:
+                prefix = email.split('@')[0]
+                is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
+                etype = "advertising" if is_priority else "generic"
+                self._log(f"  Web search found: {email}")
+                contacts.append(WebsiteContact(
+                    email=email, source_page="web_search", email_type=etype
+                ))
+
+        except Exception as e:
+            self._log(f"Email search error: {e}", "warning")
+
+        # If no emails found via search, generate common patterns as last resort
+        if not contacts:
+            self._log(f"Generating common email patterns for {domain}...")
+            common_prefixes = ["advertising", "ads", "media", "press", "partnerships",
+                               "marketing", "hello", "contact", "info", "sales"]
+            for prefix in common_prefixes:
+                contacts.append(WebsiteContact(
+                    email=f"{prefix}@{domain}",
+                    source_page="pattern_generated",
+                    email_type="advertising",
+                ))
+
+        return contacts
+
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """Main scraping method with improved redirect handling."""
         domain_start_time = time.time()
@@ -873,7 +949,7 @@ class WebsiteScraper:
                     for alt in acronym_domains:
                         try:
                             self._log(f"  Trying {alt}...")
-                            resp = client.get(f"https://{alt}", timeout=3.0)
+                            resp = client.get(f"https://{alt}", timeout=6.0, follow_redirects=True)
                             if resp.status_code == 200:
                                 self._log(f"  Success! Using {alt}")
                                 final_domain = alt
@@ -912,20 +988,31 @@ class WebsiteScraper:
                 for c in self._extract_contacts_from_html(resp.text, base_url, final_domain, original_domain):
                     all_emails[c.email] = c
 
-                contact_urls = self._find_contact_links_http(resp.text, base_url)
+                discovered_links = self._find_contact_links_http(resp.text, base_url)
 
-                # Expanded contact page paths (including corporate/investor pages for large companies)
-                for p in ["/contact", "/about", "/advertise", "/media-kit", "/press",
-                          "/partners", "/company", "/newsroom", "/about-us", "/contact-us",
-                          "/team", "/leadership", "/our-team", "/get-in-touch", "/reach-us",
-                          "/inquiries", "/media-inquiries", "/advertising", "/sponsor",
+                # Priority-ordered: static paths first, then discovered links
+                contact_urls = []
+                for p in ["/contact", "/contact-us", "/about", "/about-us",
+                          "/advertise", "/advertising", "/get-in-touch", "/reach-us",
+                          "/media-kit", "/press", "/partners", "/company", "/newsroom",
+                          "/team", "/leadership", "/our-team",
+                          "/inquiries", "/media-inquiries", "/sponsor",
                           # Corporate/investor pages (for large companies like HSBC, Lilly)
                           "/investor-relations", "/investors", "/corporate", "/media",
                           "/media/contacts", "/news/media-contacts", "/press-releases",
                           "/who-we-are", "/about/contact", "/corporate/contact"]:
                     contact_urls.append(urljoin(base_url, p))
+                # Append discovered links (from page HTML) after priority paths
+                contact_urls.extend(discovered_links)
 
-                contact_urls = list(set(contact_urls))
+                # Deduplicate while preserving priority order
+                seen_urls = set()
+                ordered_contact_urls = []
+                for url in contact_urls:
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        ordered_contact_urls.append(url)
+                contact_urls = ordered_contact_urls
 
                 # Fast-path: check if homepage has 2+ advertising emails (we have enough)
                 ad_email_count = sum(1 for c in all_emails.values() if c.email_type == "advertising")
@@ -958,19 +1045,33 @@ class WebsiteScraper:
         if (len(all_emails) < 2 or not has_good_email) and self.use_browser:
             self._log(f"Deep scraping {final_domain} with browser...")
 
+            # Priority-ordered browser URLs - contact/about pages FIRST
+            priority_paths = ["/contact", "/contact-us", "/about", "/about-us",
+                              "/advertise", "/advertising"]
+            secondary_paths = ["/press", "/media-kit", "/partners", "/newsroom",
+                              "/company", "/news", "/team", "/leadership",
+                              "/sponsor", "/media-inquiries",
+                              "/investor-relations", "/investors", "/corporate",
+                              "/media", "/media/contacts", "/press-releases",
+                              "/who-we-are", "/get-in-touch", "/reach-us"]
+
             browser_urls = [base_url]
-            # Expanded browser paths (including corporate pages for large companies)
-            for p in ["/contact", "/about", "/press", "/advertise", "/media-kit",
-                      "/partners", "/newsroom", "/company", "/news", "/team",
-                      "/leadership", "/advertising", "/sponsor", "/media-inquiries",
-                      # Corporate/investor pages
-                      "/investor-relations", "/investors", "/corporate", "/media",
-                      "/media/contacts", "/press-releases", "/who-we-are"]:
+            # Add priority paths first (these get visited first)
+            for p in priority_paths:
+                browser_urls.append(urljoin(base_url, p))
+            # Then secondary paths
+            for p in secondary_paths:
                 browser_urls.append(urljoin(base_url, p))
 
             real_links = self._find_links_with_browser(base_url, final_domain)
-            browser_urls.extend(real_links)
-            browser_urls = list(set(browser_urls))
+            # Deduplicate while preserving priority order
+            seen = set()
+            ordered_urls = []
+            for url in browser_urls + real_links:
+                if url not in seen:
+                    seen.add(url)
+                    ordered_urls.append(url)
+            browser_urls = ordered_urls
 
             browser_contacts, blocked_count = self._scrape_with_browser(final_domain, browser_urls, original_domain)
             for c in browser_contacts:
@@ -983,6 +1084,12 @@ class WebsiteScraper:
                 vision_contacts = self._try_vision_fallback(base_url, final_domain)
                 for c in vision_contacts:
                     all_emails[c.email] = c
+
+        # Phase 3.5: Web search email fallback (for sites with no visible emails)
+        if not all_emails:
+            search_contacts = self._search_for_emails(final_domain, company_name)
+            for c in search_contacts:
+                all_emails[c.email] = c
 
         # Phase 4: SMTP Verification (more permissive for high-confidence emails)
         contacts_list = list(all_emails.values())
@@ -1022,10 +1129,10 @@ class WebsiteScraper:
         return result
 
     def _extract_contacts_from_html(self, html: str, source_url: str, domain: str, original_domain: str = None) -> list[WebsiteContact]:
-        """Extract emails with relaxed domain matching and multiple obfuscation patterns.
+        """Extract emails with domain matching and multiple obfuscation patterns.
 
-        v5 improvement: More permissive extraction - if an email is found on the target site,
-        it's likely relevant. We filter later during verification.
+        v5.1: Tightened extraction - only accept domain-matching emails or priority-prefix
+        emails. Avoids pulling in random emails from ads/scripts in HTML.
         """
         contacts = []
         priority_emails = set()  # Track emails found via labeled patterns (higher confidence)
@@ -1089,7 +1196,7 @@ class WebsiteScraper:
             is_priority = any(p in prefix for p in PRIORITY_PREFIXES)
             is_labeled_contact = email in priority_emails  # Found via "Media Contact:" or mailto:
 
-            # Relaxed domain matching - also check original domain for redirects
+            # Domain matching - check target domain and original domain for redirects
             is_domain_match = (
                 email.endswith(domain) or
                 domain in email_domain or
@@ -1101,23 +1208,16 @@ class WebsiteScraper:
                 (original_domain and email.endswith(original_domain))
             )
 
-            # v5: More permissive - accept ANY corporate email found on the target site
-            # These are likely relevant contacts, even if domain doesn't exactly match
-            # (e.g., subsidiary domains, partner emails listed on contact pages)
-            is_corporate_email = (
-                email_domain and
-                '.' in email_domain and
-                not any(email.endswith(f"@{provider}") for provider in free_webmail)
-            )
-
-            if is_domain_match or is_priority or is_labeled_contact:
-                # Mark as advertising if priority prefix OR labeled contact (e.g., "Media Contact:")
+            # Only accept emails that match the domain OR have priority prefixes + labeled contacts
+            # Do NOT accept random corporate emails from other domains (quality issue)
+            if is_domain_match:
+                # Domain-matching email - mark based on prefix
                 etype = "advertising" if (is_priority or is_labeled_contact) else "generic"
                 contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
-            elif is_corporate_email:
-                # v5: Keep corporate emails found on the site, mark as discovered
-                # These may be partner/subsidiary contacts that are still valuable
-                contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="discovered"))
+            elif (is_priority or is_labeled_contact) and email_domain:
+                # Priority prefix but different domain - still valuable if found on
+                # the target site (e.g., a PR agency email listed as the media contact)
+                contacts.append(WebsiteContact(email=email, source_page=source_url, email_type="advertising"))
 
         return contacts
 

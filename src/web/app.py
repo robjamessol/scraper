@@ -535,7 +535,7 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                         log_callback=add_log,
                         cancel_check=is_scan_cancelled,
                     )
-                    result = scraper.scrape_domain(domain)
+                    result = scraper.scrape_domain(domain, company_name=name)
 
                     # Store contacts in separate columns
                     contact_count = 0
@@ -1225,7 +1225,7 @@ def process_retry_queue(queue: list[dict]):
                     use_claude=True,
                     log_callback=add_log,
                 )
-                result = scraper.scrape_domain(domain)
+                result = scraper.scrape_domain(domain, company_name=name)
 
                 contact_count = 0
                 if result and result.contacts:
@@ -1389,7 +1389,7 @@ def process_custom_domains(domains: list[dict]):
                     use_claude=True,
                     log_callback=add_log,
                 )
-                result = scraper.scrape_domain(domain)
+                result = scraper.scrape_domain(domain, company_name=name)
 
                 contact_count = 0
                 if result and result.contacts:
