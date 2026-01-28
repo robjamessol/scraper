@@ -176,6 +176,53 @@ CONTACT_LABEL_PATTERN = re.compile(
 )
 
 
+def _search_for_domain(company_name: str, timeout: float = 3.0) -> str | None:
+    """Search the web to find a company's actual domain.
+
+    E.g., "Project Management Institute" -> pmi.org
+    """
+    try:
+        # Use DuckDuckGo HTML search (no API key needed)
+        search_query = f"{company_name} official website"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+
+        # DuckDuckGo HTML search
+        resp = httpx.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": search_query},
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=True
+        )
+
+        if resp.status_code != 200:
+            return None
+
+        # Parse results - look for the first result link
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # DuckDuckGo results are in <a class="result__a"> tags
+        for result in soup.select("a.result__a"):
+            href = result.get("href", "")
+            if href and "http" in href:
+                # Extract domain from the URL
+                parsed = urlparse(href)
+                domain = parsed.netloc
+                if domain.startswith("www."):
+                    domain = domain[4:]
+                # Skip search engines and social media
+                skip_domains = ['google.', 'bing.', 'yahoo.', 'duckduckgo.',
+                               'facebook.', 'twitter.', 'linkedin.', 'wikipedia.']
+                if not any(skip in domain for skip in skip_domains):
+                    return domain
+        return None
+    except Exception:
+        return None
+
+
 def _generate_acronym_domains(domain: str) -> list[str]:
     """Generate acronym-based domain alternatives for long company names.
 
@@ -650,7 +697,37 @@ class WebsiteScraper:
             except:
                 pass
 
-            # If www didn't work, try browser-based redirect detection
+            # If www didn't work, try web search first (fastest way to find real domain)
+            if http_failed:
+                # Generate search name from domain or use company_name
+                search_name = company_name
+                if not search_name:
+                    # Convert domain to readable name: projectmanagementinstitute -> Project Management Institute
+                    base = domain.rsplit('.', 1)[0]
+                    # Try to split on common word patterns
+                    import re as re_mod
+                    words = re_mod.findall(r'[A-Z][a-z]+|[a-z]+', base)
+                    if words:
+                        search_name = ' '.join(w.capitalize() for w in words)
+                    else:
+                        search_name = base
+
+                if search_name:
+                    self._log(f"Searching for '{search_name}' domain...")
+                    search_domain = _search_for_domain(search_name)
+                    if search_domain and search_domain != domain:
+                        try:
+                            self._log(f"  Found: {search_domain}, verifying...")
+                            resp = client.get(f"https://{search_domain}", timeout=4.0)
+                            if resp.status_code == 200:
+                                self._log(f"  Success! Using {search_domain}")
+                                final_domain = search_domain
+                                base_url = f"https://{search_domain}"
+                                http_failed = False
+                        except:
+                            pass
+
+            # If search didn't work, try browser-based redirect detection
             if http_failed and self.use_browser:
                 self._log(f"Trying browser redirect detection for {domain}...")
                 browser_result = self._resolve_domain_with_browser(domain)
@@ -659,11 +736,11 @@ class WebsiteScraper:
                     http_failed = False
                     # Try HTTP again with resolved domain
                     try:
-                        resp = client.get(base_url, timeout=5.0)  # Optimized
+                        resp = client.get(base_url, timeout=5.0)
                     except:
                         pass
 
-            # If browser didn't help, try acronym domains first (e.g., pmi.org for projectmanagementinstitute.com)
+            # If browser didn't help, try acronym domains (e.g., pmi.org for projectmanagementinstitute.com)
             if http_failed:
                 acronym_domains = _generate_acronym_domains(domain)
                 if acronym_domains:
