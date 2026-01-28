@@ -332,9 +332,12 @@ class WebsiteScraper:
                 screenshot = page.screenshot(type='jpeg', quality=60)
                 b64_img = base64.b64encode(screenshot).decode('utf-8')
 
-                # NOTE: This assumes extract_contacts_from_screenshot is imported or available
-                from .website_scraper import extract_contacts_from_screenshot
-                data = extract_contacts_from_screenshot(b64_img, base_url, self._get_claude_agent().api_key)
+                # Use the module-level function
+                agent = self._get_claude_agent()
+                if agent and hasattr(agent, 'api_key'):
+                    data = extract_contacts_from_screenshot(b64_img, base_url, agent.api_key)
+                else:
+                    data = []
 
                 for c in data:
                     email = c.get('email')
@@ -443,3 +446,89 @@ class WebsiteScraper:
             contacts.append(WebsiteContact(email=email, source_page=source_url, email_type=etype))
 
         return contacts
+
+
+def scrape_website_for_contacts(domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
+    """
+    Convenience function to scrape a website for contacts.
+
+    Args:
+        domain: The domain to scrape
+        company_name: Optional company name for context
+
+    Returns:
+        WebsiteScrapeResult with found contacts
+    """
+    scraper = WebsiteScraper()
+    try:
+        return scraper.scrape_domain(domain, company_name)
+    finally:
+        scraper.close()
+
+
+def html_to_clean_text(html: str, max_length: int = 5000) -> str:
+    """Convert HTML to clean text for Claude processing."""
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        # Remove script and style elements
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+            tag.decompose()
+        text = soup.get_text(separator=' ', strip=True)
+        # Collapse whitespace
+        text = ' '.join(text.split())
+        return text[:max_length]
+    except Exception:
+        return html[:max_length]
+
+
+EMAIL_CLASSIFICATION_EXAMPLES = [
+    {"email": "ads@example.com", "type": "advertising", "reason": "ads prefix indicates advertising department"},
+    {"email": "media@example.com", "type": "advertising", "reason": "media prefix for media buying"},
+    {"email": "press@example.com", "type": "advertising", "reason": "press/PR contact for media"},
+    {"email": "partnerships@example.com", "type": "advertising", "reason": "partnerships for business development"},
+    {"email": "marketing@example.com", "type": "marketing", "reason": "general marketing department"},
+    {"email": "john.smith@example.com", "type": "personal", "reason": "personal name format"},
+    {"email": "info@example.com", "type": "generic", "reason": "generic catch-all"},
+    {"email": "support@example.com", "type": "skip", "reason": "customer support, not decision maker"},
+    {"email": "careers@example.com", "type": "skip", "reason": "HR/recruiting, not relevant"},
+]
+
+
+def extract_contacts_from_screenshot(b64_image: str, source_url: str, api_key: str) -> list[dict]:
+    """Use Claude Vision to extract contacts from a screenshot."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        response = client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64_image,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "Extract any email addresses visible in this screenshot. Return as JSON array: [{\"email\": \"...\"}]. If none found, return []."
+                    }
+                ],
+            }],
+        )
+
+        import json
+        text = response.content[0].text
+        # Try to parse JSON from response
+        start = text.find('[')
+        end = text.rfind(']') + 1
+        if start != -1 and end > start:
+            return json.loads(text[start:end])
+        return []
+    except Exception:
+        return []
