@@ -635,10 +635,11 @@ class WebsiteScraper:
             soup = BeautifulSoup(html, "html.parser")
 
         links = []
-        keywords = ["contact", "about", "team", "advertise", "partner", "press",
+        keywords = ["contact", "connect", "about", "team", "advertise", "partner", "press",
                     "media", "news", "newsroom", "company", "sponsor",
                     # Additional corporate keywords
-                    "investor", "corporate", "who-we-are", "leadership", "reach"]
+                    "investor", "corporate", "who-we-are", "leadership", "reach",
+                    "partnership", "get-in-touch"]
 
         for a in soup.find_all("a", href=True):
             href = a.get('href', '')
@@ -657,10 +658,11 @@ class WebsiteScraper:
         if not PLAYWRIGHT_AVAILABLE: return []
 
         contact_urls = []
-        keywords = ["contact", "about", "team", "advertise", "partner", "press",
+        keywords = ["contact", "connect", "about", "team", "advertise", "partner", "press",
                     "media", "news", "newsroom", "brand", "sales", "sponsorship",
                     # Additional corporate keywords
-                    "investor", "corporate", "who-we-are", "leadership", "reach"]
+                    "investor", "corporate", "who-we-are", "leadership", "reach",
+                    "partnership", "get-in-touch"]
 
         with self._browser_context() as context:
             if not context: return []
@@ -704,8 +706,8 @@ class WebsiteScraper:
         path = parsed.path.lower()
         good_paths = [
             '/press', '/newsroom', '/media', '/news', '/about', '/contact',
-            '/advertise', '/advertising', '/sponsor', '/partner', '/team',
-            '/leadership', '/company', '/inquiries'
+            '/connect', '/advertise', '/advertising', '/sponsor', '/partner',
+            '/partnership', '/team', '/leadership', '/company', '/inquiries'
         ]
         return any(p in path for p in good_paths)
 
@@ -801,7 +803,8 @@ class WebsiteScraper:
                             deep_drill_keywords = [
                                 "press", "newsroom", "media kit", "media-kit", "news room",
                                 "advertise", "advertising", "sponsor", "sponsorship",
-                                "partner with us", "media inquiries", "contact us"
+                                "partner with us", "partner program", "partnerships",
+                                "media inquiries", "contact us", "connect with us"
                             ]
                             if any(k in txt for k in deep_drill_keywords):
                                 full = urljoin(url, href)
@@ -853,7 +856,9 @@ class WebsiteScraper:
         """Search the web to find email addresses for a company.
 
         Used as a last resort when no emails are found on the website itself.
-        Searches for patterns like "company contact email" on DuckDuckGo.
+        Two-phase approach:
+        1. Extract emails from DuckDuckGo search result snippets
+        2. Follow top result URLs and scrape those pages for emails
         """
         contacts = []
         search_name = company_name or domain.rsplit('.', 1)[0]
@@ -863,9 +868,10 @@ class WebsiteScraper:
 
             # Try multiple search queries
             queries = [
-                f"{search_name} advertising contact email",
+                f"{search_name} press contact email",
                 f"{search_name} media contact email",
                 f'"{domain}" email contact',
+                f"{search_name} advertising contact email",
             ]
 
             headers = {
@@ -873,6 +879,8 @@ class WebsiteScraper:
             }
 
             found_emails = set()
+            result_urls = []  # Collect URLs from search results to scrape
+
             for query in queries:
                 if found_emails:
                     break  # Stop if we already found emails
@@ -882,7 +890,7 @@ class WebsiteScraper:
                         "https://html.duckduckgo.com/html/",
                         params={"q": query},
                         headers=headers,
-                        timeout=4.0,
+                        timeout=5.0,
                         follow_redirects=True,
                     )
                     if resp.status_code == 200:
@@ -893,11 +901,75 @@ class WebsiteScraper:
                             email_domain = email.split('@')[1] if '@' in email else ''
 
                             # Only accept emails matching the target domain
-                            if domain in email_domain or email_domain.split('.')[0] in domain:
+                            if email_domain == domain or email_domain.endswith(f".{domain}"):
                                 if not any(s in email for s in SKIP_PATTERNS):
                                     found_emails.add(email)
+
+                        # Also collect search result URLs for phase 2 scraping
+                        if not found_emails and not result_urls:
+                            soup = BeautifulSoup(resp.text, "html.parser")
+                            for link in soup.select("a.result__a")[:5]:
+                                href = link.get("href", "")
+                                if href and "http" in href:
+                                    parsed = urlparse(href)
+                                    link_domain = parsed.netloc.replace("www.", "")
+                                    # Only follow links to the target domain
+                                    if domain in link_domain or link_domain in domain:
+                                        result_urls.append(href)
                 except Exception:
                     continue
+
+            # Phase 2: If no emails from snippets, scrape the actual result pages
+            if not found_emails and result_urls:
+                self._log(f"  Scraping {len(result_urls)} search result pages...")
+                client = self._get_http_client()
+                for url in result_urls[:3]:
+                    try:
+                        r = client.get(url, timeout=5.0)
+                        if r.status_code == 200:
+                            page_emails = set(EMAIL_PATTERN.findall(r.text))
+                            # Also check mailto links
+                            for m in MAILTO_PATTERN.findall(r.text):
+                                page_emails.add(m)
+                            for email in page_emails:
+                                email = email.lower().strip()
+                                email_domain = email.split('@')[1] if '@' in email else ''
+                                if email_domain == domain or email_domain.endswith(f".{domain}"):
+                                    if not any(s in email for s in SKIP_PATTERNS):
+                                        found_emails.add(email)
+                            if found_emails:
+                                break
+                    except Exception:
+                        continue
+
+            # Phase 3: If still nothing, try third-party sites that aggregate contact info
+            if not found_emails:
+                third_party_queries = [
+                    f'site:rocketreach.co "{search_name}" email',
+                    f'site:hunter.io "{domain}"',
+                    f'"{search_name}" "press@{domain}" OR "media@{domain}" OR "pr@{domain}"',
+                ]
+                for query in third_party_queries:
+                    if found_emails:
+                        break
+                    try:
+                        resp = httpx.get(
+                            "https://html.duckduckgo.com/html/",
+                            params={"q": query},
+                            headers=headers,
+                            timeout=5.0,
+                            follow_redirects=True,
+                        )
+                        if resp.status_code == 200:
+                            emails = set(EMAIL_PATTERN.findall(resp.text))
+                            for email in emails:
+                                email = email.lower().strip()
+                                email_domain = email.split('@')[1] if '@' in email else ''
+                                if email_domain == domain or email_domain.endswith(f".{domain}"):
+                                    if not any(s in email for s in SKIP_PATTERNS):
+                                        found_emails.add(email)
+                    except Exception:
+                        continue
 
             for email in found_emails:
                 prefix = email.split('@')[0]
@@ -983,9 +1055,11 @@ class WebsiteScraper:
                     if search_domain and search_domain != domain:
                         try:
                             self._log(f"  AI-verified domain: {search_domain}, testing...")
-                            resp = client.get(f"https://{search_domain}", timeout=4.0)
-                            if resp.status_code == 200:
-                                self._log(f"  Success! Using {search_domain}")
+                            resp = client.get(f"https://{search_domain}", timeout=8.0)
+                            # Accept any HTTP response as proof domain exists
+                            # (403/503 = bot protection, still the right domain)
+                            if resp.status_code < 500 or resp.status_code == 503:
+                                self._log(f"  Success! Using {search_domain} (HTTP {resp.status_code})")
                                 final_domain = search_domain
                                 base_url = f"https://{search_domain}"
                                 http_failed = False
@@ -1013,9 +1087,10 @@ class WebsiteScraper:
                     for alt in acronym_domains:
                         try:
                             self._log(f"  Trying {alt}...")
-                            resp = client.get(f"https://{alt}", timeout=6.0, follow_redirects=True)
-                            if resp.status_code == 200:
-                                self._log(f"  Success! Using {alt}")
+                            resp = client.get(f"https://{alt}", timeout=8.0, follow_redirects=True)
+                            # Accept any HTTP response as proof domain exists
+                            if resp.status_code < 500 or resp.status_code == 503:
+                                self._log(f"  Success! Using {alt} (HTTP {resp.status_code})")
                                 final_domain = alt
                                 base_url = f"https://{alt}"
                                 http_failed = False
@@ -1056,15 +1131,16 @@ class WebsiteScraper:
 
                 # Priority-ordered: static paths first, then discovered links
                 contact_urls = []
-                for p in ["/contact", "/contact-us", "/about", "/about-us",
+                for p in ["/contact", "/contact-us", "/connect-with-us", "/about", "/about-us",
                           "/advertise", "/advertising", "/get-in-touch", "/reach-us",
-                          "/media-kit", "/press", "/partners", "/company", "/newsroom",
+                          "/media-kit", "/press", "/partners", "/partner-program", "/partnerships",
+                          "/company", "/newsroom",
                           "/team", "/leadership", "/our-team",
                           "/inquiries", "/media-inquiries", "/sponsor",
                           # Corporate/investor pages (for large companies like HSBC, Lilly)
                           "/investor-relations", "/investors", "/corporate", "/media",
                           "/media/contacts", "/news/media-contacts", "/press-releases",
-                          "/who-we-are", "/about/contact", "/corporate/contact"]:
+                          "/news", "/who-we-are", "/about/contact", "/corporate/contact"]:
                     contact_urls.append(urljoin(base_url, p))
                 # Append discovered links (from page HTML) after priority paths
                 contact_urls.extend(discovered_links)
@@ -1110,9 +1186,11 @@ class WebsiteScraper:
             self._log(f"Deep scraping {final_domain} with browser...")
 
             # Priority-ordered browser URLs - contact/about pages FIRST
-            priority_paths = ["/contact", "/contact-us", "/about", "/about-us",
+            priority_paths = ["/contact", "/contact-us", "/connect-with-us",
+                              "/about", "/about-us",
                               "/advertise", "/advertising"]
-            secondary_paths = ["/press", "/media-kit", "/partners", "/newsroom",
+            secondary_paths = ["/press", "/media-kit", "/partners", "/partner-program",
+                              "/partnerships", "/newsroom",
                               "/company", "/news", "/team", "/leadership",
                               "/sponsor", "/media-inquiries",
                               "/investor-relations", "/investors", "/corporate",
