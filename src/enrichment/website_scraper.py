@@ -489,7 +489,16 @@ def _generate_acronym_domains(domain: str) -> list[str]:
 
     results = []
 
-    # Generate acronym from first letters of significant words
+    # Try truncated domains FIRST (more specific, more likely correct)
+    # E.g., thermofisherscientific -> thermofisher.com
+    if len(acronym_words) >= 3:
+        for i in range(2, len(acronym_words)):
+            truncated = ''.join(acronym_words[:i])
+            if 5 <= len(truncated) <= 20 and truncated != base:
+                results.append(f"{truncated}.com")
+
+    # Then try acronym domains (shorter, more ambiguous)
+    # E.g., projectmanagementinstitute -> pmi.org
     if len(acronym_words) >= 2:
         acronym = ''.join(w[0].lower() for w in acronym_words)
         if 2 <= len(acronym) <= 6:
@@ -499,14 +508,6 @@ def _generate_acronym_domains(domain: str) -> list[str]:
                 f"{acronym}.io",
                 f"{acronym}.net",
             ])
-
-    # Also try truncated domains (e.g., thermofisherscientific -> thermofisher)
-    # Join first N significant words to create shorter domain guesses
-    if len(acronym_words) >= 3:
-        for i in range(2, len(acronym_words)):
-            truncated = ''.join(acronym_words[:i])
-            if 5 <= len(truncated) <= 20 and truncated != base:
-                results.append(f"{truncated}.com")
 
     return results
 
@@ -1252,10 +1253,16 @@ class WebsiteScraper:
                     if search_domain and search_domain != domain:
                         try:
                             self._log(f"  AI-verified domain: {search_domain}, testing...")
-                            resp = client.get(f"https://{search_domain}", timeout=8.0)
+                            resp = client.get(f"https://{search_domain}", timeout=8.0, follow_redirects=True)
+                            # Reject parked/sales domains
+                            parked_check = {'hugedomains.com', 'godaddy.com', 'sedo.com', 'dan.com',
+                                           'afternic.com', 'bodis.com', 'domainmarket.com'}
+                            final_host_check = urlparse(str(resp.url)).netloc.replace("www.", "")
+                            if any(pd in final_host_check for pd in parked_check):
+                                self._log(f"  Skipping {search_domain} (parked: {final_host_check})")
                             # Accept any HTTP response as proof domain exists
                             # (403/503 = bot protection, still the right domain)
-                            if resp.status_code < 500 or resp.status_code == 503:
+                            elif resp.status_code < 500 or resp.status_code == 503:
                                 self._log(f"  Success! Using {search_domain} (HTTP {resp.status_code})")
                                 final_domain = search_domain
                                 base_url = f"https://{search_domain}"
@@ -1281,10 +1288,19 @@ class WebsiteScraper:
                 acronym_domains = _generate_acronym_domains(domain)
                 if acronym_domains:
                     self._log(f"Trying acronym-based domains...")
+                    # Known domain parking/sales sites to reject
+                    parked_domains = {'hugedomains.com', 'godaddy.com', 'sedo.com', 'dan.com',
+                                     'afternic.com', 'bodis.com', 'undeveloped.com', 'namesilo.com',
+                                     'namecheap.com', 'domainmarket.com', 'parkingcrew.net'}
                     for alt in acronym_domains:
                         try:
                             self._log(f"  Trying {alt}...")
                             resp = client.get(f"https://{alt}", timeout=8.0, follow_redirects=True)
+                            # Check if it redirected to a parked/sales domain
+                            final_host = urlparse(str(resp.url)).netloc.replace("www.", "")
+                            if any(pd in final_host for pd in parked_domains):
+                                self._log(f"  Skipping {alt} (parked domain: {final_host})")
+                                continue
                             # Accept any HTTP response as proof domain exists
                             if resp.status_code < 500 or resp.status_code == 503:
                                 self._log(f"  Success! Using {alt} (HTTP {resp.status_code})")

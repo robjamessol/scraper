@@ -1,5 +1,6 @@
 """Healthcare Brew newsletter scraper."""
 
+import html as html_mod
 import re
 import logging
 from datetime import datetime
@@ -437,8 +438,11 @@ class HealthcareBrewScraper(BaseScraper):
         pattern = pattern_config.get("pattern", "")
         placement_type = pattern_config.get("placement_type", "unknown")
 
+        # Decode HTML entities before regex matching (e.g., &amp; -> &, so "AT&amp;T" becomes "AT&T")
+        decoded_html = html_mod.unescape(html)
+
         # Search for the pattern
-        match = re.search(pattern, html, re.IGNORECASE)
+        match = re.search(pattern, decoded_html, re.IGNORECASE)
         if not match:
             return None
 

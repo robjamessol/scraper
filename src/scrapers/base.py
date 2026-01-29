@@ -1,5 +1,6 @@
 """Base scraper class for newsletter advertiser discovery."""
 
+import html as html_mod
 import re
 import logging
 from abc import ABC, abstractmethod
@@ -795,8 +796,11 @@ class BaseScraper(ABC):
 
         seen_names = set()
 
+        # Decode HTML entities before regex matching (e.g., &amp; -> &)
+        decoded_html = html_mod.unescape(html)
+
         for pattern, sponsor_type in patterns:
-            for match in re.finditer(pattern, html):
+            for match in re.finditer(pattern, decoded_html):
                 name = clean_text(match.group(1))
                 # Clean trailing words that got captured
                 name = re.sub(r'\s+(Take|Learn|Get|Read|Check|This|The|And|In|A|An).*$', '', name, flags=re.IGNORECASE).strip()
