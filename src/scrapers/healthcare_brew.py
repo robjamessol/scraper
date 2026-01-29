@@ -453,6 +453,11 @@ class HealthcareBrewScraper(BaseScraper):
             sponsor_name,
             flags=re.IGNORECASE
         )
+        # Strip campaign subtitles (e.g., "Indeed - Careers in Care" -> "Indeed")
+        if ' - ' in sponsor_name:
+            sponsor_name = sponsor_name.split(' - ')[0].strip()
+        if ' | ' in sponsor_name:
+            sponsor_name = sponsor_name.split(' | ')[0].strip()
         sponsor_name = sponsor_name.strip()
 
         if not sponsor_name or len(sponsor_name) < 3 or len(sponsor_name) > 50:

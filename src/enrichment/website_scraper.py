@@ -433,6 +433,8 @@ def _generate_acronym_domains(domain: str) -> list[str]:
     """Generate acronym-based domain alternatives for long company names.
 
     E.g., projectmanagementinstitute.com -> pmi.org, pmi.com
+         thenationalunionofhealthcareworkers.com -> nuhw.org
+         thermofisherscientific.com -> thermofisher.com
     """
     base = domain.rsplit('.', 1)[0]  # Remove TLD
 
@@ -440,41 +442,73 @@ def _generate_acronym_domains(domain: str) -> list[str]:
     if len(base) < 15:
         return []
 
-    # Try to extract acronym from camelCase or word boundaries
-    # Split on common word boundaries
-    words = re.split(r'(?=[A-Z])|[-_]', base)
-    words = [w for w in words if w and len(w) > 0]
-
-    # If no clear word boundaries, try splitting on common words
-    if len(words) <= 1:
-        # Common word patterns in company names
-        word_patterns = [
-            'project', 'management', 'institute', 'international', 'association',
-            'american', 'national', 'health', 'medical', 'software', 'technology',
-            'solutions', 'services', 'group', 'corporation', 'company', 'systems'
-        ]
-        temp_base = base.lower()
-        words = []
-        for pattern in word_patterns:
-            if pattern in temp_base:
-                words.append(pattern)
-
-    if len(words) < 2:
-        return []
-
-    # Generate acronym from first letters
-    acronym = ''.join(w[0].lower() for w in words if w)
-
-    if len(acronym) < 2 or len(acronym) > 6:
-        return []
-
-    # Return possible domain variations
-    return [
-        f"{acronym}.org",
-        f"{acronym}.com",
-        f"{acronym}.io",
-        f"{acronym}.net",
+    # Dictionary of known words for splitting compound domains
+    known_words = [
+        # Articles/prepositions (excluded from acronym)
+        'the', 'of', 'and', 'for', 'in', 'on', 'at', 'to', 'by',
+        # Organization types
+        'project', 'management', 'institute', 'international', 'association',
+        'american', 'national', 'union', 'university', 'foundation',
+        'society', 'organization', 'federation', 'council', 'academy',
+        # Industry
+        'health', 'healthcare', 'medical', 'scientific', 'clinical',
+        'pharmaceutical', 'thermo', 'fisher', 'bio', 'pharma',
+        # Business
+        'software', 'technology', 'technologies', 'solutions', 'services',
+        'group', 'corporation', 'company', 'systems', 'business',
+        'talent', 'careers', 'consulting', 'digital', 'global',
+        # People
+        'workers', 'employees', 'professionals', 'nurses', 'doctors',
+        # State/location
+        'state', 'ohio', 'california', 'texas', 'new', 'york',
+        'north', 'south', 'east', 'west',
     ]
+
+    # Split domain into words using dictionary approach
+    articles_prepositions = {'the', 'of', 'and', 'for', 'in', 'on', 'at', 'to', 'by'}
+    temp_base = base.lower()
+
+    # Try splitting by finding known words in order
+    words = []
+    remaining = temp_base
+    while remaining:
+        found = False
+        # Sort by length descending to match longest words first
+        for word in sorted(known_words, key=len, reverse=True):
+            if remaining.startswith(word):
+                words.append(word)
+                remaining = remaining[len(word):]
+                found = True
+                break
+        if not found:
+            # Unknown segment — skip one character and try again
+            remaining = remaining[1:]
+
+    # Filter out articles/prepositions for acronym generation
+    acronym_words = [w for w in words if w not in articles_prepositions and len(w) > 1]
+
+    results = []
+
+    # Generate acronym from first letters of significant words
+    if len(acronym_words) >= 2:
+        acronym = ''.join(w[0].lower() for w in acronym_words)
+        if 2 <= len(acronym) <= 6:
+            results.extend([
+                f"{acronym}.org",
+                f"{acronym}.com",
+                f"{acronym}.io",
+                f"{acronym}.net",
+            ])
+
+    # Also try truncated domains (e.g., thermofisherscientific -> thermofisher)
+    # Join first N significant words to create shorter domain guesses
+    if len(acronym_words) >= 3:
+        for i in range(2, len(acronym_words)):
+            truncated = ''.join(acronym_words[:i])
+            if 5 <= len(truncated) <= 20 and truncated != base:
+                results.append(f"{truncated}.com")
+
+    return results
 
 
 class WebsiteScraper:
@@ -1140,6 +1174,9 @@ class WebsiteScraper:
         'crunchbase.com', 'glassdoor.com',
     }
 
+    # Partial domain matches — skip any domain containing these strings
+    SKIP_DOMAIN_KEYWORDS = {'linkedin', 'facebook', 'twitter', 'instagram', 'youtube', 'tiktok', 'walmart'}
+
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
         """Main scraping method with improved redirect handling."""
         domain_start_time = time.time()
@@ -1151,9 +1188,11 @@ class WebsiteScraper:
 
         # Skip domains that should never be scraped (social media, search engines, etc.)
         base_domain = domain.split('.')[-2] + '.' + domain.split('.')[-1] if '.' in domain else domain
-        if base_domain in self.SKIP_DOMAINS or domain in self.SKIP_DOMAINS:
+        domain_lower = domain.lower()
+        if (base_domain in self.SKIP_DOMAINS or domain in self.SKIP_DOMAINS or
+                any(kw in domain_lower for kw in self.SKIP_DOMAIN_KEYWORDS)):
             self._log(f"Skipping {domain} (non-scrapable domain)")
-            return WebsiteScrapeResult(domain=domain, contacts=[], raw_html="")
+            return WebsiteScrapeResult(domain=domain, contacts=[])
 
         original_domain = domain  # Track for redirect matching (e.g., projectmanagementinstitute.com)
         final_domain = domain

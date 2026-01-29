@@ -311,9 +311,8 @@ def load_scan_data():
 
 
 def save_scan_data(advertisers: list[dict]):
-    """Save scan data to disk."""
+    """Save scan data to disk (overwrites)."""
     try:
-        # Ensure output directory exists
         OUTPUT_DIR.mkdir(exist_ok=True)
 
         data = {
@@ -326,13 +325,10 @@ def save_scan_data(advertisers: list[dict]):
 
         add_log(f"  Saved {len(advertisers)} advertisers to {DATA_FILE.name}")
 
-        # Also save as CSV
         if advertisers:
             df = pd.DataFrame(advertisers)
             csv_path = OUTPUT_DIR / f"advertisers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             df.to_csv(csv_path, index=False)
-
-            # Also update latest.csv
             df.to_csv(OUTPUT_DIR / "latest.csv", index=False)
             add_log(f"  Saved CSV to {csv_path.name}")
         else:
@@ -342,6 +338,58 @@ def save_scan_data(advertisers: list[dict]):
         add_log(f"❌ Failed to save scan data: {e}", level="error")
         logger.error(f"Save failed: {e}")
         raise
+
+
+def merge_scan_data(new_advertisers: list[dict]) -> list[dict]:
+    """Merge new advertisers into existing data. Returns the merged list.
+
+    - New companies are added
+    - Existing companies are updated: contact info is kept if the new scan
+      didn't find contacts but a previous scan did
+    - Deduplicates by domain
+    """
+    existing = get_advertisers()
+    if not existing:
+        return new_advertisers
+
+    # Build lookup of existing advertisers by domain
+    existing_by_domain = {}
+    for adv in existing:
+        domain = adv.get("domain", "").lower()
+        if domain:
+            existing_by_domain[domain] = adv
+
+    # Merge: new scan results take priority, but preserve contacts from previous scans
+    merged = []
+    seen_domains = set()
+
+    for adv in new_advertisers:
+        domain = adv.get("domain", "").lower()
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+
+        # If new scan has contacts, use the new data
+        if adv.get("email_1"):
+            merged.append(adv)
+        elif domain in existing_by_domain and existing_by_domain[domain].get("email_1"):
+            # New scan found no contacts, but previous scan did — keep old contacts
+            old = existing_by_domain[domain].copy()
+            # Update non-contact fields from new scan (sector, sponsor_type, etc.)
+            for key in ["sector", "category", "sponsor_type", "company_name", "advertiser_name"]:
+                if adv.get(key):
+                    old[key] = adv[key]
+            merged.append(old)
+        else:
+            merged.append(adv)
+
+    # Add existing advertisers that weren't in the new scan
+    for domain, adv in existing_by_domain.items():
+        if domain not in seen_domains:
+            seen_domains.add(domain)
+            merged.append(adv)
+
+    return merged
 
 
 def get_advertisers() -> list[dict]:
@@ -486,18 +534,49 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
         add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
 
-        # Save Phase 1 results immediately (before Phase 2 which might hang/fail)
-        # This ensures we always have SOMETHING saved even if Phase 2 crashes
+        # Save Phase 1 results merged with existing data
+        # This ensures we accumulate advertisers across scans
         add_log("💾 Saving Phase 1 results...")
-        save_scan_data(unique)
+        phase1_merged = merge_scan_data(unique)
+        save_scan_data(phase1_merged)
 
         # ===== PHASE 2: Scrape company websites for contacts (PARALLEL) =====
         if unique:
-            add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies (parallel)...")
+            # Check which companies already have contacts from previous scans
+            existing_advertisers = get_advertisers()
+            existing_contacts = {}
+            for adv in existing_advertisers:
+                domain = adv.get("domain", "").lower()
+                if domain and adv.get("email_1"):
+                    existing_contacts[domain] = adv
+
+            # Split into: companies needing scraping vs already enriched
+            to_scrape = []
+            already_enriched = []
+            for idx, company in enumerate(unique):
+                domain = company.get("domain", "").lower()
+                if domain in existing_contacts:
+                    # Copy contact info from previous scan
+                    old = existing_contacts[domain]
+                    for i in range(1, 6):
+                        company[f"email_{i}"] = old.get(f"email_{i}", "")
+                        company[f"title_{i}"] = old.get(f"title_{i}", "")
+                        company[f"name_{i}"] = old.get(f"name_{i}", "")
+                    already_enriched.append(company)
+                else:
+                    to_scrape.append((idx, company))
+
+            if already_enriched:
+                add_log(f"📋 Skipping {len(already_enriched)} companies with existing contacts")
+
+            total_to_scrape = len(to_scrape)
+            total = len(unique)
+            add_log(f"🔍 Phase 2: Finding contact info for {total_to_scrape} new companies (parallel)...")
+            if total_to_scrape == 0:
+                add_log("  All companies already have contacts from previous scans!")
             update_status(current_action="Finding contacts")
 
-            total = len(unique)
-            completed = [0]  # Use list to allow mutation in nested function
+            completed = [len(already_enriched)]  # Start count from already enriched
             results_lock = threading.Lock()
 
             # Optimized: Reduced from 180s - still allows Deep Drill + Vision
@@ -588,18 +667,16 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
             import time
 
-            # Scale Phase 2 timeout based on company count:
-            # ~120s per company with 4 workers = 30s per company effective
-            # Minimum 12 minutes, scales up for larger batches
-            MAX_PHASE2_TIME = max(720, total * 30)
-            add_log(f"  Phase 2 timeout: {MAX_PHASE2_TIME}s for {total} companies")
+            # Scale Phase 2 timeout based on NEW companies to scrape
+            MAX_PHASE2_TIME = max(720, total_to_scrape * 30)
+            add_log(f"  Phase 2 timeout: {MAX_PHASE2_TIME}s for {total_to_scrape} companies")
             phase2_start = time.time()
 
             with ThreadPoolExecutor(max_workers=4) as pool:  # 4 workers for better throughput
-                # Submit all tasks
+                # Submit only NEW companies (skip already enriched)
                 futures = {
                     pool.submit(scrape_company, (idx, company)): (idx, company)
-                    for idx, company in enumerate(unique)
+                    for idx, company in to_scrape
                 }
                 pending = set(futures.keys())
 
@@ -672,10 +749,12 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
             else:
                 add_log(f"📊 Phase 2 complete: processed {total} companies")
 
-            # Save results with contacts (updates the Phase 1 save)
+            # Save results: merge with existing data (accumulate across scans)
             add_log("💾 Saving results with contacts...")
             update_status(current_action="Saving results")
-            save_scan_data(unique)
+            merged = merge_scan_data(unique)
+            save_scan_data(merged)
+            unique = merged  # Use merged data for summary stats
         else:
             add_log("⚠️ No companies found in Phase 1, skipping Phase 2")
 
