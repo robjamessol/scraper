@@ -527,6 +527,26 @@ def guess_domain_from_name(company_name: str) -> str | None:
     if not company_name:
         return None
 
+    # Known domain mappings for companies whose domain doesn't match their name
+    KNOWN_DOMAINS = {
+        "at&t": "att.com",
+        "at&t connected car": "att.com",
+        "project management institute": "pmi.org",
+        "the ohio state university": "osu.edu",
+        "ohio state university": "osu.edu",
+        "the national union of healthcare workers": "nuhw.org",
+        "national union of healthcare workers": "nuhw.org",
+        "thermo fisher scientific": "thermofisher.com",
+        "ge healthcare": "gehealthcare.com",
+        "wolters kluwer health": "wolterskluwer.com",
+        "wolters kluwer": "wolterskluwer.com",
+        "linkedin talent solutions": "linkedin.com",
+    }
+
+    name_lower = company_name.lower().strip()
+    if name_lower in KNOWN_DOMAINS:
+        return KNOWN_DOMAINS[name_lower]
+
     # Normalize: lowercase, remove spaces and special chars
     name = company_name.lower().strip()
 
