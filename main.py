@@ -8,6 +8,7 @@ and scores their fit for Renewal Weekly's audience.
 Usage:
     python main.py                          # Scan all active newsletters
     python main.py --newsletter healthcare_brew --limit 10
+    python main.py --domain newsletter.example.com --limit 20
     python main.py --list-newsletters
     python main.py --output my_advertisers.csv
 
@@ -23,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.scrapers import HealthcareBrewScraper, MorningBrewScraper, SponsorInfo
+from src.scrapers import HealthcareBrewScraper, MorningBrewScraper, GenericNewsletterScraper, SponsorInfo
 from src.enrichment import AdvertiserCategorizer
 from src.utils.config import load_config, get_env
 
@@ -59,6 +60,12 @@ Examples:
     # Scan all newsletters
     python main.py
 
+    # Scan a custom newsletter domain
+    python main.py --domain morningbrew.com --limit 20
+
+    # Scan with an archive URL
+    python main.py --domain thehustle.co --archive-url https://thehustle.co/archive --limit 10
+
     # Save to custom output file
     python main.py --output my_advertisers.csv
 
@@ -72,6 +79,18 @@ Examples:
         type=str,
         choices=list(SCRAPERS.keys()),
         help="Specific newsletter to scan (default: all active)",
+    )
+
+    parser.add_argument(
+        "--domain", "-d",
+        type=str,
+        help="Custom newsletter domain to scan (e.g., 'morningbrew.com')",
+    )
+
+    parser.add_argument(
+        "--archive-url",
+        type=str,
+        help="Archive URL for custom domain (e.g., 'https://example.com/archive')",
     )
 
     parser.add_argument(
@@ -129,6 +148,7 @@ def list_newsletters():
         print(f"    Archive: {config.get('archive_url', 'N/A')}")
         print(f"    Active: {config.get('active', True)}")
 
+    print("\n  + Any custom domain via --domain flag")
     print("\n")
 
 
@@ -162,6 +182,50 @@ def scan_newsletter(
 
     logger.info(f"Found {len(sponsors)} unique advertisers from {newsletter_id}")
     return sponsors
+
+
+def scan_custom_domain(
+    domain: str,
+    archive_url: str | None = None,
+    limit: int | None = None,
+    headless: bool = True,
+    timeout: int = 30000,
+) -> list[SponsorInfo]:
+    """
+    Scan a custom newsletter domain for advertisers.
+
+    Args:
+        domain: Newsletter domain
+        archive_url: Optional archive URL
+        limit: Maximum issues to scan
+        headless: Run browser headlessly
+        timeout: Page load timeout
+
+    Returns:
+        List of discovered sponsors
+    """
+    logger.info(f"Starting scan of custom domain: {domain}...")
+
+    with GenericNewsletterScraper(
+        domain=domain,
+        archive_url=archive_url,
+        headless=headless,
+        timeout=timeout,
+    ) as scraper:
+        issues = scraper.discover_all_issues(limit=limit)
+        logger.info(f"Found {len(issues)} issues from {domain}")
+
+        all_sponsors = []
+        for i, issue_url in enumerate(issues):
+            logger.info(f"  [{i+1}/{len(issues)}] {issue_url.split('/')[-1][:40]}...")
+            sponsors = scraper.scrape_issue(issue_url)
+            all_sponsors.extend(sponsors)
+            if sponsors:
+                for s in sponsors:
+                    logger.info(f"    Found: {s.advertiser_name}")
+
+    logger.info(f"Found {len(all_sponsors)} total sponsor mentions from {domain}")
+    return all_sponsors
 
 
 def enrich_sponsors(sponsors: list[SponsorInfo]) -> list[dict]:
@@ -250,29 +314,27 @@ def generate_summary(sponsors: list[dict]) -> str:
         summary.append(f"  - {source}: {count}")
 
     # By category
-    summary.append("\nBy Category:")
-    for cat, count in df["category"].value_counts().items():
-        summary.append(f"  - {cat}: {count}")
+    if "category" in df.columns:
+        summary.append("\nBy Category:")
+        for cat, count in df["category"].value_counts().items():
+            summary.append(f"  - {cat}: {count}")
 
     # By niche fit
-    summary.append("\nBy Niche Fit:")
-    for fit, count in df["niche_fit"].value_counts().items():
-        summary.append(f"  - {fit}: {count}")
+    if "niche_fit" in df.columns:
+        summary.append("\nBy Niche Fit:")
+        for fit, count in df["niche_fit"].value_counts().items():
+            summary.append(f"  - {fit}: {count}")
 
     # Top advertisers by confidence
-    summary.append("\nTop High-Confidence Advertisers:")
-    high_conf = df[df["confidence"] == "high"].head(10)
-    for _, row in high_conf.iterrows():
-        summary.append(
-            f"  - {row['advertiser_name']} ({row['category']}) - {row['niche_fit']}"
-        )
-
-    # High-fit advertisers
-    high_fit = df[df["niche_fit"].str.contains("High", na=False)]
-    if len(high_fit) > 0:
-        summary.append(f"\nHigh-Fit Advertisers ({len(high_fit)} total):")
-        for _, row in high_fit.head(10).iterrows():
-            summary.append(f"  - {row['advertiser_name']} ({row['advertiser_domain']})")
+    if "confidence" in df.columns:
+        summary.append("\nTop High-Confidence Advertisers:")
+        high_conf = df[df["confidence"] == "high"].head(10)
+        for _, row in high_conf.iterrows():
+            cat = row.get("category", "?")
+            fit = row.get("niche_fit", "?")
+            summary.append(
+                f"  - {row['advertiser_name']} ({cat}) - {fit}"
+            )
 
     summary.append("\n" + "=" * 60)
 
@@ -299,31 +361,49 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"output/advertisers_{timestamp}.csv"
 
-    # Determine which newsletters to scan
-    if args.newsletter:
-        newsletters_to_scan = [args.newsletter]
-    else:
-        newsletters_to_scan = list(SCRAPERS.keys())
-
     # Scan newsletters
     all_sponsors = []
 
-    for newsletter_id in newsletters_to_scan:
+    if args.domain:
+        # Custom domain scan
         try:
-            sponsors = scan_newsletter(
-                newsletter_id,
+            sponsors = scan_custom_domain(
+                domain=args.domain,
+                archive_url=args.archive_url,
                 limit=args.limit,
                 headless=not args.no_headless,
                 timeout=args.timeout,
             )
             all_sponsors.extend(sponsors)
-
         except Exception as e:
-            logger.error(f"Error scanning {newsletter_id}: {e}")
+            logger.error(f"Error scanning {args.domain}: {e}")
             if args.verbose:
                 import traceback
                 traceback.print_exc()
-            continue
+            return 1
+    else:
+        # Built-in newsletter scan
+        if args.newsletter:
+            newsletters_to_scan = [args.newsletter]
+        else:
+            newsletters_to_scan = list(SCRAPERS.keys())
+
+        for newsletter_id in newsletters_to_scan:
+            try:
+                sponsors = scan_newsletter(
+                    newsletter_id,
+                    limit=args.limit,
+                    headless=not args.no_headless,
+                    timeout=args.timeout,
+                )
+                all_sponsors.extend(sponsors)
+
+            except Exception as e:
+                logger.error(f"Error scanning {newsletter_id}: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                continue
 
     if not all_sponsors:
         logger.warning("No advertisers found!")
