@@ -951,6 +951,13 @@ async def api_add_custom_domain(request: Request):
     if not domain:
         raise HTTPException(400, detail="Domain is required")
 
+    # Clean domain the same way the DB does, so we return the stored value
+    if domain.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        domain = urlparse(domain).netloc
+    if domain.startswith("www."):
+        domain = domain[4:]
+
     if db.add_custom_domain(domain, company_name, domain_type="company"):
         return {"message": f"Added {domain}", "domain": domain}
     else:
@@ -978,6 +985,23 @@ async def scan_custom_domains(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(process_custom_domains, unscanned)
     return {"message": f"Scanning {len(unscanned)} custom domains", "count": len(unscanned)}
+
+
+@app.post("/api/custom-domains/{domain}/scan")
+async def scan_single_custom_domain(domain: str, background_tasks: BackgroundTasks):
+    """Scan a single custom company domain for contacts."""
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="A scan is already in progress")
+
+    # Find this domain in the database
+    all_domains = db.get_custom_domains(domain_type="company")
+    match = next((d for d in all_domains if d["domain"] == domain), None)
+
+    if not match:
+        raise HTTPException(404, detail=f"Domain {domain} not found")
+
+    background_tasks.add_task(process_custom_domains, [match])
+    return {"message": f"Scanning {domain}"}
 
 
 def process_custom_domains(domains: list[dict]):

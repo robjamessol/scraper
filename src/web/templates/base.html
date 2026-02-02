@@ -574,6 +574,20 @@
                     domainInput.value = '';
                     companyInput.value = '';
                     loadCustomDomains();
+
+                    // Auto-scan this single domain
+                    const addedDomain = data.domain;
+                    const scanRes = await fetch(`/api/custom-domains/${encodeURIComponent(addedDomain)}/scan`, { method: 'POST' });
+                    if (scanRes.ok) {
+                        const panel = document.getElementById('progressPanel');
+                        if (panel) {
+                            panel.classList.remove('hidden');
+                            const logOutput = document.getElementById('logOutput');
+                            if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Scanning ' + addedDomain + '...</div>';
+                        }
+                        logIndex = 0;
+                        startPolling();
+                    }
                 } else {
                     alert('Error: ' + data.detail);
                 }
