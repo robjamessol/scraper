@@ -204,21 +204,41 @@
     </div>
 </div>
 
-<!-- Custom Domains Section -->
+<!-- Scan Newsletter Section -->
 <div class="bg-gray-900 rounded p-4 border border-gray-800 mb-4">
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-lg font-semibold text-gray-100">Add Custom Websites</h2>
-        <button onclick="scanCustomDomains()" id="customScanBtn" class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
-            Scan All
+        <h2 class="text-lg font-semibold text-gray-100">Scan Newsletter</h2>
+    </div>
+    <p class="text-gray-400 text-xs mb-3">Paste a newsletter archive URL to discover sponsors and their contact info.</p>
+    <div class="flex space-x-2 mb-3">
+        <input type="text" id="newsletterUrl" placeholder="https://www.morningbrew.com/archive"
+               class="flex-1 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
+        <input type="text" id="newsletterName" placeholder="Name (optional)"
+               class="w-40 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
+        <input type="number" id="newsletterLimit" placeholder="Issues" value="10" min="1" max="200"
+               class="w-20 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
+        <button onclick="scanNewsletter()" id="scanNewsletterBtn" class="bg-green-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-green-500 disabled:opacity-50">
+            Scan
         </button>
     </div>
+    <div id="newsletterSourcesList" class="space-y-1 max-h-40 overflow-y-auto">
+        <!-- Newsletter sources will be populated here -->
+    </div>
+</div>
+
+<!-- Custom Company Domains Section -->
+<div class="bg-gray-900 rounded p-4 border border-gray-800 mb-4">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-100">Scan Company Website</h2>
+    </div>
+    <p class="text-gray-400 text-xs mb-3">Add a company domain to find their contact info directly.</p>
     <div class="flex space-x-2 mb-3">
         <input type="text" id="customDomain" placeholder="example.com"
                class="flex-1 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
         <input type="text" id="customCompany" placeholder="Company Name (optional)"
                class="w-48 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none">
         <button onclick="addCustomDomain()" class="bg-green-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-green-500">
-            Add
+            Scan
         </button>
     </div>
     <div id="customDomainsList" class="space-y-1 max-h-32 overflow-y-auto">

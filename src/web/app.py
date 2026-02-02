@@ -1129,6 +1129,57 @@ async def api_add_newsletter_source(request: Request):
         raise HTTPException(400, detail=f"Newsletter source {domain} already exists")
 
 
+@app.post("/api/newsletter-sources/add-and-scan")
+async def api_add_and_scan_newsletter(request: Request, background_tasks: BackgroundTasks):
+    """Add a newsletter source and immediately start scanning it for sponsors.
+
+    Accepts either a full archive URL or just a domain.
+    The URL is used as the archive page to discover issues.
+    """
+    data = await request.json()
+    url = (data.get("url") or "").strip()
+    name = (data.get("name") or "").strip()
+    limit = data.get("limit")
+
+    if not url:
+        raise HTTPException(400, detail="URL is required")
+
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="A scan is already in progress")
+
+    # Parse the URL to get the domain and preserve the full URL as archive_url
+    from urllib.parse import urlparse
+
+    # Add scheme if missing
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    archive_url = url  # Use the full URL as the archive page
+
+    if not name:
+        name = domain.split(".")[0].replace("-", " ").title()
+
+    # Add to database (ignore if already exists)
+    db.add_newsletter_source(name, domain, archive_url)
+    # Update archive URL in case it already existed with a different one
+    db.update_newsletter_source(domain, archive_url=archive_url)
+
+    # Build the source dict and start scanning
+    source = {
+        "name": name,
+        "domain": domain,
+        "archive_url": archive_url,
+    }
+
+    background_tasks.add_task(process_newsletter_sources, [source], limit)
+    return {"message": f"Scanning {name} ({archive_url})", "domain": domain}
+
+
 @app.delete("/api/newsletter-sources/{domain}")
 async def api_remove_newsletter_source(domain: str):
     """Remove a newsletter source."""

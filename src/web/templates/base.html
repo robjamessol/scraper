@@ -522,7 +522,125 @@
             }
         }
 
-        // ===== Custom Domains Functions =====
+        // ===== Newsletter Source Functions =====
+        async function loadNewsletterSources() {
+            try {
+                const res = await fetch('/api/newsletter-sources');
+                const data = await res.json();
+                const listEl = document.getElementById('newsletterSourcesList');
+                if (listEl && data.sources) {
+                    if (data.sources.length === 0) {
+                        listEl.innerHTML = '<p class="text-gray-500 text-sm">No newsletters scanned yet</p>';
+                    } else {
+                        listEl.innerHTML = data.sources.map(s => `
+                            <div class="flex items-center justify-between bg-gray-800 px-3 py-1.5 rounded text-sm">
+                                <div>
+                                    <span class="text-gray-200">${escapeHtml(s.name)}</span>
+                                    <span class="text-gray-500 ml-2">${escapeHtml(s.domain)}</span>
+                                    ${s.last_scanned ? '<span class="text-green-500 ml-1">&#10003;</span>' : ''}
+                                    ${s.total_issues_found ? '<span class="text-gray-500 ml-2">' + s.total_issues_found + ' issues</span>' : ''}
+                                    ${s.total_sponsors_found ? '<span class="text-gray-500 ml-1">' + s.total_sponsors_found + ' sponsors</span>' : ''}
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <button onclick="rescanNewsletter('${s.domain}')" class="text-indigo-400 hover:text-indigo-300 text-xs">rescan</button>
+                                    <button onclick="removeNewsletterSource('${s.domain}')" class="text-red-400 hover:text-red-300 text-xs">&#10005;</button>
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                }
+                return data;
+            } catch (e) {
+                console.error('Error loading newsletter sources:', e);
+                return { count: 0, sources: [] };
+            }
+        }
+
+        async function scanNewsletter() {
+            const urlInput = document.getElementById('newsletterUrl');
+            const nameInput = document.getElementById('newsletterName');
+            const limitInput = document.getElementById('newsletterLimit');
+            const url = urlInput.value.trim();
+            const name = nameInput.value.trim();
+            const limit = parseInt(limitInput.value) || 10;
+
+            if (!url) {
+                alert('Please enter a newsletter URL');
+                return;
+            }
+
+            const btn = document.getElementById('scanNewsletterBtn');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+
+            try {
+                const res = await fetch('/api/newsletter-sources/add-and-scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, name: name || null, limit })
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    urlInput.value = '';
+                    nameInput.value = '';
+                    loadNewsletterSources();
+
+                    // Show progress panel
+                    const panel = document.getElementById('progressPanel');
+                    if (panel) {
+                        panel.classList.remove('hidden');
+                        const logOutput = document.getElementById('logOutput');
+                        if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">' + escapeHtml(data.message) + '</div>';
+                    }
+                    logIndex = 0;
+                    startPolling();
+                } else {
+                    alert('Error: ' + (data.detail || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Scan';
+            }
+        }
+
+        async function rescanNewsletter(domain) {
+            if (scanStatus === 'running') {
+                alert('A scan is already running');
+                return;
+            }
+            try {
+                const res = await fetch(`/api/newsletter-sources/${encodeURIComponent(domain)}/scan`, { method: 'POST' });
+                if (res.ok) {
+                    const panel = document.getElementById('progressPanel');
+                    if (panel) {
+                        panel.classList.remove('hidden');
+                        const logOutput = document.getElementById('logOutput');
+                        if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Rescanning ' + domain + '...</div>';
+                    }
+                    logIndex = 0;
+                    startPolling();
+                } else {
+                    const data = await res.json();
+                    alert('Error: ' + (data.detail || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function removeNewsletterSource(domain) {
+            try {
+                await fetch(`/api/newsletter-sources/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+                loadNewsletterSources();
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        // ===== Custom Company Domain Functions =====
         async function loadCustomDomains() {
             try {
                 const res = await fetch('/api/custom-domains');
@@ -530,16 +648,16 @@
                 const listEl = document.getElementById('customDomainsList');
                 if (listEl && data.domains) {
                     if (data.domains.length === 0) {
-                        listEl.innerHTML = '<p class="text-gray-500 text-sm">No custom domains added yet</p>';
+                        listEl.innerHTML = '<p class="text-gray-500 text-sm">No company domains scanned yet</p>';
                     } else {
                         listEl.innerHTML = data.domains.map(d => `
                             <div class="flex items-center justify-between bg-gray-800 px-3 py-1.5 rounded text-sm">
                                 <div>
                                     <span class="text-gray-200">${escapeHtml(d.domain)}</span>
                                     <span class="text-gray-500 ml-2">${escapeHtml(d.company_name)}</span>
-                                    ${d.scanned ? '<span class="text-green-500 ml-2">✓</span>' : ''}
+                                    ${d.scanned ? '<span class="text-green-500 ml-2">&#10003;</span>' : ''}
                                 </div>
-                                <button onclick="removeCustomDomain('${d.domain}')" class="text-red-400 hover:text-red-300 text-xs">✕</button>
+                                <button onclick="removeCustomDomain('${d.domain}')" class="text-red-400 hover:text-red-300 text-xs">&#10005;</button>
                             </div>
                         `).join('');
                     }
@@ -575,7 +693,7 @@
                     companyInput.value = '';
                     loadCustomDomains();
 
-                    // Auto-scan this single domain
+                    // Auto-scan this single domain for contacts
                     const addedDomain = data.domain;
                     const scanRes = await fetch(`/api/custom-domains/${encodeURIComponent(addedDomain)}/scan`, { method: 'POST' });
                     if (scanRes.ok) {
@@ -583,7 +701,7 @@
                         if (panel) {
                             panel.classList.remove('hidden');
                             const logOutput = document.getElementById('logOutput');
-                            if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Scanning ' + addedDomain + '...</div>';
+                            if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Scanning ' + addedDomain + ' for contacts...</div>';
                         }
                         logIndex = 0;
                         startPolling();
@@ -605,44 +723,11 @@
             }
         }
 
-        async function scanCustomDomains() {
-            const data = await loadCustomDomains();
-            const unscanned = data.domains.filter(d => !d.scanned);
-
-            if (unscanned.length === 0) {
-                alert('All custom domains have been scanned!');
-                return;
-            }
-
-            if (!confirm(`Scan ${unscanned.length} custom domain(s)?`)) return;
-
-            try {
-                const res = await fetch('/api/custom-domains/scan', { method: 'POST' });
-                const result = await res.json();
-
-                if (res.ok) {
-                    // Show progress panel
-                    const panel = document.getElementById('progressPanel');
-                    if (panel) {
-                        panel.classList.remove('hidden');
-                        const logOutput = document.getElementById('logOutput');
-                        if (logOutput) logOutput.innerHTML = '<div class="text-gray-500">Starting custom scan...</div>';
-                    }
-
-                    logIndex = 0;
-                    startPolling();
-                } else {
-                    alert('Error: ' + result.detail);
-                }
-            } catch (e) {
-                alert('Error starting scan: ' + e.message);
-            }
-        }
-
         // Load data on page load
         document.addEventListener('DOMContentLoaded', () => {
             loadRetryQueue();
             loadCustomDomains();
+            loadNewsletterSources();
         });
     </script>
 </body>
