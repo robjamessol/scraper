@@ -146,27 +146,44 @@ class GenericNewsletterScraper(BaseScraper):
         try:
             html = self._load_page(page, archive_url)
 
-            # Try to find a dedicated archive page first
-            archive_page_url = self._find_archive_page(html, archive_url)
-            if archive_page_url and archive_page_url != archive_url:
-                self._log(f"Found archive page: {archive_page_url}")
-                html = self._load_page(page, archive_page_url)
+            # Only look for a different archive page if the user didn't
+            # already give us a URL that looks like an archive
+            current_path = urlparse(archive_url).path.lower()
+            is_already_archive = any(
+                kw in current_path
+                for kw in ["/archive", "/issues", "/past-issues", "/all-issues", "/editions"]
+            )
 
-            # Scroll to load more content
-            self._scroll_to_load_all(page, max_scrolls=30, wait_ms=800)
+            if not is_already_archive:
+                archive_page_url = self._find_archive_page(html, archive_url)
+                if archive_page_url and archive_page_url != archive_url:
+                    self._log(f"Found archive page: {archive_page_url}")
+                    html = self._load_page(page, archive_page_url)
+            else:
+                archive_page_url = None
+
+            # Extra wait for JS-heavy pages (like Morning Brew)
+            page.wait_for_timeout(2000)
+
+            # Scroll to load more content (generous wait for lazy loading)
+            self._scroll_to_load_all(page, max_scrolls=30, wait_ms=1500)
 
             # Try clicking "Load More" / "Show More" buttons
             self._click_load_more(page)
+
+            # If we clicked load-more, scroll again to catch new content
+            self._scroll_to_load_all(page, max_scrolls=10, wait_ms=1500)
 
             # Re-get HTML after scrolling/clicking
             html = page.content()
 
             # Extract issue links
-            issues = self._extract_issue_links(html, archive_page_url or archive_url)
+            effective_url = archive_page_url or archive_url
+            issues = self._extract_issue_links(html, effective_url)
 
             if not issues:
                 self._log("No issues found via pattern matching, trying Claude...", "warning")
-                issues = self._discover_issues_with_claude(html, archive_page_url or archive_url)
+                issues = self._discover_issues_with_claude(html, effective_url)
 
             # Deduplicate and limit
             seen = set()
@@ -189,18 +206,28 @@ class GenericNewsletterScraper(BaseScraper):
             page.context.close()
 
     def _find_archive_page(self, html: str, base_url: str) -> str | None:
-        """Look for a link to an archive/all-issues page."""
+        """Look for a link to an archive/all-issues page (not individual issues)."""
         soup = BeautifulSoup(html, "lxml")
+        # Only match archive listing pages, NOT individual issue URLs
         archive_patterns = [
-            r"/archive", r"/issues", r"/past-issues", r"/all-issues",
+            r"/archive", r"/past-issues", r"/all-issues",
             r"/newsletter/archive", r"/newsletters", r"/editions",
             r"/back-issues", r"/previous", r"/history",
         ]
+
+        # Patterns that indicate an individual issue (not an archive listing)
+        individual_issue_indicators = re.compile(
+            r'/(?:issues?|p|posts?)/[a-z0-9][\w-]{5,}', re.IGNORECASE
+        )
 
         for a in soup.find_all("a", href=True):
             href = a.get("href", "")
             text = a.get_text().lower().strip()
             full_url = urljoin(base_url, href)
+
+            # Skip if this looks like a single issue URL
+            if individual_issue_indicators.search(href):
+                continue
 
             # Check URL patterns
             for pattern in archive_patterns:
@@ -247,31 +274,37 @@ class GenericNewsletterScraper(BaseScraper):
         """
         Extract issue links using common newsletter archive patterns.
 
-        Looks for:
-        - Links with date-like patterns in URL
-        - Links in archive-style containers
-        - Links with issue/edition/post in URL
+        Uses two strategies:
+        1. Regex patterns for known issue URL structures
+        2. Heuristic: find the most common link path prefix (archives tend to
+           have many links sharing the same prefix like /daily/issues/)
         """
         soup = BeautifulSoup(html, "lxml")
         parsed_base = urlparse(base_url)
         base_domain = parsed_base.netloc
 
-        # Common issue URL patterns
+        # Common issue URL patterns (applied via search, so they match anywhere in the path)
         issue_patterns = [
             # Date-based: /2024/01/15/title or /issues/2024-01-15
             re.compile(r'/\d{4}/\d{1,2}/\d{1,2}/'),
             re.compile(r'/\d{4}-\d{1,2}-\d{1,2}'),
-            # Issue/edition/post slugs
-            re.compile(r'/(?:issues?|editions?|posts?|p|newsletters?)/[a-z0-9][\w-]+', re.IGNORECASE),
+            # Issue/edition/post slugs (with optional path prefix like /daily/issues/slug)
+            re.compile(r'/(?:issues?|editions?|posts?|p|newsletters?)/[a-z0-9][\w-]{3,}', re.IGNORECASE),
             # Substack pattern: /p/slug-title
-            re.compile(r'/p/[\w-]+'),
-            # beehiiv pattern
             re.compile(r'/p/[\w-]+'),
             # Ghost/WordPress pattern
             re.compile(r'/(?:ghost|blog)/[\w-]+'),
         ]
 
-        issue_urls = []
+        skip_patterns = [
+            "/tag/", "/category/", "/author/", "/page/",
+            "/login", "/signup", "/subscribe", "/account",
+            "/about", "/contact", "/privacy", "/terms",
+            "/search", "/feed", "/rss", "/archive",
+        ]
+
+        # Collect all same-domain internal links with their paths
+        all_internal_links = []  # (full_url, path)
         seen = set()
 
         for a in soup.find_all("a", href=True):
@@ -287,22 +320,57 @@ class GenericNewsletterScraper(BaseScraper):
                 continue
 
             # Skip obvious non-issue pages
-            skip_patterns = [
-                "/tag/", "/category/", "/author/", "/page/",
-                "/login", "/signup", "/subscribe", "/account",
-                "/about", "/contact", "/privacy", "/terms",
-                "/search", "/feed", "/rss",
-            ]
             if any(skip in parsed.path.lower() for skip in skip_patterns):
                 continue
 
-            # Check against issue patterns
+            # Skip very short paths (like "/" or "/daily")
+            path = parsed.path.rstrip("/")
+            if path.count("/") < 2:
+                continue
+
+            if full_url not in seen:
+                seen.add(full_url)
+                all_internal_links.append((full_url, path))
+
+        # Strategy 1: Pattern matching
+        issue_urls = []
+        pattern_matched = set()
+
+        for full_url, path in all_internal_links:
             for pattern in issue_patterns:
-                if pattern.search(parsed.path):
-                    if full_url not in seen:
-                        seen.add(full_url)
-                        issue_urls.append(full_url)
+                if pattern.search(path):
+                    pattern_matched.add(full_url)
+                    issue_urls.append(full_url)
                     break
+
+        # Strategy 2: Path prefix heuristic
+        # If many links share the same prefix (e.g., /daily/issues/), those are likely issues
+        if len(issue_urls) < 5:
+            prefix_counts = {}
+            for full_url, path in all_internal_links:
+                # Extract prefix: everything up to and including the second-to-last "/"
+                # e.g., "/daily/issues/some-slug" -> "/daily/issues/"
+                parts = path.rstrip("/").rsplit("/", 1)
+                if len(parts) == 2 and parts[0]:
+                    prefix = parts[0] + "/"
+                    if prefix not in prefix_counts:
+                        prefix_counts[prefix] = []
+                    prefix_counts[prefix].append(full_url)
+
+            # Find the most common prefix with at least 3 links
+            best_prefix = None
+            best_count = 0
+            for prefix, urls in prefix_counts.items():
+                if len(urls) > best_count and len(urls) >= 3:
+                    best_count = len(urls)
+                    best_prefix = prefix
+
+            if best_prefix and best_count > len(issue_urls):
+                self._log(f"Heuristic: found {best_count} links with prefix '{best_prefix}'")
+                # Use prefix-based links, adding any not already found
+                for full_url in prefix_counts[best_prefix]:
+                    if full_url not in pattern_matched:
+                        issue_urls.append(full_url)
 
         return issue_urls
 
@@ -452,23 +520,30 @@ Which of these are links to individual newsletter issues?"""
                 if link_text and href:
                     links_context.append(f"[{link_text}]({href})")
 
-            links_text = "\n".join(links_context[:100])
+            links_text = "\n".join(links_context[:200])
 
-            system_prompt = """You are an expert at identifying sponsors and advertisers in newsletter content.
+            system_prompt = """You are an expert at identifying sponsors and advertisers in newsletter emails.
 
 Analyze the newsletter issue and find ALL sponsors/advertisers. Look for:
 1. "Presented by", "Sponsored by", "Together with", "Brought to you by" sections
-2. Clearly marked ad sections or sponsored content
-3. "A message from [Company]" blocks
+2. Clearly marked ad sections or sponsored content blocks
+3. "A message from [Company]" or "A word from [Company]" blocks
 4. Partner/sponsor logos or callouts
-5. Affiliate product recommendations with tracking links
-6. Native advertising (advertorial content that promotes a product/service)
+5. Sections that pitch a product or service with a call-to-action (CTA) link
+6. Native advertising — advertorial content that promotes a product/service
+7. Affiliate product recommendations with tracking links
+8. Short ad blocks between editorial sections (common in daily digest newsletters)
+
+IMPORTANT: Many newsletters have 2-5 sponsors per issue placed between editorial sections.
+Each sponsor section typically has: a company name, a pitch paragraph, and a CTA link.
+Do NOT skip sponsor blocks just because they look like editorial content — if they
+promote a specific product/service with a link, they are likely sponsors.
 
 For each sponsor, extract:
-- company_name: The advertiser's name
+- company_name: The advertiser's name (the company being promoted, NOT the newsletter)
 - placement_type: One of: presented_by, together_with, sponsored_by, partnership, sponsored_message, powered_by, native_ad, affiliate_link, inline_mention
 - ad_copy: The actual ad text/copy (first 200 chars)
-- landing_url: The URL the ad links to (if found)
+- landing_url: The URL the ad links to (if found in the links list)
 
 Respond ONLY with valid JSON:
 {
@@ -482,21 +557,22 @@ Respond ONLY with valid JSON:
     ]
 }
 
-Return {"sponsors": []} if no sponsors found. Do NOT hallucinate sponsors that aren't there."""
+Return {"sponsors": []} if no sponsors found. Do NOT hallucinate sponsors."""
 
-            content_preview = text[:6000]
-            if len(text) > 6000:
-                content_preview += "\n...[content truncated]...\n" + text[-2000:]
+            # Send more content to Claude — newsletters can be long
+            content_preview = text[:10000]
+            if len(text) > 10000:
+                content_preview += "\n...[middle content truncated]...\n" + text[-3000:]
 
             user_prompt = f"""Newsletter issue URL: {issue_url}
 
-Content:
+=== NEWSLETTER TEXT CONTENT ===
 {content_preview}
 
-Links found in issue:
+=== LINKS FOUND IN ISSUE ===
 {links_text}
 
-Identify all sponsors and advertisers in this newsletter issue."""
+Identify all sponsors and advertisers in this newsletter issue. Look carefully for ad blocks between editorial sections."""
 
             response = agent._call_api(system_prompt, user_prompt, max_tokens=1500)
             agent.close()
