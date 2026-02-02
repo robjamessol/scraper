@@ -945,8 +945,8 @@ async def get_custom_domains_list():
 async def api_add_custom_domain(request: Request):
     """Add a custom company domain to scan for contacts."""
     data = await request.json()
-    domain = data.get("domain", "").strip()
-    company_name = data.get("company_name", "").strip() or None
+    domain = (data.get("domain") or "").strip()
+    company_name = (data.get("company_name") or "").strip() or None
 
     if not domain:
         raise HTTPException(400, detail="Domain is required")
@@ -1082,9 +1082,9 @@ async def get_newsletter_sources():
 async def api_add_newsletter_source(request: Request):
     """Add a custom newsletter domain to scan for sponsors."""
     data = await request.json()
-    domain = data.get("domain", "").strip()
-    name = data.get("name", "").strip()
-    archive_url = data.get("archive_url", "").strip() or None
+    domain = (data.get("domain") or "").strip()
+    name = (data.get("name") or "").strip()
+    archive_url = (data.get("archive_url") or "").strip() or None
 
     if not domain:
         raise HTTPException(400, detail="Domain is required")
