@@ -1347,33 +1347,69 @@ def process_newsletter_sources(sources: list[dict], limit: int | None = None):
                     unique.append(s)
 
             add_log(f"Found {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
-            db.bulk_upsert_advertisers(unique)
-            save_csv_export(unique)
 
-            # Phase 2: Contact scraping for new sponsors
-            add_log(f"Phase 2: Finding contacts for new companies...")
+            # Save Phase 1 results to database
+            add_log("Saving Phase 1 results...")
+            db.bulk_upsert_advertisers(unique)
+
+            # ===== PHASE 2: Scrape company websites for contacts (PARALLEL) =====
+            # Check which companies already have contacts
+            existing_advertisers = db.get_advertisers()
+            existing_contacts = {}
+            for adv in existing_advertisers:
+                adv_domain = (adv.get("domain") or "").lower()
+                if adv_domain and adv.get("email_1"):
+                    existing_contacts[adv_domain] = adv
+
+            to_scrape = []
+            already_enriched = []
+            for idx, company in enumerate(unique):
+                comp_domain = (company.get("domain") or "").lower()
+                if comp_domain in existing_contacts:
+                    old = existing_contacts[comp_domain]
+                    for ci in range(1, 6):
+                        company[f"email_{ci}"] = old.get(f"email_{ci}", "")
+                        company[f"title_{ci}"] = old.get(f"title_{ci}", "")
+                        company[f"name_{ci}"] = old.get(f"name_{ci}", "")
+                    already_enriched.append(company)
+                else:
+                    to_scrape.append((idx, company))
+
+            if already_enriched:
+                add_log(f"Skipping {len(already_enriched)} companies with existing contacts")
+
+            total_to_scrape = len(to_scrape)
+            total = len(unique)
+            add_log(f"Phase 2: Finding contact info for {total_to_scrape} new companies (parallel)...")
+            if total_to_scrape == 0:
+                add_log("  All companies already have contacts from previous scans!")
             update_status(current_action="Finding contacts")
 
-            # Only scrape companies we don't have contacts for yet
-            existing = {a.get("domain"): a for a in db.get_advertisers() if a.get("email_1")}
-            companies_needing_contacts = [c for c in unique if c.get("domain") and c["domain"] not in existing]
+            completed = [len(already_enriched)]
+            results_lock = threading.Lock()
+            DOMAIN_TIMEOUT = 120
 
-            for idx, company in enumerate(companies_needing_contacts):
+            def scrape_company_ns(idx_company):
                 if is_scan_cancelled():
-                    break
+                    return
 
-                domain = company.get("domain")
+                idx, company = idx_company
+                comp_domain = company.get("domain")
                 name = company.get("company_name", "Unknown")
 
-                add_log(f"  [{idx+1}/{len(companies_needing_contacts)}] {domain}...")
-                update_status(
-                    current_action=f"Finding contacts ({idx+1}/{len(companies_needing_contacts)})",
-                    progress=50 + int((idx / max(len(companies_needing_contacts), 1)) * 50),
-                )
+                if not comp_domain:
+                    add_log(f"  [{idx+1}/{total}] {name} - no domain, skipping")
+                    for ci in range(5):
+                        company[f"email_{ci+1}"] = ""
+                        company[f"title_{ci+1}"] = ""
+                        company[f"name_{ci+1}"] = ""
+                    return
 
-                scraper = None
+                add_log(f"  [{idx+1}/{total}] {comp_domain}...")
+
+                ws_scraper = None
                 try:
-                    scraper = WebsiteScraper(
+                    ws_scraper = WebsiteScraper(
                         timeout=10.0,
                         max_pages=10,
                         use_browser=True,
@@ -1381,7 +1417,7 @@ def process_newsletter_sources(sources: list[dict], limit: int | None = None):
                         log_callback=add_log,
                         cancel_check=is_scan_cancelled,
                     )
-                    result = scraper.scrape_domain(domain, company_name=name)
+                    result = ws_scraper.scrape_domain(comp_domain, company_name=name)
 
                     contact_count = 0
                     if result and result.contacts:
@@ -1397,24 +1433,117 @@ def process_newsletter_sources(sources: list[dict], limit: int | None = None):
                         company[f"title_{ci+1}"] = ""
                         company[f"name_{ci+1}"] = ""
 
-                    db.upsert_advertiser(company)
-
                     if contact_count > 0:
-                        add_log(f"    {domain}: Found {contact_count} contact(s)")
+                        add_log(f"    {comp_domain}: Found {contact_count} contact(s)")
                     else:
-                        add_log(f"    {domain}: No contacts found")
-                        db.add_to_retry_queue(domain, name, "No contacts found", company.copy())
+                        add_log(f"    {comp_domain}: No contacts found")
+                        db.add_to_retry_queue(comp_domain, name, "No contacts found", company.copy())
 
                 except Exception as e:
-                    add_log(f"    {domain}: {str(e)[:50]}", level="error")
-                    db.add_to_retry_queue(domain, name, str(e)[:100], company.copy())
+                    add_log(f"    {comp_domain}: {str(e)[:50]}", level="error")
+                    db.add_to_retry_queue(comp_domain, name, str(e)[:100], company.copy())
+                    for ci in range(5):
+                        company[f"email_{ci+1}"] = ""
+                        company[f"title_{ci+1}"] = ""
+                        company[f"name_{ci+1}"] = ""
                 finally:
-                    if scraper:
+                    if ws_scraper:
                         try:
-                            scraper.close()
-                            scraper.close_thread_browser()
+                            ws_scraper.close()
+                            ws_scraper.close_thread_browser()
                         except Exception:
                             pass
+
+                    with results_lock:
+                        completed[0] += 1
+                        update_status(
+                            current_action=f"Finding contacts ({completed[0]}/{total})",
+                            progress=50 + int((completed[0] / max(total, 1)) * 50),
+                        )
+
+            if to_scrape:
+                from concurrent.futures import wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
+                import time
+
+                MAX_PHASE2_TIME = max(720, total_to_scrape * 30)
+                add_log(f"  Phase 2 timeout: {MAX_PHASE2_TIME}s for {total_to_scrape} companies")
+                phase2_start = time.time()
+
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = {
+                        pool.submit(scrape_company_ns, (idx, company)): (idx, company)
+                        for idx, company in to_scrape
+                    }
+                    pending = set(futures.keys())
+
+                    cancelled_during_phase2 = False
+                    timed_out = False
+
+                    while pending:
+                        if is_scan_cancelled():
+                            add_log("Stopping contact scraping due to cancellation...")
+                            cancelled_during_phase2 = True
+                            for f in pending:
+                                f.cancel()
+                            break
+
+                        elapsed = time.time() - phase2_start
+                        if elapsed > MAX_PHASE2_TIME:
+                            add_log(f"Phase 2 time limit reached ({int(elapsed)}s), finishing up...", level="warning")
+                            timed_out = True
+                            for f in pending:
+                                f.cancel()
+                            for f in pending:
+                                idx, company = futures[f]
+                                comp_domain = company.get("domain", "unknown")
+                                name = company.get("company_name", "Unknown")
+                                db.add_to_retry_queue(comp_domain, name, "Phase 2 time limit reached", company.copy())
+                                for ci in range(5):
+                                    company[f"email_{ci+1}"] = ""
+                                    company[f"title_{ci+1}"] = ""
+                                    company[f"name_{ci+1}"] = ""
+                            break
+
+                        remaining_time = max(10, MAX_PHASE2_TIME - elapsed)
+                        task_timeout = min(DOMAIN_TIMEOUT, remaining_time)
+
+                        done, pending = wait(pending, timeout=task_timeout, return_when=FIRST_COMPLETED)
+
+                        if not done:
+                            add_log(f"No tasks completed in {task_timeout}s, continuing...", level="warning")
+                            continue
+
+                        for future in done:
+                            idx, company = futures[future]
+                            comp_domain = company.get("domain", "unknown")
+                            name = company.get("company_name", "Unknown")
+                            try:
+                                future.result(timeout=1)
+                            except FuturesTimeoutError:
+                                add_log(f"    {comp_domain}: Timed out", level="warning")
+                                db.add_to_retry_queue(comp_domain, name, f"Timeout after {DOMAIN_TIMEOUT}s", company.copy())
+                                for ci in range(5):
+                                    company[f"email_{ci+1}"] = ""
+                                    company[f"title_{ci+1}"] = ""
+                                    company[f"name_{ci+1}"] = ""
+                            except Exception as e:
+                                add_log(f"    {comp_domain}: {str(e)[:50]}", level="error")
+                                db.add_to_retry_queue(comp_domain, name, str(e)[:100], company.copy())
+
+                    if cancelled_during_phase2:
+                        add_log(f"Phase 2 stopped: processed {completed[0]}/{total} companies before cancellation")
+                    elif timed_out:
+                        add_log(f"Phase 2 timed out: processed {completed[0]}/{total} companies (remaining added to retry queue)")
+                    else:
+                        add_log(f"Phase 2 complete: processed {total} companies")
+
+            # Save results to database
+            add_log("Saving results with contacts...")
+            update_status(current_action="Saving results")
+            db.bulk_upsert_advertisers(unique)
+            save_csv_export(db.get_advertisers())
+        else:
+            add_log("No sponsors found in any issues")
 
         total_count = db.get_advertiser_count()
         with_emails = db.get_advertiser_count(with_email=True)
