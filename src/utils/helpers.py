@@ -587,7 +587,7 @@ def guess_domain_from_name(company_name: str) -> str | None:
         "indeed": "indeed.com",
         "miso robotics": "misorobotics.com",
 
-        # Finance/Insurance
+        # Finance/Insurance/Investment
         "fisher investments": "fisherinvestments.com",
         "fisher": "fisherinvestments.com",
         "new york life": "newyorklife.com",
@@ -595,6 +595,11 @@ def guess_domain_from_name(company_name: str) -> str | None:
         "global x etfs": "globalxetfs.com",
         "global x": "globalxetfs.com",
         "pendulum": "pendulumlife.com",
+        "ishares": "blackrock.com",  # iShares is a BlackRock product
+        "ishares by blackrock": "blackrock.com",
+        "blackrock": "blackrock.com",
+        "tastytrade": "tastytrade.com",
+        "tasty trade": "tastytrade.com",
 
         # Healthcare/Wellness
         "garden of life": "gardenoflife.com",
@@ -633,6 +638,9 @@ def guess_domain_from_name(company_name: str) -> str | None:
         "elf labs": "elflabs.com",
         "rad": "rad.com",
         "rad security": "rad.com",
+        "rad intel": "radintel.ai",
+        "radintel": "radintel.ai",
+        "layermor": "layermor.com",  # Sometimes comes through linkby.com tracking
     }
 
     name_lower = company_name.lower().strip()

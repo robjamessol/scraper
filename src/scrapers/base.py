@@ -458,6 +458,11 @@ class BaseScraper(ABC):
             "google.com",
             "bit.ly",
             "t.co",
+            # JS-heavy tracking domains (HTTP resolution won't work)
+            "linkby.com",
+            "go.linkby.com",
+            "prf.hn",
+            "sjv.io",
         }
 
         normalized_sponsor = normalize_company_name(sponsor_name)
@@ -492,6 +497,21 @@ class BaseScraper(ABC):
                     if resolved_domain and resolved_domain.lower() not in skip_domains:
                         logger.debug(f"Resolved {sponsor_name} to: {resolved_domain}")
                         return resolved_domain
+
+                # For JS-heavy tracking domains, try browser resolution
+                js_tracking_domains = ['linkby.com', 'go.linkby.com', 'prf.hn', 'sjv.io']
+                if any(d in href.lower() for d in js_tracking_domains):
+                    try:
+                        from ..utils.helpers import resolve_redirect_with_browser
+                        logger.debug(f"Trying browser resolution for {href[:50]}...")
+                        browser_resolved = resolve_redirect_with_browser(href, timeout=8.0)
+                        if browser_resolved and browser_resolved != href:
+                            browser_domain = extract_domain(browser_resolved)
+                            if browser_domain and browser_domain.lower() not in skip_domains:
+                                logger.debug(f"Browser resolved {sponsor_name} to: {browser_domain}")
+                                return browser_domain
+                    except Exception as e:
+                        logger.debug(f"Browser resolution failed: {e}")
 
             # If it's already a good domain, use it
             if domain and domain.lower() not in skip_domains:
