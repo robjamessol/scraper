@@ -832,7 +832,7 @@ class HealthcareBrewScraper(BaseScraper):
         return None
 
 
-class MorningBrewScraper(BaseScraper):
+class MorningBrewScraper(HealthcareBrewScraper):
     """
     Scraper for Morning Brew daily newsletter.
 
@@ -894,15 +894,35 @@ class MorningBrewScraper(BaseScraper):
 
     def discover_all_issues(self, limit: int | None = None) -> list[str]:
         """Discover all issue URLs from the Morning Brew archive."""
-        # Implementation similar to Healthcare Brew
         page = self._new_page()
         issue_urls = []
 
         try:
-            logger.info(f"Loading archive: {self.config.archive_url}")
+            self._log(f"Loading archive: {self.config.archive_url}")
             page.goto(self.config.archive_url, wait_until="networkidle")
             page.wait_for_timeout(2000)
-            self._scroll_to_load_all(page, max_scrolls=30)
+
+            # Calculate how much scrolling/loading needed based on limit
+            target = limit or 400  # Default to 400 if no limit
+
+            # Method 1: Try "Load More" buttons first (common on Morning Brew)
+            load_more_worked = self._click_load_more_buttons(page, max_clicks=100, target_count=target)
+
+            # Method 2: If no load more button, try extensive scrolling
+            if not load_more_worked:
+                self._log("No load more button found, trying extensive scroll...")
+                # For 365 issues, need many scrolls (roughly 10 issues per scroll)
+                scroll_count = max(50, (target // 10) + 20)
+                self._scroll_to_load_all(page, max_scrolls=scroll_count, wait_ms=1000)
+
+            # Check progress
+            current_links = page.query_selector_all('a[href*="/issues/"]')
+            self._log(f"After loading: found {len(current_links)} issue links")
+
+            # Method 3: Try pagination if still not enough
+            if len(current_links) < target:
+                self._log("Trying pagination...")
+                self._click_pagination(page, max_pages=50, target_count=target)
 
             html = page.content()
             soup = BeautifulSoup(html, "lxml")
@@ -922,7 +942,7 @@ class MorningBrewScraper(BaseScraper):
                 if full_url not in issue_urls:
                     issue_urls.append(full_url)
 
-            logger.info(f"Found {len(issue_urls)} issues in archive")
+            self._log(f"Found {len(issue_urls)} issues in archive")
 
             if limit:
                 issue_urls = issue_urls[:limit]

@@ -432,6 +432,14 @@ class BaseScraper(ABC):
         Returns:
             Domain string or None
         """
+        # FIRST: Check for parent company domain (e.g., iShares -> blackrock.com)
+        # Some products/subsidiaries need their parent company's domain for contacts
+        from ..utils.helpers import get_parent_company_domain
+        parent_domain = get_parent_company_domain(sponsor_name)
+        if parent_domain:
+            logger.debug(f"Using parent company domain for {sponsor_name}: {parent_domain}")
+            return parent_domain
+
         # Get HTML section around the match
         start = max(0, match_position - search_window // 2)
         end = min(len(html), match_position + search_window // 2)

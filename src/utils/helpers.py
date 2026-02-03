@@ -554,6 +554,35 @@ def parse_date_from_url(url: str) -> str | None:
     return None
 
 
+def get_parent_company_domain(company_name: str) -> str | None:
+    """
+    Get the parent company domain for subsidiaries/products.
+
+    Some products (like iShares) are owned by parent companies (BlackRock).
+    For contact discovery, we need the parent company's domain since that's
+    where advertising/media contacts are located.
+
+    Args:
+        company_name: Company or product name
+
+    Returns:
+        Parent company domain if this is a known subsidiary, None otherwise
+    """
+    if not company_name:
+        return None
+
+    # Product/subsidiary -> Parent company domain mappings
+    PARENT_COMPANY_DOMAINS = {
+        # BlackRock products
+        "ishares": "blackrock.com",
+        "ishares by blackrock": "blackrock.com",
+        # Add more as discovered
+    }
+
+    name_lower = company_name.lower().strip()
+    return PARENT_COMPANY_DOMAINS.get(name_lower)
+
+
 def guess_domain_from_name(company_name: str) -> str | None:
     """
     Guess a company's domain from their name.
@@ -646,6 +675,13 @@ def guess_domain_from_name(company_name: str) -> str | None:
     name_lower = company_name.lower().strip()
     if name_lower in KNOWN_DOMAINS:
         return KNOWN_DOMAINS[name_lower]
+
+    # Also check without common prefixes/suffixes
+    for prefix in ["the ", "a "]:
+        if name_lower.startswith(prefix):
+            check_name = name_lower[len(prefix):]
+            if check_name in KNOWN_DOMAINS:
+                return KNOWN_DOMAINS[check_name]
 
     # Normalize: lowercase, remove spaces and special chars
     name = company_name.lower().strip()
