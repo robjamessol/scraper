@@ -620,14 +620,22 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                             if domain and is_tracking_domain(f"https://{domain}"):
                                 domain = None
 
-                        # If HTTP failed, try browser-based resolution (handles JS redirects)
-                        if not domain:
-                            from ..utils.helpers import resolve_redirect_with_browser
-                            browser_resolved = resolve_redirect_with_browser(landing_url, timeout=8.0)
-                            if browser_resolved and browser_resolved != landing_url:
-                                domain = extract_domain(browser_resolved)
-                                if domain and is_tracking_domain(f"https://{domain}"):
-                                    domain = None
+                        # If HTTP failed for JS-heavy tracking domains, try browser resolution
+                        # Only for specific domains known to use JS redirects (linkby, etc.)
+                        js_tracking_domains = ['linkby.com', 'go.linkby.com', 'prf.hn', 'sjv.io']
+                        if not domain and any(d in landing_url.lower() for d in js_tracking_domains):
+                            try:
+                                from ..utils.helpers import resolve_redirect_with_browser
+                                self._log(f"    Trying browser resolution for {landing_url[:50]}...")
+                                browser_resolved = resolve_redirect_with_browser(landing_url, timeout=8.0)
+                                if browser_resolved and browser_resolved != landing_url:
+                                    domain = extract_domain(browser_resolved)
+                                    if domain and is_tracking_domain(f"https://{domain}"):
+                                        domain = None
+                                    elif domain:
+                                        self._log(f"    Browser resolved to: {domain}")
+                            except Exception as e:
+                                self._log(f"    Browser resolution failed: {e}", "warning")
                     else:
                         domain = extract_domain(landing_url)
 

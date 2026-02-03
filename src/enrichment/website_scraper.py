@@ -1524,20 +1524,31 @@ class WebsiteScraper:
             for c in contacts_list:
                 status = verify_email_smtp_permissive(c.email)
 
-                # Keep email if:
-                # 1. SMTP says valid/unknown/catchall (not "invalid")
-                # 2. OR it's a high-confidence advertising email (many mail servers block SMTP verification)
-                is_high_confidence = c.email_type == "advertising"
+                # Pattern-generated emails must be EXPLICITLY verified (status == "valid")
+                # We don't want to return made-up emails that weren't confirmed
+                is_pattern_generated = c.source_page == "pattern_generated"
 
-                if status != "invalid":
-                    verified.append(c)
-                elif is_high_confidence:
-                    # Keep advertising emails even if SMTP verification failed
-                    # (many corporate mail servers block verification)
-                    self._log(f"  Keeping {c.email} despite SMTP={status} (advertising email)")
-                    verified.append(c)
+                if is_pattern_generated:
+                    # STRICT: Only keep pattern emails if SMTP confirms they exist
+                    if status == "valid":
+                        self._log(f"  SMTP verified pattern email: {c.email}")
+                        verified.append(c)
+                    else:
+                        rejected.append(c.email)
                 else:
-                    rejected.append(c.email)
+                    # For scraped/discovered emails, be more permissive
+                    # Keep if: SMTP says valid/unknown OR it's a high-confidence advertising email
+                    is_high_confidence = c.email_type == "advertising"
+
+                    if status != "invalid":
+                        verified.append(c)
+                    elif is_high_confidence:
+                        # Keep advertising emails even if SMTP verification failed
+                        # (many corporate mail servers block verification)
+                        self._log(f"  Keeping {c.email} despite SMTP={status} (advertising email)")
+                        verified.append(c)
+                    else:
+                        rejected.append(c.email)
 
             if rejected:
                 self._log(f"  SMTP rejected {len(rejected)} emails: {rejected[:5]}...")
