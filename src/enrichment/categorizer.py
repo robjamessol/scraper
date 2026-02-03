@@ -364,6 +364,11 @@ class AdvertiserCategorizer:
         Returns:
             Updated dictionary with sector field
         """
+        # If sector is already set to a meaningful value, don't overwrite
+        existing_sector = sponsor_info.get("sector", "").lower()
+        if existing_sector and existing_sector != "other":
+            return sponsor_info
+
         # Support both old and new field names
         company_name = sponsor_info.get("company_name") or sponsor_info.get("advertiser_name", "")
         domain = sponsor_info.get("domain") or sponsor_info.get("advertiser_domain", "")
