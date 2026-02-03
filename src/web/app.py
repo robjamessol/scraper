@@ -1295,14 +1295,34 @@ def process_newsletter_sources(sources: list[dict], limit: int | None = None):
             add_log(f"Scanning newsletter: {source_name} ({source_domain})...")
 
             try:
-                scraper = GenericNewsletterScraper(
-                    domain=source_domain,
-                    archive_url=archive_url,
-                    name=source_name,
-                    headless=True,
-                    log_callback=add_log,
-                    cancel_check=is_scan_cancelled,
-                )
+                # Use dedicated scrapers for known newsletters (much faster)
+                domain_lower = source_domain.lower()
+                scraper = None
+
+                if "morningbrew.com" in domain_lower and "healthcare" not in domain_lower:
+                    add_log("Using optimized Morning Brew scraper...")
+                    scraper = MorningBrewScraper(
+                        headless=True,
+                        log_callback=add_log,
+                        cancel_check=is_scan_cancelled,
+                    )
+                elif "healthcare-brew.com" in domain_lower or "healthcarebrew.com" in domain_lower:
+                    add_log("Using optimized Healthcare Brew scraper...")
+                    scraper = HealthcareBrewScraper(
+                        headless=True,
+                        log_callback=add_log,
+                        cancel_check=is_scan_cancelled,
+                    )
+                else:
+                    # Generic scraper for unknown newsletters
+                    scraper = GenericNewsletterScraper(
+                        domain=source_domain,
+                        archive_url=archive_url,
+                        name=source_name,
+                        headless=True,
+                        log_callback=add_log,
+                        cancel_check=is_scan_cancelled,
+                    )
 
                 with scraper:
                     add_log("Discovering issues...")

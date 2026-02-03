@@ -162,6 +162,8 @@ class BaseScraper(ABC):
         config: dict[str, Any],
         headless: bool = True,
         timeout: int = 30000,
+        log_callback: callable = None,
+        cancel_check: callable = None,
     ):
         """
         Initialize the scraper.
@@ -170,6 +172,8 @@ class BaseScraper(ABC):
             config: Newsletter configuration dictionary
             headless: Run browser in headless mode
             timeout: Page load timeout in milliseconds
+            log_callback: Optional function to call for logging
+            cancel_check: Optional function to check if operation should be cancelled
         """
         self.config = NewsletterConfig(
             name=config.get("name", "Unknown"),
@@ -184,6 +188,28 @@ class BaseScraper(ABC):
         self.timeout = timeout
         self._browser: Browser | None = None
         self._playwright = None
+        self._log_callback = log_callback
+        self._cancel_check = cancel_check
+
+    def _log(self, message: str, level: str = "info"):
+        """Log a message, using callback if available."""
+        if self._log_callback:
+            self._log_callback(message, level)
+        if level == "error":
+            logger.error(message)
+        elif level == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)
+
+    def _is_cancelled(self) -> bool:
+        """Check if operation should be cancelled."""
+        if self._cancel_check:
+            try:
+                return self._cancel_check()
+            except:
+                return False
+        return False
 
     def __enter__(self):
         """Context manager entry - start browser."""

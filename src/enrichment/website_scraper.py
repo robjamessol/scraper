@@ -823,9 +823,8 @@ class WebsiteScraper:
                     self._log("Too many blocks, stopping browser scan", "warning")
                     break
 
-                # If too many consecutive 404s on standard paths, bail out
+                # If too many consecutive 404s on standard paths, bail out (silently)
                 if consecutive_404s >= 4:
-                    self._log("  4+ consecutive 404s, skipping remaining standard paths")
                     # Remove remaining standard paths but keep deep drill links
                     queue = [u for u in queue if u in visited_deep_links or
                              any(k in u.lower() for k in ['press-release', 'newsroom/', 'sponsor', 'partner'])]
@@ -840,21 +839,20 @@ class WebsiteScraper:
                 visited_deep_links.add(url)
 
                 try:
-                    self._log(f"Browser visiting: {url}")
+                    # Only log path, not full URL (less noise)
+                    url_path = urlparse(url).path or "/"
                     response = page.goto(url, wait_until="domcontentloaded")
                     page.wait_for_timeout(1000)
 
-                    # Skip 404/error pages without counting against limit
+                    # Skip 404/error pages without counting against limit (silent - no log spam)
                     if response and response.status >= 400 and response.status != 403:
-                        self._log(f"  Skipping {url} (HTTP {response.status})")
                         consecutive_404s += 1
                         continue
 
-                    # Skip pages that redirected back to homepage
+                    # Skip pages that redirected back to homepage (silent)
                     final_path = urlparse(page.url).path.rstrip('/') or '/'
                     requested_path = urlparse(url).path.rstrip('/') or '/'
                     if final_path == homepage_path and requested_path != homepage_path:
-                        self._log(f"  Skipping {url} (redirected to homepage)")
                         consecutive_404s += 1
                         continue
 
@@ -1447,7 +1445,7 @@ class WebsiteScraper:
         blocked_count = 0
 
         if (len(all_emails) < 2 or not has_good_email) and self.use_browser:
-            self._log(f"Deep scraping {final_domain} with browser...")
+            self._log(f"Scanning {final_domain} contact pages...")
 
             # Priority-ordered browser URLs - contact/about pages FIRST
             priority_paths = ["/contact", "/contact-us", "/connect-with-us",

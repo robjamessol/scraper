@@ -42,18 +42,34 @@ class HealthcareBrewScraper(BaseScraper):
 
     BASE_URL = "https://www.healthcare-brew.com"
 
-    def __init__(self, config: dict[str, Any] | None = None, **kwargs):
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        headless: bool = True,
+        log_callback: callable = None,
+        cancel_check: callable = None,
+        **kwargs
+    ):
         """
         Initialize Healthcare Brew scraper.
 
         Args:
             config: Optional config override. If None, uses defaults for Healthcare Brew.
+            headless: Run browser in headless mode
+            log_callback: Optional function to call for logging
+            cancel_check: Optional function to check if operation should be cancelled
             **kwargs: Additional arguments passed to BaseScraper
         """
         if config is None:
             config = self._default_config()
 
-        super().__init__(config, **kwargs)
+        super().__init__(
+            config,
+            headless=headless,
+            log_callback=log_callback,
+            cancel_check=cancel_check,
+            **kwargs
+        )
 
     def _click_load_more_buttons(self, page, max_clicks: int = 50, target_count: int = 300) -> bool:
         """
@@ -825,11 +841,24 @@ class MorningBrewScraper(BaseScraper):
 
     BASE_URL = "https://www.morningbrew.com"
 
-    def __init__(self, config: dict[str, Any] | None = None, **kwargs):
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        headless: bool = True,
+        log_callback: callable = None,
+        cancel_check: callable = None,
+        **kwargs
+    ):
         """Initialize Morning Brew scraper."""
         if config is None:
             config = self._default_config()
-        super().__init__(config, **kwargs)
+        super().__init__(
+            config,
+            headless=headless,
+            log_callback=log_callback,
+            cancel_check=cancel_check,
+            **kwargs
+        )
 
     @staticmethod
     def _default_config() -> dict[str, Any]:
