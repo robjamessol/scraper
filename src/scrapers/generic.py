@@ -612,12 +612,22 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                 domain = None
                 if landing_url:
                     if is_tracking_domain(landing_url):
+                        # Try HTTP resolution first (fast)
                         resolved = resolve_redirect_url(landing_url, timeout=5.0)
                         if resolved and resolved != landing_url:
                             domain = extract_domain(resolved)
                             # Check if we still got a tracking domain (resolution failed/partial)
                             if domain and is_tracking_domain(f"https://{domain}"):
-                                domain = None  # Discard, will fall back to guessing
+                                domain = None
+
+                        # If HTTP failed, try browser-based resolution (handles JS redirects)
+                        if not domain:
+                            from ..utils.helpers import resolve_redirect_with_browser
+                            browser_resolved = resolve_redirect_with_browser(landing_url, timeout=8.0)
+                            if browser_resolved and browser_resolved != landing_url:
+                                domain = extract_domain(browser_resolved)
+                                if domain and is_tracking_domain(f"https://{domain}"):
+                                    domain = None
                     else:
                         domain = extract_domain(landing_url)
 

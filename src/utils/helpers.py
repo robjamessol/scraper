@@ -166,6 +166,48 @@ def resolve_redirect_url(url: str, timeout: float = 3.0) -> str | None:
         return url
 
 
+def resolve_redirect_with_browser(url: str, timeout: float = 8.0) -> str | None:
+    """
+    Use Playwright browser to resolve JavaScript-based tracking redirects.
+
+    Some tracking links (like linkby.com) use JavaScript to redirect,
+    which won't work with simple HTTP requests.
+
+    Args:
+        url: URL to resolve
+        timeout: Browser timeout in seconds
+
+    Returns:
+        Final URL after JS redirects, or None on failure
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(int(timeout * 1000))
+
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)  # Wait for JS redirects
+                final_url = page.url
+
+                if final_url and final_url != url:
+                    logger.debug(f"Browser resolved: {url[:40]}... → {final_url[:40]}...")
+                    return final_url
+            except Exception as e:
+                logger.debug(f"Browser redirect failed: {e}")
+            finally:
+                browser.close()
+
+    except Exception as e:
+        logger.debug(f"Browser not available for redirect: {e}")
+
+    return None
+
+
 def is_tracking_domain(url: str) -> bool:
     """
     Check if URL is from a known tracking/redirect domain.
@@ -529,19 +571,68 @@ def guess_domain_from_name(company_name: str) -> str | None:
         return None
 
     # Known domain mappings for companies whose domain doesn't match their name
+    # This is critical for contact discovery - wrong domain = no contacts found
     KNOWN_DOMAINS = {
+        # Tech/SaaS
         "at&t": "att.com",
         "at&t connected car": "att.com",
+        "linkedin talent solutions": "linkedin.com",
+        "bamboohr": "bamboohr.com",
+        "bamboo hr": "bamboohr.com",
+        "onetrust": "onetrust.com",
+        "one trust": "onetrust.com",
+        "slack": "slack.com",
+        "dell": "dell.com",
+        "dell technologies": "dell.com",
+        "indeed": "indeed.com",
+        "miso robotics": "misorobotics.com",
+
+        # Finance/Insurance
+        "fisher investments": "fisherinvestments.com",
+        "fisher": "fisherinvestments.com",
+        "new york life": "newyorklife.com",
+        "northwestern mutual": "northwesternmutual.com",
+        "global x etfs": "globalxetfs.com",
+        "global x": "globalxetfs.com",
+        "pendulum": "pendulumlife.com",
+
+        # Healthcare/Wellness
+        "garden of life": "gardenoflife.com",
+        "dr. kellyann": "drkellyann.com",
+        "dr kellyann": "drkellyann.com",
+        "thermo fisher scientific": "thermofisher.com",
+        "ge healthcare": "gehealthcare.com",
+        "wolters kluwer health": "wolterskluwer.com",
+        "wolters kluwer": "wolterskluwer.com",
+
+        # Education/Institutes
         "project management institute": "pmi.org",
         "the ohio state university": "osu.edu",
         "ohio state university": "osu.edu",
         "the national union of healthcare workers": "nuhw.org",
         "national union of healthcare workers": "nuhw.org",
-        "thermo fisher scientific": "thermofisher.com",
-        "ge healthcare": "gehealthcare.com",
-        "wolters kluwer health": "wolterskluwer.com",
-        "wolters kluwer": "wolterskluwer.com",
-        "linkedin talent solutions": "linkedin.com",
+
+        # Travel/Hospitality
+        "sandals resorts": "sandals.com",
+        "sandals": "sandals.com",
+
+        # Media
+        "golf digest": "golfdigest.com",
+        "cnbc": "cnbc.com",
+
+        # Retail/Ecommerce
+        "amazon": "amazon.com",
+        "flavcity": "flavcity.com",
+        "shop flavcity": "flavcity.com",
+
+        # Government/Economic Development
+        "jobsohio": "jobsohio.com",
+        "jobs ohio": "jobsohio.com",
+
+        # Other common advertisers
+        "elf labs": "elflabs.com",
+        "rad": "rad.com",
+        "rad security": "rad.com",
     }
 
     name_lower = company_name.lower().strip()

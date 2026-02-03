@@ -1167,6 +1167,45 @@ class WebsiteScraper:
 
         return contacts
 
+    def _generate_pattern_emails(self, domain: str) -> list[WebsiteContact]:
+        """Generate common business email patterns as a last resort.
+
+        For enterprise sites that block all scraping attempts, we generate
+        likely email patterns (advertising@, media@, press@, etc.) and
+        return them with low confidence. These are verified via SMTP later.
+        """
+        contacts = []
+
+        # Skip domains that are unlikely to have useful contacts
+        if any(skip in domain.lower() for skip in ['morningbrew', 'healthcare-brew', 'linkby', 'bit.ly']):
+            return contacts
+
+        # Priority patterns for advertising/media contacts
+        patterns = [
+            ("advertising", "advertising"),
+            ("media", "advertising"),
+            ("press", "advertising"),
+            ("partnerships", "advertising"),
+            ("ads", "advertising"),
+            ("sponsor", "advertising"),
+            ("marketing", "marketing"),
+            ("sales", "sales"),
+            ("hello", "generic"),
+            ("info", "generic"),
+            ("contact", "generic"),
+        ]
+
+        for prefix, email_type in patterns:
+            email = f"{prefix}@{domain}"
+            contacts.append(WebsiteContact(
+                email=email,
+                source_page="pattern_generated",
+                email_type=email_type,
+            ))
+
+        self._log(f"  Generated {len(contacts)} pattern-based emails for {domain}")
+        return contacts
+
     # Domains that should never be scraped for contacts (social media, search engines, etc.)
     # These will hang the browser or return no useful contact emails
     SKIP_DOMAINS = {
@@ -1183,6 +1222,8 @@ class WebsiteScraper:
         'email.morningbrew.com', 't.co', 'bit.ly', 'tinyurl.com',
         'ow.ly', 'buff.ly', 'goo.gl', 'rebrand.ly', 'short.io',
         'go.linkby.com', 'linkby.com', 'linktr.ee', 'linkin.bio',
+        # Morning Brew internal/sister brand domains (not advertisers)
+        'brewmarkets.com', 'morningbrew.com', 'healthcare-brew.com',
     }
 
     # Partial domain matches — skip any domain containing these strings
@@ -1462,6 +1503,14 @@ class WebsiteScraper:
         if not all_emails:
             search_contacts = self._search_for_emails(final_domain, company_name)
             for c in search_contacts:
+                all_emails[c.email] = c
+
+        # Phase 3.5c: Pattern-based email generation for enterprise sites
+        # If all else fails, generate common advertising/media email patterns
+        if not all_emails and final_domain:
+            self._log(f"Generating common email patterns for {final_domain}...")
+            pattern_contacts = self._generate_pattern_emails(final_domain)
+            for c in pattern_contacts:
                 all_emails[c.email] = c
 
         # Phase 4: SMTP Verification (more permissive for high-confidence emails)
