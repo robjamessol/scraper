@@ -917,7 +917,11 @@ class WebsiteScraper:
                     content_pages += 1
 
                 except Exception as e:
+                    error_msg = str(e).lower()
                     self._log(f"Browser error on {url}: {str(e)[:60]}", "warning")
+                    # Count timeouts as potential blocks (enterprise sites often timeout instead of blocking)
+                    if "timeout" in error_msg or "timed out" in error_msg:
+                        blocked_count += 1
                     continue
 
         return list(all_emails.values()), blocked_count
@@ -1440,15 +1444,16 @@ class WebsiteScraper:
 
             # Phase 3: Vision Fallback (skip if site is completely blocking us)
             has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
-            if not has_good_email and blocked_count < 5:
+            if not has_good_email and blocked_count < 3:
                 self._log("No advertising contacts found. Trying Vision AI...")
                 vision_contacts = self._try_vision_fallback(base_url, final_domain)
                 for c in vision_contacts:
                     all_emails[c.email] = c
 
-        # Phase 3.5a: Archive.org fallback for Cloudflare-blocked sites
-        if not all_emails and blocked_count >= 5:
-            self._log(f"Site fully blocked. Trying archive.org cached pages...")
+        # Phase 3.5a: Archive.org fallback for blocked/timeout-heavy sites
+        # Trigger earlier (3+ issues) since enterprise sites often timeout instead of explicit blocking
+        if not all_emails and blocked_count >= 3:
+            self._log(f"Site blocked/timing out. Trying archive.org cached pages...")
             archive_contacts = self._scrape_archive_org(final_domain, original_domain)
             for c in archive_contacts:
                 all_emails[c.email] = c

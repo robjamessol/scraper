@@ -540,14 +540,18 @@ Do NOT skip sponsor blocks just because they look like editorial content — if 
 promote a specific product/service with a link, they are likely sponsors.
 
 For each sponsor, extract ALL of these fields:
-- company_name: The advertiser's name (the company being promoted, NOT the newsletter)
+- company_name: The advertiser's OFFICIAL company name only (e.g., "OneTrust", "BambooHR", "Slack").
+  DO NOT include CTA words like "Opens", "Learn More", "Get Started", "Try", "Click", "Sign Up".
+  DO NOT include phrases like "A message from" or "Presented by".
+  Just the clean company name.
 - placement_type: One of: presented_by, together_with, sponsored_by, partnership, sponsored_message, powered_by, native_ad, affiliate_link, inline_mention
 - ad_headline: The main headline or hook of the ad (the attention-grabbing first line)
 - product_service: What specific product, service, or offer they're promoting (be specific, e.g., "AI-powered CRM platform", "Employee wellness program", "Marketing analytics tool")
 - category: The industry/sector (one of: technology, healthcare, finance, marketing, hr/recruiting, saas, ecommerce, education, media, consulting, other)
 - ad_copy: The FULL ad text/copy (include the entire sponsor section text)
 - call_to_action: The CTA text if present (e.g., "Learn More", "Get Started", "Try Free")
-- landing_url: The URL the ad links to (if found in the links list)
+- landing_url: The ACTUAL destination URL the ad links to. If the link goes through a tracking service
+  (like links.morningbrew.com, linkby.com, bit.ly), try to find the actual company URL in the links list instead.
 
 Respond ONLY with valid JSON:
 {
@@ -598,12 +602,17 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                 if not name or len(name) < 2:
                     continue
 
+                # Clean company name - strip CTA words that Claude might have included
+                name = self._clean_company_name(name)
+                if not name or len(name) < 2:
+                    continue
+
                 # Try to resolve domain from landing URL or name
                 landing_url = item.get("landing_url")
                 domain = None
                 if landing_url:
                     if is_tracking_domain(landing_url):
-                        resolved = resolve_redirect_url(landing_url, timeout=4.0)
+                        resolved = resolve_redirect_url(landing_url, timeout=5.0)
                         if resolved and resolved != landing_url:
                             domain = extract_domain(resolved)
                             # Check if we still got a tracking domain (resolution failed/partial)
@@ -611,6 +620,10 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                                 domain = None  # Discard, will fall back to guessing
                     else:
                         domain = extract_domain(landing_url)
+
+                # Strip subdomain for sweepstakes/promo sites (e.g., insidetheropessweeps.golfdigest.com → golfdigest.com)
+                if domain and domain.count('.') >= 2:
+                    domain = self._get_parent_domain(domain)
 
                 # Fallback: Guess from company name (fast)
                 # Web search for accurate domain happens in Phase 2 contact scraping
@@ -674,6 +687,68 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                 return dt[:10]
 
         return None
+
+    def _clean_company_name(self, name: str) -> str:
+        """Clean company name by removing CTA words and common phrases."""
+        if not name:
+            return ""
+
+        # Common CTA words/phrases that shouldn't be part of company names
+        cta_words = [
+            " opens", " open", " learn more", " get started", " try now",
+            " sign up", " click here", " start now", " join now",
+            " free trial", " read more", " discover", " explore",
+            " shop now", " buy now", " register", " subscribe",
+        ]
+
+        # Common prefixes to strip
+        prefixes = [
+            "a message from ", "presented by ", "sponsored by ",
+            "brought to you by ", "together with ", "powered by ",
+            "in partnership with ", "a word from ",
+        ]
+
+        name_lower = name.lower()
+
+        # Strip prefixes
+        for prefix in prefixes:
+            if name_lower.startswith(prefix):
+                name = name[len(prefix):]
+                name_lower = name.lower()
+
+        # Strip CTA suffixes
+        for cta in cta_words:
+            if name_lower.endswith(cta):
+                name = name[:-len(cta)]
+                name_lower = name.lower()
+
+        return name.strip()
+
+    def _get_parent_domain(self, domain: str) -> str:
+        """Extract parent domain from subdomain (e.g., promo.example.com → example.com)."""
+        if not domain:
+            return domain
+
+        # Multi-part TLDs to preserve
+        multi_tlds = {
+            "co.uk", "com.au", "co.nz", "co.za", "com.br", "co.jp",
+            "co.kr", "com.mx", "co.in", "com.sg", "org.uk", "net.au",
+        }
+
+        parts = domain.lower().split(".")
+        if len(parts) <= 2:
+            return domain  # Already a root domain
+
+        # Check for multi-part TLDs
+        potential_tld = ".".join(parts[-2:])
+        if potential_tld in multi_tlds:
+            # Keep domain + multi-part TLD (e.g., example.co.uk)
+            if len(parts) >= 3:
+                return ".".join(parts[-3:])
+            return domain
+
+        # Standard TLD - return last two parts (e.g., example.com)
+        return ".".join(parts[-2:])
 
     @classmethod
     def from_domain(cls, domain: str, **kwargs) -> "GenericNewsletterScraper":
