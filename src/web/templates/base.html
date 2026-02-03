@@ -276,20 +276,30 @@
         async function copyLogs() {
             try {
                 const res = await fetch('/api/logs/text');
+                if (!res.ok) {
+                    throw new Error('Failed to fetch logs: ' + res.status);
+                }
                 const text = await res.text();
-                await navigator.clipboard.writeText(text);
-                alert('Logs copied to clipboard! (' + text.split('\n').length + ' lines)');
+
+                // Try modern clipboard API first
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    alert('Logs copied to clipboard! (' + text.split('\n').length + ' lines)');
+                } else {
+                    // Fallback for browsers that don't support clipboard API
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.opacity = '0';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    alert('Logs copied to clipboard! (' + text.split('\n').length + ' lines)');
+                }
             } catch (e) {
-                // Fallback for browsers that don't support clipboard API
-                const res = await fetch('/api/logs/text');
-                const text = await res.text();
-                const textarea = document.createElement('textarea');
-                textarea.value = text;
-                document.body.appendChild(textarea);
-                textarea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textarea);
-                alert('Logs copied to clipboard!');
+                console.error('Copy logs error:', e);
+                alert('Failed to copy logs: ' + e.message);
             }
         }
 
