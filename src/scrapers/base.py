@@ -60,6 +60,12 @@ class SponsorInfo:
             "sponsor_type": self.placement_type,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,
+            "source_newsletter": self.source_newsletter,
+            "ad_headline": self.ad_headline or "",
+            "product_service": self.product_service or "",
+            "full_ad_copy": self.full_ad_copy or "",
+            "call_to_action": self.call_to_action or "",
+            "landing_page_url": self.landing_page_url or "",
         }
 
 

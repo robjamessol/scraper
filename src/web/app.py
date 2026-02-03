@@ -162,10 +162,34 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def save_csv_export(advertisers: list[dict]):
-    """Save advertisers to CSV for download."""
+    """Save advertisers to CSV for download with columns ordered for outreach."""
     try:
         if advertisers:
             df = pd.DataFrame(advertisers)
+
+            # Define column order for outreach (most important first)
+            priority_columns = [
+                # Company identification
+                "company_name", "domain", "sector",
+                # Contact info
+                "email_1", "name_1", "title_1",
+                "email_2", "name_2", "title_2",
+                "email_3", "name_3", "title_3",
+                "email_4", "name_4", "title_4",
+                "email_5", "name_5", "title_5",
+                # Ad context (for personalized outreach)
+                "ad_headline", "product_service", "full_ad_copy", "call_to_action",
+                # Source info
+                "source_newsletter", "sponsor_type", "issue_url", "issue_date",
+                "landing_page_url",
+            ]
+
+            # Reorder columns: priority columns first, then any remaining
+            existing_cols = set(df.columns)
+            ordered_cols = [c for c in priority_columns if c in existing_cols]
+            remaining_cols = [c for c in df.columns if c not in ordered_cols]
+            df = df[ordered_cols + remaining_cols]
+
             csv_path = OUTPUT_DIR / f"advertisers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             df.to_csv(csv_path, index=False)
             df.to_csv(OUTPUT_DIR / "latest.csv", index=False)

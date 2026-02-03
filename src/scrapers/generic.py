@@ -539,10 +539,14 @@ Each sponsor section typically has: a company name, a pitch paragraph, and a CTA
 Do NOT skip sponsor blocks just because they look like editorial content — if they
 promote a specific product/service with a link, they are likely sponsors.
 
-For each sponsor, extract:
+For each sponsor, extract ALL of these fields:
 - company_name: The advertiser's name (the company being promoted, NOT the newsletter)
 - placement_type: One of: presented_by, together_with, sponsored_by, partnership, sponsored_message, powered_by, native_ad, affiliate_link, inline_mention
-- ad_copy: The actual ad text/copy (first 200 chars)
+- ad_headline: The main headline or hook of the ad (the attention-grabbing first line)
+- product_service: What specific product, service, or offer they're promoting (be specific, e.g., "AI-powered CRM platform", "Employee wellness program", "Marketing analytics tool")
+- category: The industry/sector (one of: technology, healthcare, finance, marketing, hr/recruiting, saas, ecommerce, education, media, consulting, other)
+- ad_copy: The FULL ad text/copy (include the entire sponsor section text)
+- call_to_action: The CTA text if present (e.g., "Learn More", "Get Started", "Try Free")
 - landing_url: The URL the ad links to (if found in the links list)
 
 Respond ONLY with valid JSON:
@@ -551,7 +555,11 @@ Respond ONLY with valid JSON:
         {
             "company_name": "Example Corp",
             "placement_type": "presented_by",
-            "ad_copy": "First 200 chars of the ad copy...",
+            "ad_headline": "Transform your workflow with AI",
+            "product_service": "AI-powered project management platform",
+            "category": "technology",
+            "ad_copy": "Full ad copy text here...",
+            "call_to_action": "Start Free Trial",
             "landing_url": "https://example.com/landing"
         }
     ]
@@ -574,7 +582,7 @@ Return {"sponsors": []} if no sponsors found. Do NOT hallucinate sponsors."""
 
 Identify all sponsors and advertisers in this newsletter issue. Look carefully for ad blocks between editorial sections."""
 
-            response = agent._call_api(system_prompt, user_prompt, max_tokens=1500)
+            response = agent._call_api(system_prompt, user_prompt, max_tokens=3000)
             agent.close()
 
             if not response:
@@ -627,8 +635,12 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                     issue_url=issue_url,
                     issue_date=issue_date,
                     source_newsletter=self.config.name.lower().replace(" ", "_"),
+                    category=item.get("category", "other"),
                     confidence="high",
                     landing_page_url=landing_url,
+                    product_service=item.get("product_service"),
+                    ad_headline=item.get("ad_headline"),
+                    call_to_action=item.get("call_to_action"),
                     full_ad_copy=item.get("ad_copy", ""),
                 ))
 
