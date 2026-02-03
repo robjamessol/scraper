@@ -116,7 +116,7 @@ MARKETING_SUBDOMAINS = {
 }
 
 
-def resolve_redirect_url(url: str, timeout: float = 1.5) -> str | None:
+def resolve_redirect_url(url: str, timeout: float = 3.0) -> str | None:
     """
     Follow redirects to get the final destination URL.
 
@@ -171,12 +171,13 @@ def is_tracking_domain(url: str) -> bool:
     Check if URL is from a known tracking/redirect domain.
 
     Args:
-        url: URL to check
+        url: URL to check (or just a domain)
 
     Returns:
         True if this is a tracking domain that should be resolved
     """
-    domain = extract_domain(url)
+    # Don't strip marketing subdomains - we need to match links.morningbrew.com etc.
+    domain = extract_domain(url, strip_marketing=False)
     if not domain:
         return False
     return domain.lower() in TRACKING_DOMAINS

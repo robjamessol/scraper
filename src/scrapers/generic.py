@@ -595,12 +595,27 @@ Identify all sponsors and advertisers in this newsletter issue. Look carefully f
                 domain = None
                 if landing_url:
                     if is_tracking_domain(landing_url):
-                        resolved = resolve_redirect_url(landing_url)
-                        if resolved:
+                        resolved = resolve_redirect_url(landing_url, timeout=4.0)
+                        if resolved and resolved != landing_url:
                             domain = extract_domain(resolved)
+                            # Check if we still got a tracking domain (resolution failed/partial)
+                            if domain and is_tracking_domain(f"https://{domain}"):
+                                domain = None  # Discard, will fall back to search
                     else:
                         domain = extract_domain(landing_url)
 
+                # Fallback 1: Web search for company domain (more accurate than guessing)
+                if not domain and name:
+                    try:
+                        from ..enrichment.website_scraper import _search_for_domain
+                        searched_domain = _search_for_domain(name, timeout=3.0)
+                        if searched_domain:
+                            self._log(f"    Web search found domain for {name}: {searched_domain}")
+                            domain = searched_domain
+                    except Exception:
+                        pass
+
+                # Fallback 2: Guess from company name (fast but less accurate)
                 if not domain:
                     domain = guess_domain_from_name(name)
 

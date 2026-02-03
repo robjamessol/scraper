@@ -1173,6 +1173,12 @@ class WebsiteScraper:
         'wikipedia.org', 'amazon.com', 'apple.com', 'apps.apple.com',
         'play.google.com', 'github.com', 'gitlab.com',
         'crunchbase.com', 'glassdoor.com',
+        # Newsletter tracking/redirect domains (no contacts, just redirects)
+        'links.morningbrew.com', 'link.morningbrew.com',
+        'links.healthcare-brew.com', 'link.healthcare-brew.com',
+        'email.morningbrew.com', 't.co', 'bit.ly', 'tinyurl.com',
+        'ow.ly', 'buff.ly', 'goo.gl', 'rebrand.ly', 'short.io',
+        'go.linkby.com', 'linkby.com', 'linktr.ee', 'linkin.bio',
     }
 
     # Partial domain matches — skip any domain containing these strings

@@ -346,12 +346,25 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 name = company.get("company_name", "Unknown")
 
                 if not domain:
-                    add_log(f"  [{idx+1}/{total}] {name} - no domain, skipping")
-                    for ci in range(5):
-                        company[f"email_{ci+1}"] = ""
-                        company[f"title_{ci+1}"] = ""
-                        company[f"name_{ci+1}"] = ""
-                    return
+                    # Try to find domain via web search if we have a company name
+                    if name and name != "Unknown":
+                        add_log(f"  [{idx+1}/{total}] {name} - no domain, searching...")
+                        try:
+                            from ..enrichment.website_scraper import _search_for_domain
+                            domain = _search_for_domain(name, timeout=3.0)
+                            if domain:
+                                add_log(f"    Found domain: {domain}")
+                                company["domain"] = domain
+                        except Exception:
+                            pass
+
+                    if not domain:
+                        add_log(f"  [{idx+1}/{total}] {name} - no domain found, skipping")
+                        for ci in range(5):
+                            company[f"email_{ci+1}"] = ""
+                            company[f"title_{ci+1}"] = ""
+                            company[f"name_{ci+1}"] = ""
+                        return
 
                 add_log(f"  [{idx+1}/{total}] {domain}...")
 
@@ -1398,12 +1411,25 @@ def process_newsletter_sources(sources: list[dict], limit: int | None = None):
                 name = company.get("company_name", "Unknown")
 
                 if not comp_domain:
-                    add_log(f"  [{idx+1}/{total}] {name} - no domain, skipping")
-                    for ci in range(5):
-                        company[f"email_{ci+1}"] = ""
-                        company[f"title_{ci+1}"] = ""
-                        company[f"name_{ci+1}"] = ""
-                    return
+                    # Try to find domain via web search if we have a company name
+                    if name and name != "Unknown":
+                        add_log(f"  [{idx+1}/{total}] {name} - no domain, searching...")
+                        try:
+                            from ..enrichment.website_scraper import _search_for_domain
+                            comp_domain = _search_for_domain(name, timeout=3.0)
+                            if comp_domain:
+                                add_log(f"    Found domain: {comp_domain}")
+                                company["domain"] = comp_domain
+                        except Exception:
+                            pass
+
+                    if not comp_domain:
+                        add_log(f"  [{idx+1}/{total}] {name} - no domain found, skipping")
+                        for ci in range(5):
+                            company[f"email_{ci+1}"] = ""
+                            company[f"title_{ci+1}"] = ""
+                            company[f"name_{ci+1}"] = ""
+                        return
 
                 add_log(f"  [{idx+1}/{total}] {comp_domain}...")
 
