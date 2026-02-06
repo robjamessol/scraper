@@ -268,23 +268,29 @@ def save_to_csv(sponsors: list[dict], output_path: str) -> str:
     df = pd.DataFrame(sponsors)
 
     # Reorder columns for better readability
+    # These match SponsorInfo.to_dict() + enrich_sponsor() output field names
     column_order = [
-        "advertiser_name",
-        "advertiser_domain",
-        "category",
+        "company_name",
+        "domain",
+        "sector",
         "niche_fit",
-        "placement_type",
-        "ad_copy_snippet",
+        "confidence",
+        "sponsor_type",
+        "ad_headline",
+        "product_service",
+        "call_to_action",
+        "full_ad_copy",
         "source_newsletter",
         "issue_date",
         "issue_url",
-        "sponsor_url",
-        "confidence",
+        "landing_page_url",
     ]
 
-    # Only include columns that exist
-    columns = [c for c in column_order if c in df.columns]
-    df = df[columns]
+    # Only include columns that exist, then append any extras
+    existing = set(df.columns)
+    columns = [c for c in column_order if c in existing]
+    remaining = [c for c in df.columns if c not in columns]
+    df = df[columns + remaining]
 
     # Save to CSV
     df.to_csv(output_path, index=False)
@@ -313,10 +319,10 @@ def generate_summary(sponsors: list[dict]) -> str:
     for source, count in df["source_newsletter"].value_counts().items():
         summary.append(f"  - {source}: {count}")
 
-    # By category
-    if "category" in df.columns:
-        summary.append("\nBy Category:")
-        for cat, count in df["category"].value_counts().items():
+    # By sector
+    if "sector" in df.columns:
+        summary.append("\nBy Sector:")
+        for cat, count in df["sector"].value_counts().items():
             summary.append(f"  - {cat}: {count}")
 
     # By niche fit
@@ -330,10 +336,10 @@ def generate_summary(sponsors: list[dict]) -> str:
         summary.append("\nTop High-Confidence Advertisers:")
         high_conf = df[df["confidence"] == "high"].head(10)
         for _, row in high_conf.iterrows():
-            cat = row.get("category", "?")
+            cat = row.get("sector", "?")
             fit = row.get("niche_fit", "?")
             summary.append(
-                f"  - {row['advertiser_name']} ({cat}) - {fit}"
+                f"  - {row['company_name']} ({cat}) - {fit}"
             )
 
     summary.append("\n" + "=" * 60)

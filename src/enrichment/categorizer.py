@@ -355,27 +355,39 @@ class AdvertiserCategorizer:
         use_claude: bool = False,
     ) -> dict[str, Any]:
         """
-        Add sector to a sponsor record based on company name and domain.
+        Add sector, niche_fit, and confidence to a sponsor record.
 
         Args:
             sponsor_info: Dictionary with sponsor information
             use_claude: Ignored (kept for compatibility)
 
         Returns:
-            Updated dictionary with sector field
+            Updated dictionary with sector, niche_fit, and confidence fields
         """
-        # If sector is already set to a meaningful value, don't overwrite
-        existing_sector = sponsor_info.get("sector", "").lower()
-        if existing_sector and existing_sector != "other":
-            return sponsor_info
-
         # Support both old and new field names
         company_name = sponsor_info.get("company_name") or sponsor_info.get("advertiser_name", "")
         domain = sponsor_info.get("domain") or sponsor_info.get("advertiser_domain", "")
+        ad_copy = sponsor_info.get("full_ad_copy") or sponsor_info.get("ad_copy_snippet", "")
 
-        # Get sector using keyword matching on company name and domain
-        cat_score = self.categorize(company_name, domain, "")
-        sponsor_info["sector"] = cat_score.category
+        # Categorize (sector) — skip if already set to a meaningful value
+        existing_sector = sponsor_info.get("sector", "").lower()
+        if not existing_sector or existing_sector == "other":
+            cat_score = self.categorize(company_name, domain, ad_copy)
+            sponsor_info["sector"] = cat_score.category
+        else:
+            # Use existing sector for niche fit scoring
+            cat_score = self.categorize(company_name, domain, ad_copy)
+
+        # Score niche fit (was previously missing — niche_fit and confidence were never set)
+        fit_score = self.score_niche_fit(
+            sponsor_info.get("sector", cat_score.category),
+            company_name, domain, ad_copy,
+        )
+        sponsor_info["niche_fit"] = fit_score.display
+        sponsor_info["confidence"] = sponsor_info.get("confidence") or (
+            "high" if cat_score.confidence >= 0.7 else
+            "medium" if cat_score.confidence >= 0.4 else "low"
+        )
 
         return sponsor_info
 

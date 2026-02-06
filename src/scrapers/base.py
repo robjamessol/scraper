@@ -57,6 +57,8 @@ class SponsorInfo:
             "company_name": self.advertiser_name,
             "domain": self.advertiser_domain,
             "sector": self.category,
+            "niche_fit": self.niche_fit,
+            "confidence": self.confidence,
             "sponsor_type": self.placement_type,
             "issue_url": self.issue_url,
             "issue_date": self.issue_date,

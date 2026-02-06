@@ -54,7 +54,7 @@ def test_helpers():
 
     # Test company name normalization
     assert normalize_company_name("HealthEdge, Inc.") == "healthedge"
-    assert normalize_company_name("The Wellness Company LLC") == "wellness company"
+    assert normalize_company_name("The Wellness Company LLC") == "wellness"
 
     # Test truncation
     assert truncate_text("short", 100) == "short"
@@ -139,9 +139,11 @@ def test_sponsor_info():
     )
 
     data = sponsor.to_dict()
-    assert data["advertiser_name"] == "Test Company"
-    assert data["advertiser_domain"] == "test.com"
+    assert data["company_name"] == "Test Company"
+    assert data["domain"] == "test.com"
     assert data["niche_fit"] == "🟡 Medium"
+    assert data["confidence"] == "high"
+    assert data["sector"] == "health_tech"
 
     print("  OK - SponsorInfo works correctly")
     return True

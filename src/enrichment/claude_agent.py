@@ -146,7 +146,7 @@ class ClaudeAgent:
         if not self.api_key:
             logger.warning("Claude API key not configured. AI extraction disabled.")
 
-        self.client = httpx.Client(timeout=12.0)  # Reduced for speed
+        self.client = httpx.Client(timeout=30.0)  # Sonnet calls need 15-25s; 12s caused false failures
         self._request_count = 0
         self._total_tokens = 0
 

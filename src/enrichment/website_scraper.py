@@ -1489,6 +1489,56 @@ class WebsiteScraper:
                 for c in vision_contacts:
                     all_emails[c.email] = c
 
+        # Phase 3: Claude AI contact extraction from already-fetched pages
+        # If regex extraction didn't find good contacts, use Claude to analyze
+        # high-value pages (contact, about, advertise) more intelligently.
+        has_good_email = any(c.email_type in ["advertising", "marketing"] for c in all_emails.values())
+        if not has_good_email and self.use_claude and blocked_count < 3:
+            agent = self._get_claude_agent()
+            if agent and agent.is_configured:
+                # Re-fetch the highest-value pages and send to Claude for extraction
+                high_value_paths = ["/contact", "/contact-us", "/about", "/about-us",
+                                    "/advertise", "/advertising", "/media-kit",
+                                    "/press", "/partnerships"]
+                claude_pages_checked = 0
+                client = self._get_http_client()
+                for path in high_value_paths:
+                    if claude_pages_checked >= 3 or self._is_cancelled():
+                        break
+                    url = urljoin(base_url, path)
+                    try:
+                        r = client.get(url, timeout=5.0)
+                        if r.status_code == 200 and len(r.text) > 500:
+                            claude_pages_checked += 1
+                            # Use the Haiku-Sonnet relay pattern for intelligent extraction
+                            is_high_value = any(kw in path for kw in ["contact", "advertise", "media", "press", "partner"])
+                            claude_contacts = agent.extract_contacts_from_page(
+                                r.text, url, company_name or final_domain,
+                                skip_filter=is_high_value,
+                            )
+                            for cc in claude_contacts:
+                                email = cc.get("email", "")
+                                if email and "@" in email:
+                                    email = email.lower().strip()
+                                    if not any(s in email for s in SKIP_PATTERNS):
+                                        etype = cc.get("type", "generic")
+                                        if etype in ("advertising", "partnerships", "business"):
+                                            etype = "advertising"
+                                        all_emails[email] = WebsiteContact(
+                                            email=email,
+                                            source_page=url,
+                                            email_type=etype,
+                                            name=cc.get("name"),
+                                            title=cc.get("title"),
+                                        )
+                    except Exception:
+                        continue
+
+                if claude_pages_checked > 0:
+                    new_count = sum(1 for c in all_emails.values() if c.email_type == "advertising")
+                    if new_count > 0:
+                        self._log(f"Claude AI found {new_count} advertising contact(s)")
+
         # Phase 3.5a: Archive.org fallback for blocked/timeout-heavy sites
         # Trigger earlier (3+ issues) since enterprise sites often timeout instead of explicit blocking
         if not all_emails and blocked_count >= 3:
@@ -1663,12 +1713,32 @@ def scrape_website_for_contacts(domain: str, company_name: str | None = None) ->
         scraper.close()
 
 
-def html_to_clean_text(html: str, max_length: int = 5000) -> str:
-    """Convert HTML to clean text for Claude processing."""
+def html_to_clean_text(html: str, max_length: int = 5000, preserve_links: bool = False) -> str:
+    """Convert HTML to clean text for Claude processing.
+
+    Args:
+        html: Raw HTML content
+        max_length: Maximum output length
+        preserve_links: If True, keep mailto: links and anchor text visible
+
+    Note: Footer/header are preserved because contact info is frequently located there.
+    """
     try:
         soup = BeautifulSoup(html, 'html.parser')
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+        # Only strip script/style — keep nav/footer/header (contact info lives there)
+        for tag in soup(['script', 'style']):
             tag.decompose()
+
+        if preserve_links:
+            # Replace <a> tags with "text (href)" to preserve link targets
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag.get('href', '')
+                text = a_tag.get_text(strip=True)
+                if href.startswith('mailto:'):
+                    a_tag.replace_with(f"{text} ({href})")
+                elif text and href:
+                    a_tag.replace_with(f"{text} [{href}]")
+
         text = soup.get_text(separator=' ', strip=True)
         text = ' '.join(text.split())
         return text[:max_length]
@@ -1676,17 +1746,17 @@ def html_to_clean_text(html: str, max_length: int = 5000) -> str:
         return html[:max_length]
 
 
-EMAIL_CLASSIFICATION_EXAMPLES = [
-    {"email": "ads@example.com", "type": "advertising", "reason": "ads prefix indicates advertising department"},
-    {"email": "media@example.com", "type": "advertising", "reason": "media prefix for media buying"},
-    {"email": "press@example.com", "type": "advertising", "reason": "press/PR contact for media"},
-    {"email": "partnerships@example.com", "type": "advertising", "reason": "partnerships for business development"},
-    {"email": "marketing@example.com", "type": "marketing", "reason": "general marketing department"},
-    {"email": "john.smith@example.com", "type": "personal", "reason": "personal name format"},
-    {"email": "info@example.com", "type": "generic", "reason": "generic catch-all"},
-    {"email": "support@example.com", "type": "skip", "reason": "customer support, not decision maker"},
-    {"email": "careers@example.com", "type": "skip", "reason": "HR/recruiting, not relevant"},
-]
+EMAIL_CLASSIFICATION_EXAMPLES = """
+- ads@example.com → type: "advertising" (ads prefix indicates advertising department)
+- media@example.com → type: "advertising" (media prefix for media buying)
+- press@example.com → type: "advertising" (press/PR contact for media)
+- partnerships@example.com → type: "advertising" (partnerships for business development)
+- marketing@example.com → type: "marketing" (general marketing department)
+- john.smith@example.com → type: "personal" (personal name format)
+- info@example.com → type: "generic" (generic catch-all)
+- support@example.com → type: "skip" (customer support, not decision maker)
+- careers@example.com → type: "skip" (HR/recruiting, not relevant)
+"""
 
 
 def extract_contacts_from_screenshot(b64_image: str, source_url: str, api_key: str) -> list[dict]:

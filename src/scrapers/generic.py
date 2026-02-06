@@ -116,7 +116,10 @@ class GenericNewsletterScraper(BaseScraper):
 
     def _is_cancelled(self) -> bool:
         if self._cancel_check:
-            return self._cancel_check()
+            try:
+                return self._cancel_check()
+            except Exception:
+                return False
         return False
 
     def discover_all_issues(self, limit: int | None = None) -> list[str]:

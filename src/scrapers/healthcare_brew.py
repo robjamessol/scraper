@@ -882,6 +882,9 @@ class MorningBrewScraper(BaseScraper):
         pattern = pattern_config.get("pattern", "")
         placement_type = pattern_config.get("placement_type", "unknown")
 
+        # Decode HTML entities before regex matching (e.g., &amp; -> &, so "AT&amp;T" becomes "AT&T")
+        html = html_mod.unescape(html)
+
         match = re.search(pattern, html, re.IGNORECASE)
         if not match:
             return None

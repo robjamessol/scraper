@@ -160,10 +160,10 @@ def resolve_redirect_url(url: str, timeout: float = 3.0) -> str | None:
 
     except httpx.TimeoutException:
         logger.debug(f"Timeout resolving redirect for {url[:50]}...")
-        return url
+        return None
     except Exception as e:
         logger.debug(f"Error resolving redirect for {url[:50]}...: {e}")
-        return url
+        return None
 
 
 def resolve_redirect_with_browser(url: str, timeout: float = 8.0) -> str | None:
