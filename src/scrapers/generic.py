@@ -715,8 +715,16 @@ class GenericNewsletterScraper(BaseScraper):
                 content_html = html
                 content_soup = soup
 
+            skip_domains = self._get_skip_domains()
+
             def _add_sponsor(sponsor: SponsorInfo):
-                """Deduplicate and add a sponsor."""
+                """Deduplicate and add a sponsor, filtering self-domain."""
+                # Filter out the newsletter's own domain
+                if sponsor.advertiser_domain:
+                    d = sponsor.advertiser_domain.lower()
+                    if d in skip_domains or self.domain in d:
+                        return
+
                 key = sponsor.advertiser_domain or normalize_company_name(sponsor.advertiser_name)
                 if key and key not in seen_keys and len(key) > 1:
                     seen_keys.add(key)
@@ -1055,15 +1063,6 @@ class GenericNewsletterScraper(BaseScraper):
             if not (is_promo or is_button or in_promo_section):
                 continue
 
-            # Check if link text is a usable company name
-            # For promotional links, we need a real name — generic CTAs like
-            # "here", "click here", "register" produce garbage results
-            link_text = clean_text(link.get_text()).strip()
-            if not link_text or not self._is_valid_company_name(link_text):
-                # Link text is a CTA — skip this promotional link since we can't
-                # reliably identify who the sponsor is from domain alone
-                continue
-
             seen_domains.add(domain)
 
             # Resolve tracking if needed
@@ -1105,6 +1104,12 @@ class GenericNewsletterScraper(BaseScraper):
         if re.match(r'^[\w.-]+\.(com|org|net|io|co|ai|app|dev|xyz|info)$', name_lower):
             return False
 
+        # Reject discount/offer phrases ("20% off everything", "50% off", "Save $10")
+        if re.match(r'^\d+%', name_lower):
+            return False
+        if re.match(r'^(save|free|\$)\s*\d', name_lower):
+            return False
+
         # Exact CTA phrases that are never company names
         cta_phrases = {
             "learn more", "get started", "sign up", "try it", "click here",
@@ -1132,7 +1137,8 @@ class GenericNewsletterScraper(BaseScraper):
             "order ", "grab ", "claim ", "enroll ", "book ", "reserve ",
             "download ", "watch ", "listen ", "start ", "discover ",
             "find ", "view ", "see ", "do ", "go ", "visit ",
-            "available ", "subscribe ",
+            "available ", "subscribe ", "save ", "free ", "use ",
+            "enter ", "redeem ", "unlock ",
         ]
         if any(name_lower.startswith(prefix) for prefix in action_prefixes):
             return False
