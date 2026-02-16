@@ -202,14 +202,15 @@ def enrich_sponsors(sponsors: list[SponsorInfo]) -> list[dict]:
     return enriched
 
 
-def _find_emails_for_domain(domain: str) -> list[str]:
+def _find_emails_for_domain(domain: str, company_name: str | None = None) -> list[str]:
     """
-    Find contact emails for a single domain using multiple strategies.
+    Find contact emails for a single domain using the full enrichment pipeline.
 
-    Strategy 1: Scrape the company website (HTTP only, fast) for real emails
-    Strategy 2: Generate common business email patterns + SMTP verify
+    Matches the high-success-rate Healthcare Brew / Morning Brew flow:
+    1. WebsiteScraper with browser rendering + Claude AI extraction
+    2. Email pattern generation + SMTP verification (fallback)
 
-    Returns up to 3 emails, ordered by quality (real > verified pattern > unverified).
+    Returns up to 5 emails, ordered by quality (real > verified pattern > unverified).
     """
     if not domain:
         return []
@@ -217,16 +218,16 @@ def _find_emails_for_domain(domain: str) -> list[str]:
     emails = []
     seen = set()
 
-    # Strategy 1: Quick HTTP website scrape (no browser, no AI — fast)
+    # Strategy 1: Full website scrape — browser + Claude (matches old Brew pipeline)
+    scraper = None
     try:
         scraper = WebsiteScraper(
-            timeout=5.0,
-            max_pages=5,
-            use_browser=False,
-            use_claude=False,
+            timeout=10.0,       # Match Brew: 10s (was 5s)
+            max_pages=10,       # Match Brew: 10 pages (was 5)
+            use_browser=True,   # KEY: Browser renders JS-hidden emails
+            use_claude=True,    # KEY: AI catches obfuscated emails
         )
-        result = scraper.scrape_domain(domain)
-        scraper.close()
+        result = scraper.scrape_domain(domain, company_name=company_name)
         if result and result.contacts:
             for contact in result.contacts:
                 if contact.email and contact.email.lower() not in seen:
@@ -234,82 +235,98 @@ def _find_emails_for_domain(domain: str) -> list[str]:
                     emails.append(contact.email)
     except Exception as e:
         logger.debug(f"Website scrape failed for {domain}: {e}")
+    finally:
+        if scraper:
+            try:
+                scraper.close()
+            except Exception:
+                pass
 
-    # Strategy 2: Pattern generation + SMTP verification
-    if len(emails) < 3:
+    # Strategy 2: Pattern generation + SMTP verification (fill remaining slots)
+    if len(emails) < 5:
         try:
             finder = EmailFinder(verify_smtp=True, timeout=3.0)
-            found = finder.find_emails(domain, max_results=5, verify=True)
+            found = finder.find_emails(domain, max_results=8, verify=True)
             for fe in found:
                 if fe.email and fe.email.lower() not in seen:
                     seen.add(fe.email.lower())
                     emails.append(fe.email)
-                    if len(emails) >= 3:
+                    if len(emails) >= 5:
                         break
         except Exception as e:
             logger.debug(f"Email pattern search failed for {domain}: {e}")
 
-    return emails[:3]
+    return emails[:5]
 
 
 def find_sponsor_emails(sponsors: list[dict], verbose: bool = False) -> list[dict]:
     """
     Find contact emails for all sponsor domains in parallel.
 
-    For each unique domain, scrapes the website and generates/verifies
-    email patterns. Merges results back into each sponsor dict.
+    Uses the full enrichment pipeline (browser + Claude + SMTP patterns)
+    matching the high-success-rate Healthcare Brew flow.
 
     Args:
         sponsors: List of enriched sponsor dicts
         verbose: Show per-domain progress
 
     Returns:
-        Same list with contact_email, contact_email_2, contact_email_3 added
+        Same list with contact_email through contact_email_5 added
     """
-    # Collect unique domains
-    unique_domains = set()
+    # Collect unique domains with company names for context
+    domain_info: dict[str, str | None] = {}
     for s in sponsors:
         domain = s.get("domain")
-        if domain:
-            unique_domains.add(domain)
+        if domain and domain not in domain_info:
+            domain_info[domain] = s.get("company_name")
 
-    if not unique_domains:
+    if not domain_info:
         return sponsors
 
-    logger.info(f"Finding contact emails for {len(unique_domains)} unique domains...")
+    logger.info(f"Finding contact emails for {len(domain_info)} unique domains...")
+    logger.info("Using full pipeline: browser rendering + Claude AI + SMTP verification")
 
-    # Parallel email lookup
+    # Parallel email lookup (5 workers, 120s per domain — matches Brew pipeline)
     domain_emails: dict[str, list[str]] = {}
+    completed = [0]
+    total = len(domain_info)
 
-    def _lookup(domain: str) -> tuple[str, list[str]]:
-        if verbose:
-            logger.info(f"  Looking up emails for {domain}...")
-        result = _find_emails_for_domain(domain)
-        if verbose and result:
-            logger.info(f"  Found {len(result)} email(s) for {domain}: {', '.join(result)}")
+    def _lookup(domain: str, company_name: str | None) -> tuple[str, list[str]]:
+        logger.info(f"  [{completed[0]+1}/{total}] {domain}...")
+        result = _find_emails_for_domain(domain, company_name=company_name)
+        completed[0] += 1
+        if result:
+            logger.info(f"    Found {len(result)} email(s): {', '.join(result)}")
+        else:
+            logger.info(f"    No emails found for {domain}")
         return domain, result
 
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_lookup, d): d for d in unique_domains}
+        futures = {
+            pool.submit(_lookup, domain, name): domain
+            for domain, name in domain_info.items()
+        }
         for future in as_completed(futures):
             try:
-                domain, found_emails = future.result(timeout=30)
+                domain, found_emails = future.result(timeout=120)
                 domain_emails[domain] = found_emails
             except Exception as e:
                 domain = futures[future]
-                logger.debug(f"Email lookup failed for {domain}: {e}")
+                logger.warning(f"  Email lookup timed out for {domain}: {e}")
                 domain_emails[domain] = []
 
-    # Merge emails into sponsor dicts
+    # Merge emails into sponsor dicts (5 contact slots — matches Brew pipeline)
     found_count = sum(1 for emails in domain_emails.values() if emails)
-    logger.info(f"Found emails for {found_count}/{len(unique_domains)} domains")
+    total_emails = sum(len(emails) for emails in domain_emails.values())
+    logger.info(f"Found emails for {found_count}/{len(domain_info)} domains ({total_emails} total emails)")
 
     for sponsor in sponsors:
         domain = sponsor.get("domain")
         emails = domain_emails.get(domain, [])
-        sponsor["contact_email"] = emails[0] if len(emails) > 0 else ""
-        sponsor["contact_email_2"] = emails[1] if len(emails) > 1 else ""
-        sponsor["contact_email_3"] = emails[2] if len(emails) > 2 else ""
+        for i in range(5):
+            sponsor[f"contact_email_{i+1}" if i > 0 else "contact_email"] = (
+                emails[i] if i < len(emails) else ""
+            )
 
     return sponsors
 
@@ -339,6 +356,8 @@ def save_to_csv(sponsors: list[dict], output_path: str) -> str:
         "contact_email",
         "contact_email_2",
         "contact_email_3",
+        "contact_email_4",
+        "contact_email_5",
         "source_newsletter",
         "sector",
         "niche_fit",
@@ -419,12 +438,12 @@ def generate_summary(sponsors: list[dict]) -> str:
         if len(with_email) > 0:
             summary.append("\nSponsors with emails:")
             for _, row in with_email.head(15).iterrows():
-                emails = [row.get("contact_email", "")]
-                if row.get("contact_email_2"):
-                    emails.append(row["contact_email_2"])
-                if row.get("contact_email_3"):
-                    emails.append(row["contact_email_3"])
-                email_str = ", ".join(e for e in emails if e)
+                emails = []
+                for key in ["contact_email"] + [f"contact_email_{i}" for i in range(2, 6)]:
+                    val = row.get(key, "")
+                    if val:
+                        emails.append(str(val))
+                email_str = ", ".join(emails)
                 summary.append(
                     f"  - {row['company_name']} ({row['domain']}) "
                     f"[from: {row.get('source_newsletter', 'N/A')}] -> {email_str}"
