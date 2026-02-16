@@ -540,13 +540,30 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
 
                     # Store contacts in separate columns
                     contact_count = 0
+                    found_emails = set()
                     if result and result.contacts:
                         for i, contact in enumerate(result.contacts[:5]):
                             if contact.email:
                                 company[f"email_{i+1}"] = contact.email
                                 company[f"title_{i+1}"] = contact.title or ""
                                 company[f"name_{i+1}"] = contact.name or ""
+                                found_emails.add(contact.email.lower())
                                 contact_count += 1
+
+                    # Fallback: EmailFinder pattern generation + SMTP verification
+                    if contact_count < 3:
+                        try:
+                            finder = EmailFinder(verify_smtp=True, timeout=3.0)
+                            pattern_emails = finder.find_emails(domain, max_results=5, verify=True)
+                            for fe in pattern_emails:
+                                if fe.email and fe.email.lower() not in found_emails and contact_count < 5:
+                                    contact_count += 1
+                                    company[f"email_{contact_count}"] = fe.email
+                                    company[f"title_{contact_count}"] = ""
+                                    company[f"name_{contact_count}"] = ""
+                                    found_emails.add(fe.email.lower())
+                        except Exception as ef_err:
+                            logger.debug(f"EmailFinder failed for {domain}: {ef_err}")
 
                     # Fill empty columns
                     for i in range(contact_count, 5):
@@ -1570,7 +1587,7 @@ def process_retry_queue(queue: list[dict]):
             scraper = None
             try:
                 scraper = WebsiteScraper(
-                    timeout=5.0,
+                    timeout=10.0,
                     max_pages=10,
                     use_browser=True,
                     use_claude=True,
@@ -1579,13 +1596,30 @@ def process_retry_queue(queue: list[dict]):
                 result = scraper.scrape_domain(domain)
 
                 contact_count = 0
+                found_emails = set()
                 if result and result.contacts:
                     for i, contact in enumerate(result.contacts[:5]):
                         if contact.email:
                             company[f"email_{i+1}"] = contact.email
                             company[f"title_{i+1}"] = contact.title or ""
                             company[f"name_{i+1}"] = contact.name or ""
+                            found_emails.add(contact.email.lower())
                             contact_count += 1
+
+                # Fallback: EmailFinder pattern generation + SMTP verification
+                if contact_count < 3:
+                    try:
+                        finder = EmailFinder(verify_smtp=True, timeout=3.0)
+                        pattern_emails = finder.find_emails(domain, max_results=5, verify=True)
+                        for fe in pattern_emails:
+                            if fe.email and fe.email.lower() not in found_emails and contact_count < 5:
+                                contact_count += 1
+                                company[f"email_{contact_count}"] = fe.email
+                                company[f"title_{contact_count}"] = ""
+                                company[f"name_{contact_count}"] = ""
+                                found_emails.add(fe.email.lower())
+                    except Exception as ef_err:
+                        logger.debug(f"EmailFinder failed for {domain}: {ef_err}")
 
                 if contact_count > 0:
                     add_log(f"    ✅ {domain}: Found {contact_count} contact(s)")
@@ -1734,7 +1768,7 @@ def process_custom_domains(domains: list[dict]):
             scraper = None
             try:
                 scraper = WebsiteScraper(
-                    timeout=5.0,
+                    timeout=10.0,
                     max_pages=10,
                     use_browser=True,
                     use_claude=True,
@@ -1743,13 +1777,30 @@ def process_custom_domains(domains: list[dict]):
                 result = scraper.scrape_domain(domain)
 
                 contact_count = 0
+                found_emails = set()
                 if result and result.contacts:
                     for i, contact in enumerate(result.contacts[:5]):
                         if contact.email:
                             company[f"email_{i+1}"] = contact.email
                             company[f"title_{i+1}"] = contact.title or ""
                             company[f"name_{i+1}"] = contact.name or ""
+                            found_emails.add(contact.email.lower())
                             contact_count += 1
+
+                # Fallback: EmailFinder pattern generation + SMTP verification
+                if contact_count < 3:
+                    try:
+                        finder = EmailFinder(verify_smtp=True, timeout=3.0)
+                        pattern_emails = finder.find_emails(domain, max_results=5, verify=True)
+                        for fe in pattern_emails:
+                            if fe.email and fe.email.lower() not in found_emails and contact_count < 5:
+                                contact_count += 1
+                                company[f"email_{contact_count}"] = fe.email
+                                company[f"title_{contact_count}"] = ""
+                                company[f"name_{contact_count}"] = ""
+                                found_emails.add(fe.email.lower())
+                    except Exception as ef_err:
+                        logger.debug(f"EmailFinder failed for {domain}: {ef_err}")
 
                 for i in range(contact_count, 5):
                     company[f"email_{i+1}"] = ""
