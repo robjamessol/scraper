@@ -29,6 +29,7 @@ import pandas as pd
 from ..scrapers import HealthcareBrewScraper, MorningBrewScraper, GenericNewsletterScraper, SponsorInfo
 from ..enrichment import AdvertiserCategorizer, ApolloEnricher, get_apollo_signup_instructions
 from ..enrichment.website_scraper import WebsiteScraper
+from ..enrichment.email_finder import EmailFinder
 
 
 logger = logging.getLogger(__name__)
@@ -1082,7 +1083,7 @@ def run_domain_scan(domain: str, limit: int = 20):
         except Exception as e:
             add_log(f"Error scanning {domain}: {e}", level="error")
 
-        # Deduplicate
+        # Deduplicate and filter self-domain
         add_log("Deduplicating sponsors...")
         update_status(current_action="Deduplicating")
 
@@ -1092,6 +1093,14 @@ def run_domain_scan(domain: str, limit: int = 20):
             key = s.get("domain") or s.get("company_name", "").lower()
             if key and key not in seen:
                 seen.add(key)
+                # Filter out the newsletter's own domain
+                sponsor_domain = s.get("domain", "")
+                if sponsor_domain and (
+                    sponsor_domain == domain
+                    or domain in sponsor_domain
+                    or sponsor_domain.replace("www.", "") == domain.replace("www.", "")
+                ):
+                    continue
                 unique.append(s)
 
         add_log(f"Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} mentions")
@@ -1157,13 +1166,31 @@ def run_domain_scan(domain: str, limit: int = 20):
                     result = scraper.scrape_domain(company_domain)
 
                     contact_count = 0
+                    found_emails = set()
                     if result and result.contacts:
                         for i, contact in enumerate(result.contacts[:5]):
                             if contact.email:
                                 company[f"email_{i+1}"] = contact.email
                                 company[f"title_{i+1}"] = contact.title or ""
                                 company[f"name_{i+1}"] = contact.name or ""
+                                found_emails.add(contact.email.lower())
                                 contact_count += 1
+
+                    # Fallback: EmailFinder pattern generation + SMTP verification
+                    # This catches emails when website scraping fails (Cloudflare, JS-heavy)
+                    if contact_count < 3:
+                        try:
+                            finder = EmailFinder(verify_smtp=True, timeout=3.0)
+                            pattern_emails = finder.find_emails(company_domain, max_results=5, verify=True)
+                            for fe in pattern_emails:
+                                if fe.email and fe.email.lower() not in found_emails and contact_count < 5:
+                                    contact_count += 1
+                                    company[f"email_{contact_count}"] = fe.email
+                                    company[f"title_{contact_count}"] = ""
+                                    company[f"name_{contact_count}"] = ""
+                                    found_emails.add(fe.email.lower())
+                        except Exception as ef_err:
+                            logger.debug(f"EmailFinder failed for {company_domain}: {ef_err}")
 
                     for i in range(contact_count, 5):
                         company[f"email_{i+1}"] = ""

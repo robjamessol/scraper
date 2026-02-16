@@ -1098,6 +1098,22 @@ class GenericNewsletterScraper(BaseScraper):
 
         name_lower = name.lower().strip()
 
+        # Reject names starting with punctuation/dashes (date fragments, list items)
+        if name_lower[0] in "-–—•·|/\\#*>":
+            return False
+
+        # Reject date strings ("February 7-11:", "March 2024", "Jan 1-5")
+        months = (
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        )
+        if any(name_lower.startswith(m) for m in months):
+            return False
+        # Also reject "11-15 February" style
+        if re.match(r'^\d{1,2}[\s-]', name_lower):
+            return False
+
         # Reject URLs or domain-like strings
         if name_lower.startswith(("http://", "https://", "www.")):
             return False
@@ -1160,6 +1176,18 @@ class GenericNewsletterScraper(BaseScraper):
 
         return True
 
+    @staticmethod
+    def _clean_company_name(name: str) -> str:
+        """Strip promotional suffixes, discount codes, and noise from company names."""
+        # Remove parenthetical discount codes: "(code: BEN)", "(use code BEN20)", "(20% off)"
+        name = re.sub(r'\s*\((?:code|use code|promo|discount|coupon)[:\s]+\w+\)', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s*\(\d+%\s*off\)', '', name, flags=re.IGNORECASE)
+        # Remove trailing colons, commas, dashes
+        name = name.rstrip(":,-–—").strip()
+        # Remove leading dashes or bullet points
+        name = name.lstrip("-–—•·").strip()
+        return name
+
     def _extract_company_name_from_link(self, link, domain: str) -> str | None:
         """
         Extract a clean company name from a link element and its context.
@@ -1171,7 +1199,7 @@ class GenericNewsletterScraper(BaseScraper):
 
         # Try link text first
         if link_text and len(link_text) > 1:
-            name = link_text.rstrip(".,!?:;").strip()
+            name = self._clean_company_name(link_text.rstrip(".,!?:;").strip())
             if self._is_valid_company_name(name) and len(name) <= 50:
                 return name
 
