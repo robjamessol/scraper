@@ -111,6 +111,35 @@
     {% endif %}
 </div>
 
+<!-- Scan Any Newsletter Domain -->
+<div class="bg-gray-900 rounded p-4 border border-gray-800 mb-4">
+    <div class="flex items-center justify-between mb-3">
+        <div>
+            <h2 class="text-lg font-semibold text-gray-100">Scan Any Newsletter</h2>
+            <p class="text-xs text-gray-500 mt-1">Enter any website domain to discover its newsletter archive and extract sponsors</p>
+        </div>
+    </div>
+    <div class="flex space-x-2">
+        <input type="text" id="domainInput" placeholder="e.g. peterattiamd.com"
+               class="flex-1 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+               onkeydown="if(event.key==='Enter')scanDomain()">
+        <div class="flex items-center space-x-2">
+            <label class="text-sm text-gray-400">Limit:</label>
+            <select id="domainLimit" class="border border-gray-700 rounded px-2 py-2 text-sm bg-gray-800 text-gray-200">
+                <option value="5">5</option>
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+            </select>
+        </div>
+        <button onclick="scanDomain()"
+                id="domainScanBtn"
+                class="bg-purple-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-purple-500 disabled:opacity-50">
+            Scan Domain
+        </button>
+    </div>
+</div>
+
 <!-- Live Progress Panel (shown when scanning) -->
 <div id="progressPanel" class="bg-gray-950 rounded border border-gray-800 mb-4 {% if not scan_status.is_running %}hidden{% endif %}">
     <!-- Header -->
@@ -330,10 +359,52 @@
                 scanButton.innerHTML = 'Run Scan';
                 cancelButton.classList.add('hidden');
 
+                const domainBtn = document.getElementById('domainScanBtn');
+                if (domainBtn) {
+                    domainBtn.disabled = false;
+                    domainBtn.textContent = 'Scan Domain';
+                }
+
                 if (lastStatus === 'running') window.location.reload();
             }
             lastStatus = data.status;
         } catch (e) { console.error(e); }
+    }
+
+    async function scanDomain() {
+        const domain = document.getElementById('domainInput').value.trim();
+        if (!domain) {
+            alert('Please enter a domain');
+            return;
+        }
+
+        const limit = parseInt(document.getElementById('domainLimit').value) || 20;
+        const btn = document.getElementById('domainScanBtn');
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+
+        try {
+            const response = await fetch('/api/scan-domain', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({domain: domain, limit: limit}),
+            });
+
+            const data = await response.json();
+            if (response.ok) {
+                document.getElementById('progressPanel').classList.remove('hidden');
+                document.getElementById('scanButton').disabled = true;
+                document.getElementById('cancelButton').classList.remove('hidden');
+            } else {
+                alert(data.detail || 'Failed to start scan');
+                btn.disabled = false;
+                btn.textContent = 'Scan Domain';
+            }
+        } catch (e) {
+            alert('Error: ' + e.message);
+            btn.disabled = false;
+            btn.textContent = 'Scan Domain';
+        }
     }
 
     document.addEventListener('DOMContentLoaded', startPolling);

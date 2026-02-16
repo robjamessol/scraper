@@ -26,7 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pandas as pd
 
-from ..scrapers import HealthcareBrewScraper, MorningBrewScraper, SponsorInfo
+from ..scrapers import HealthcareBrewScraper, MorningBrewScraper, GenericNewsletterScraper, SponsorInfo
 from ..enrichment import AdvertiserCategorizer, ApolloEnricher, get_apollo_signup_instructions
 from ..enrichment.website_scraper import WebsiteScraper
 
@@ -934,6 +934,331 @@ async def api_cancel_scan():
     add_log("⛔ Cancel requested - stopping scan...")
 
     return {"message": "Cancel requested. Scan will stop shortly."}
+
+
+@app.post("/api/scan-domain")
+async def api_scan_domain(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Scan any website domain for newsletter sponsors/advertisers.
+
+    This uses the GenericNewsletterScraper which can discover archives
+    and newsletter issues from any website, not just Healthcare/Morning Brew.
+
+    Request body:
+    - **domain**: Website domain to scan (e.g., "peterattiamd.com")
+    - **limit**: Maximum issues to scan (default: 20)
+
+    Returns immediately; check /api/status for progress.
+    """
+    if scan_status["is_running"]:
+        raise HTTPException(400, detail="Scan already in progress")
+
+    data = await request.json()
+    domain = data.get("domain", "").strip()
+    limit = data.get("limit", 20)
+
+    if not domain:
+        raise HTTPException(400, detail="Domain is required")
+
+    # Clean the domain
+    if domain.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        domain = urlparse(domain).netloc
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    background_tasks.add_task(run_domain_scan, domain, limit)
+
+    return {
+        "message": f"Scanning {domain} for newsletter sponsors",
+        "domain": domain,
+        "limit": limit,
+    }
+
+
+def run_domain_scan(domain: str, limit: int = 20):
+    """
+    Run a generic domain scan using GenericNewsletterScraper.
+
+    This discovers newsletter archives and issues from any website,
+    then extracts sponsor/advertiser information.
+    """
+    # Clear logs and reset status
+    with status_lock:
+        scan_status["logs"] = []
+        scan_status["is_running"] = True
+        scan_status["cancelled"] = False
+        scan_status["progress"] = 0
+        scan_status["last_error"] = None
+        scan_status["advertisers_found"] = 0
+        scan_status["issues_scanned"] = 0
+        scan_status["issues_total"] = 0
+
+    all_sponsors = []
+
+    add_log(f"Starting domain scan of {domain}, limit={limit} issues...")
+
+    try:
+        categorizer = AdvertiserCategorizer()
+
+        update_status(
+            current_newsletter=domain,
+            current_action="Initializing browser",
+            progress=5,
+        )
+
+        add_log(f"Scanning {domain}...")
+
+        try:
+            add_log("Starting browser...")
+            update_status(current_action="Starting browser")
+
+            with GenericNewsletterScraper(
+                domain=domain,
+                headless=True,
+                log_callback=add_log,
+            ) as scraper:
+                # Discover issues
+                add_log(f"Discovering newsletter issues from {domain}...")
+                update_status(current_action="Discovering issues")
+
+                issues = scraper.discover_all_issues(limit=limit)
+
+                # Filter out already-scanned issues
+                scanned_issues = load_scanned_issues()
+                new_issues = [url for url in issues if url not in scanned_issues]
+                skipped_count = len(issues) - len(new_issues)
+
+                update_status(issues_total=len(new_issues))
+
+                if skipped_count > 0:
+                    add_log(f"Found {len(issues)} issues, skipping {skipped_count} already scanned")
+                add_log(f"Scanning {len(new_issues)} new issues")
+
+                if not new_issues:
+                    add_log("No new issues found to scan")
+
+                # Scan each issue
+                for j, issue_url in enumerate(new_issues):
+                    if is_scan_cancelled():
+                        add_log("Scan cancelled by user")
+                        break
+
+                    issue_num = j + 1
+                    update_status(
+                        current_action=f"Scanning issue {issue_num}/{len(new_issues)}",
+                        issues_scanned=issue_num,
+                        progress=int((j / max(len(new_issues), 1)) * 50),
+                    )
+
+                    slug = issue_url.split("/")[-1][:40]
+                    add_log(f"  [{issue_num}/{len(new_issues)}] {slug}...")
+
+                    try:
+                        sponsors = scraper.scrape_issue(issue_url)
+
+                        if not sponsors:
+                            add_log(f"    No sponsors found")
+
+                        for sponsor in sponsors:
+                            data = sponsor.to_dict()
+                            data = categorizer.enrich_sponsor(data, use_claude=False)
+                            all_sponsors.append(data)
+
+                            update_status(advertisers_found=len(all_sponsors))
+                            add_log(f"    Found: {sponsor.advertiser_name} @ {sponsor.advertiser_domain or '(no domain)'}")
+
+                        mark_issue_scanned(issue_url)
+
+                    except Exception as e:
+                        add_log(f"    Error: {str(e)[:80]}", level="error")
+                        continue
+
+            add_log(f"Finished scanning {domain}")
+
+        except Exception as e:
+            add_log(f"Error scanning {domain}: {e}", level="error")
+
+        # Deduplicate
+        add_log("Deduplicating sponsors...")
+        update_status(current_action="Deduplicating")
+
+        seen = set()
+        unique = []
+        for s in all_sponsors:
+            key = s.get("domain") or s.get("company_name", "").lower()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(s)
+
+        add_log(f"Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} mentions")
+
+        # Merge with existing data instead of overwriting
+        existing = get_advertisers()
+        existing_domains = {a.get("domain") for a in existing if a.get("domain")}
+
+        new_advertisers = []
+        for company in unique:
+            if company.get("domain") not in existing_domains:
+                new_advertisers.append(company)
+            else:
+                # Update existing entry
+                for e in existing:
+                    if e.get("domain") == company.get("domain"):
+                        e.update(company)
+                        break
+
+        existing.extend(new_advertisers)
+
+        add_log("Saving results...")
+        save_scan_data(existing)
+
+        # Phase 2: Contact enrichment for new advertisers
+        if new_advertisers:
+            add_log(f"Phase 2: Finding contacts for {len(new_advertisers)} new companies...")
+            update_status(current_action="Finding contacts")
+
+            total = len(new_advertisers)
+            completed = [0]
+            results_lock = threading.Lock()
+            DOMAIN_TIMEOUT = 120
+
+            def scrape_company(idx_company):
+                if is_scan_cancelled():
+                    return
+
+                idx, company = idx_company
+                company_domain = company.get("domain")
+                name = company.get("company_name", "Unknown")
+
+                if not company_domain:
+                    add_log(f"  [{idx+1}/{total}] {name} - no domain, skipping")
+                    for i in range(5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
+                    return
+
+                add_log(f"  [{idx+1}/{total}] {company_domain}...")
+
+                scraper = None
+                try:
+                    scraper = WebsiteScraper(
+                        timeout=10.0,
+                        max_pages=10,
+                        use_browser=True,
+                        use_claude=True,
+                        log_callback=add_log,
+                        cancel_check=is_scan_cancelled,
+                    )
+                    result = scraper.scrape_domain(company_domain)
+
+                    contact_count = 0
+                    if result and result.contacts:
+                        for i, contact in enumerate(result.contacts[:5]):
+                            if contact.email:
+                                company[f"email_{i+1}"] = contact.email
+                                company[f"title_{i+1}"] = contact.title or ""
+                                company[f"name_{i+1}"] = contact.name or ""
+                                contact_count += 1
+
+                    for i in range(contact_count, 5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
+
+                    if contact_count > 0:
+                        add_log(f"    Found {contact_count} contact(s) for {company_domain}")
+                    else:
+                        add_log(f"    No contacts for {company_domain}")
+                        add_to_retry_queue(company_domain, name, "No contacts found", company.copy())
+
+                except Exception as e:
+                    add_log(f"    Error for {company_domain}: {str(e)[:50]}", level="error")
+                    add_to_retry_queue(company_domain, name, str(e)[:100], company.copy())
+                    for i in range(5):
+                        company[f"email_{i+1}"] = ""
+                        company[f"title_{i+1}"] = ""
+                        company[f"name_{i+1}"] = ""
+                finally:
+                    if scraper:
+                        try:
+                            scraper.close()
+                        except Exception:
+                            pass
+
+                    with results_lock:
+                        completed[0] += 1
+                        update_status(
+                            current_action=f"Finding contacts ({completed[0]}/{total})",
+                            progress=50 + int((completed[0] / max(total, 1)) * 50),
+                        )
+
+            from concurrent.futures import as_completed, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
+            import time
+
+            MAX_PHASE2_TIME = 900
+            phase2_start = time.time()
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {
+                    pool.submit(scrape_company, (idx, company)): (idx, company)
+                    for idx, company in enumerate(new_advertisers)
+                }
+                pending = set(futures.keys())
+
+                while pending:
+                    if is_scan_cancelled():
+                        for f in pending:
+                            f.cancel()
+                        break
+
+                    elapsed = time.time() - phase2_start
+                    if elapsed > MAX_PHASE2_TIME:
+                        add_log(f"Phase 2 time limit reached ({int(elapsed)}s)", level="warning")
+                        for f in pending:
+                            f.cancel()
+                        break
+
+                    remaining_time = max(10, MAX_PHASE2_TIME - elapsed)
+                    task_timeout = min(DOMAIN_TIMEOUT, remaining_time)
+                    done, pending = wait(pending, timeout=task_timeout, return_when=FIRST_COMPLETED)
+
+                    for future in done:
+                        try:
+                            future.result(timeout=1)
+                        except Exception:
+                            pass
+
+            add_log(f"Phase 2 complete: processed {completed[0]}/{total} companies")
+
+            # Save final results
+            add_log("Saving final results...")
+            save_scan_data(existing)
+
+        update_status(
+            last_scan=datetime.now().isoformat(),
+            total_advertisers=len(existing),
+            progress=100,
+        )
+
+        with_emails = len([c for c in existing if c.get("email_1")])
+        add_log(f"Done! {len(unique)} companies from {domain}, {with_emails} total with contacts")
+
+    except Exception as e:
+        add_log(f"Scan failed: {e}", level="error")
+        update_status(last_error=str(e))
+
+    finally:
+        update_status(
+            is_running=False,
+            cancelled=False,
+            current_newsletter=None,
+            current_action=None,
+        )
 
 
 @app.get("/api/advertisers")

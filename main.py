@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.scrapers import HealthcareBrewScraper, MorningBrewScraper, SponsorInfo
+from src.scrapers import HealthcareBrewScraper, MorningBrewScraper, GenericNewsletterScraper, SponsorInfo
 from src.enrichment import AdvertiserCategorizer
 from src.utils.config import load_config, get_env
 
@@ -56,6 +56,9 @@ Examples:
     # Scan Healthcare Brew (first 10 issues for testing)
     python main.py --newsletter healthcare_brew --limit 10
 
+    # Scan any website domain for newsletter sponsors
+    python main.py --domain peterattiamd.com --limit 10
+
     # Scan all newsletters
     python main.py
 
@@ -72,6 +75,13 @@ Examples:
         type=str,
         choices=list(SCRAPERS.keys()),
         help="Specific newsletter to scan (default: all active)",
+    )
+
+    parser.add_argument(
+        "--domain", "-d",
+        type=str,
+        default=None,
+        help="Scan any website domain for newsletter sponsors (e.g., peterattiamd.com)",
     )
 
     parser.add_argument(
@@ -299,31 +309,48 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"output/advertisers_{timestamp}.csv"
 
-    # Determine which newsletters to scan
-    if args.newsletter:
-        newsletters_to_scan = [args.newsletter]
-    else:
-        newsletters_to_scan = list(SCRAPERS.keys())
-
     # Scan newsletters
     all_sponsors = []
 
-    for newsletter_id in newsletters_to_scan:
+    # If --domain is specified, use the GenericNewsletterScraper
+    if args.domain:
+        logger.info(f"Scanning domain: {args.domain}")
         try:
-            sponsors = scan_newsletter(
-                newsletter_id,
-                limit=args.limit,
+            with GenericNewsletterScraper(
+                domain=args.domain,
                 headless=not args.no_headless,
                 timeout=args.timeout,
-            )
-            all_sponsors.extend(sponsors)
-
+            ) as scraper:
+                sponsors = scraper.run_full_scan(limit=args.limit, show_progress=True)
+                all_sponsors.extend(sponsors)
         except Exception as e:
-            logger.error(f"Error scanning {newsletter_id}: {e}")
+            logger.error(f"Error scanning domain {args.domain}: {e}")
             if args.verbose:
                 import traceback
                 traceback.print_exc()
-            continue
+    else:
+        # Determine which newsletters to scan
+        if args.newsletter:
+            newsletters_to_scan = [args.newsletter]
+        else:
+            newsletters_to_scan = list(SCRAPERS.keys())
+
+        for newsletter_id in newsletters_to_scan:
+            try:
+                sponsors = scan_newsletter(
+                    newsletter_id,
+                    limit=args.limit,
+                    headless=not args.no_headless,
+                    timeout=args.timeout,
+                )
+                all_sponsors.extend(sponsors)
+
+            except Exception as e:
+                logger.error(f"Error scanning {newsletter_id}: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                continue
 
     if not all_sponsors:
         logger.warning("No advertisers found!")
