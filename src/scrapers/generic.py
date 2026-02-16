@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import httpx
 
-from .base import BaseScraper, SponsorInfo
+from .base import BaseScraper, SponsorInfo, AffiliateLink, AFFILIATE_NETWORKS
 from ..utils.helpers import (
     extract_domain,
     clean_text,
@@ -17,8 +17,10 @@ from ..utils.helpers import (
     truncate_text,
     resolve_redirect_url,
     is_tracking_domain,
+    is_tracking_link,
     guess_domain_from_name,
     get_http_client,
+    extract_links_from_html,
 )
 
 
@@ -574,13 +576,63 @@ class GenericNewsletterScraper(BaseScraper):
         if not clicked:
             self._scroll_to_load_all(page, max_scrolls=20, wait_ms=1000)
 
+    # ===== SPONSOR / ADVERTISER EXTRACTION =====
+
+    # Domains to always skip (not advertisers)
+    SOCIAL_AND_UTILITY_DOMAINS = {
+        "twitter.com", "x.com", "facebook.com", "linkedin.com",
+        "instagram.com", "youtube.com", "youtu.be", "google.com",
+        "google.co.uk", "pinterest.com", "reddit.com", "tiktok.com",
+        "threads.net", "mastodon.social",
+        "apple.com", "apps.apple.com", "play.google.com",
+        "spotify.com", "open.spotify.com",
+        "en.wikipedia.org", "wikipedia.org",
+        "substack.com", "beehiiv.com", "convertkit.com",
+        "mailchimp.com", "hubspot.com",
+        "gravatar.com", "wp.com", "wordpress.com", "wordpress.org",
+        "w3.org", "schema.org", "creativecommons.org",
+        "github.com", "gitlab.com", "stackexchange.com",
+        "nih.gov", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+        "doi.org", "arxiv.org", "nature.com", "sciencedirect.com",
+        "scholar.google.com",
+        "nytimes.com", "washingtonpost.com", "wsj.com", "bbc.com",
+        "bbc.co.uk", "cnn.com", "reuters.com", "apnews.com",
+        "cloudflare.com", "jsdelivr.net", "googleapis.com",
+        "googlesyndication.com", "googletagmanager.com",
+        "doubleclick.net", "googleadservices.com",
+        "gstatic.com", "cdnjs.cloudflare.com",
+    }
+
+    # CSS class/id patterns that indicate sponsor sections
+    SPONSOR_SECTION_PATTERNS = [
+        r'sponsor', r'partner', r'advertis', r'promo',
+        r'promoted', r'paid', r'branded', r'commercial',
+        r'ad-slot', r'ad_slot', r'advert', r'brought-to-you',
+    ]
+
+    def _get_skip_domains(self) -> set[str]:
+        """Build the dynamic set of domains to skip for this newsletter."""
+        skip = set(self.SOCIAL_AND_UTILITY_DOMAINS)
+        skip.add(self.domain)
+        skip.add(f"www.{self.domain}")
+        # Also skip common subdomains of this newsletter
+        parts = self.domain.split(".")
+        if len(parts) >= 2:
+            root = ".".join(parts[-2:])
+            skip.add(root)
+            skip.add(f"www.{root}")
+        return skip
+
     def scrape_issue(self, issue_url: str) -> list[SponsorInfo]:
         """
         Scrape a single page for sponsor/advertiser information.
 
-        Uses the generic auto_detect_sponsors() method that matches
-        common sponsor patterns (Presented By, Sponsored By, etc.)
-        plus affiliate link extraction.
+        Uses a comprehensive multi-strategy approach:
+        1. Traditional pattern matching (Presented By, Sponsored By, etc.)
+        2. Sponsor-labeled HTML sections (CSS classes with sponsor/ad/partner)
+        3. UTM-tagged external links (almost always paid placements)
+        4. Known affiliate network links
+        5. External promotional links (company websites linked with context)
 
         Args:
             issue_url: URL of the newsletter issue or content page
@@ -590,7 +642,7 @@ class GenericNewsletterScraper(BaseScraper):
         """
         page = self._new_page()
         sponsors = []
-        seen_sponsors = set()
+        seen_keys = set()  # Track by domain to avoid duplicates
 
         try:
             logger.debug(f"Scraping: {issue_url}")
@@ -608,47 +660,52 @@ class GenericNewsletterScraper(BaseScraper):
                 "article, .post-content, .entry-content, .newsletter-content, main, body"
             ).split(", ")
 
+            content_soup = None
             content_html = ""
             for selector in content_selectors:
                 content = soup.select_one(selector)
                 if content:
                     content_html = str(content)
+                    content_soup = content
                     break
 
             if not content_html:
                 content_html = html
+                content_soup = soup
 
-            # Use auto-detect for sponsor extraction (works generically)
-            auto_sponsors = self.auto_detect_sponsors(content_html, issue_url)
-            for sponsor in auto_sponsors:
-                normalized = normalize_company_name(sponsor.advertiser_name)
-                if normalized not in seen_sponsors and len(normalized) > 1:
-                    seen_sponsors.add(normalized)
+            def _add_sponsor(sponsor: SponsorInfo):
+                """Deduplicate and add a sponsor."""
+                key = sponsor.advertiser_domain or normalize_company_name(sponsor.advertiser_name)
+                if key and key not in seen_keys and len(key) > 1:
+                    seen_keys.add(key)
                     sponsor.issue_date = issue_date
                     sponsor.source_newsletter = self.domain
                     sponsors.append(sponsor)
-                    logger.debug(f"Found sponsor: {sponsor.advertiser_name} ({sponsor.placement_type})")
 
-            # Also extract affiliate links
-            affiliate_links = self.extract_affiliate_links(content_html, issue_url, issue_date)
-            for aff in affiliate_links:
-                normalized = normalize_company_name(aff.advertiser_name)
-                if normalized not in seen_sponsors and aff.advertiser_domain:
-                    seen_sponsors.add(normalized)
-                    sponsor = SponsorInfo(
-                        advertiser_name=aff.advertiser_name,
-                        advertiser_domain=aff.advertiser_domain,
-                        placement_type="affiliate_link",
-                        ad_copy_snippet=aff.context_snippet,
-                        issue_url=issue_url,
-                        issue_date=issue_date,
-                        source_newsletter=self.domain,
-                        confidence="low",
-                        sponsor_url=aff.link_url,
-                        landing_page_url=aff.link_url,
-                        full_ad_copy=aff.context_snippet,
-                    )
-                    sponsors.append(sponsor)
+            # === Strategy 1: Traditional text pattern matching ===
+            auto_sponsors = self.auto_detect_sponsors(content_html, issue_url)
+            for s in auto_sponsors:
+                _add_sponsor(s)
+
+            # === Strategy 2: Sponsor-labeled HTML sections ===
+            section_sponsors = self._extract_from_sponsor_sections(content_soup, issue_url)
+            for s in section_sponsors:
+                _add_sponsor(s)
+
+            # === Strategy 3: UTM-tagged external links ===
+            utm_sponsors = self._extract_utm_tagged_links(content_soup, issue_url)
+            for s in utm_sponsors:
+                _add_sponsor(s)
+
+            # === Strategy 4: Affiliate network links ===
+            aff_sponsors = self._extract_affiliate_sponsors(content_html, issue_url, issue_date)
+            for s in aff_sponsors:
+                _add_sponsor(s)
+
+            # === Strategy 5: Promotional external links ===
+            promo_sponsors = self._extract_promotional_links(content_soup, issue_url)
+            for s in promo_sponsors:
+                _add_sponsor(s)
 
         except Exception as e:
             logger.error(f"Error scraping {issue_url}: {e}")
@@ -657,6 +714,425 @@ class GenericNewsletterScraper(BaseScraper):
             page.context.close()
 
         return sponsors
+
+    def _extract_from_sponsor_sections(
+        self,
+        content_soup: BeautifulSoup,
+        issue_url: str,
+    ) -> list[SponsorInfo]:
+        """
+        Find sponsors from HTML elements with sponsor/ad/partner CSS classes.
+
+        Many newsletters wrap sponsor content in divs with class names like
+        "sponsor-section", "ad-slot", "partner-content", etc.
+        """
+        sponsors = []
+        skip_domains = self._get_skip_domains()
+
+        # Find elements with sponsor-related classes or IDs
+        for pattern in self.SPONSOR_SECTION_PATTERNS:
+            sections = content_soup.select(
+                f'[class*="{pattern}"], [id*="{pattern}"]'
+            )
+            for section in sections:
+                # Extract all links in this section
+                links = section.find_all("a", href=True)
+                section_text = clean_text(section.get_text())
+
+                for link in links:
+                    href = link.get("href", "")
+                    link_text = clean_text(link.get_text())
+
+                    if not href or href.startswith(("#", "javascript:", "mailto:")):
+                        continue
+
+                    domain = extract_domain(href, strip_marketing=True)
+                    if not domain or domain in skip_domains:
+                        continue
+
+                    # Resolve tracking links
+                    if is_tracking_domain(href):
+                        resolved = resolve_redirect_url(href)
+                        if resolved:
+                            domain = extract_domain(resolved, strip_marketing=True)
+                            if not domain or domain in skip_domains:
+                                continue
+
+                    name = link_text if link_text and len(link_text) > 2 else domain.split(".")[0].title()
+                    # Clean name of CTA phrases
+                    name = re.sub(
+                        r'^(Learn More|Get Started|Sign Up|Try|Click|Visit|Read More|Shop|Buy|Discover)\b.*',
+                        '', name, flags=re.IGNORECASE
+                    ).strip()
+                    if not name or len(name) < 2:
+                        name = domain.split(".")[0].title()
+
+                    sponsors.append(SponsorInfo(
+                        advertiser_name=name,
+                        advertiser_domain=domain,
+                        placement_type="sponsor_section",
+                        ad_copy_snippet=truncate_text(section_text, 200),
+                        issue_url=issue_url,
+                        issue_date=None,
+                        source_newsletter=self.domain,
+                        confidence="high",
+                        sponsor_url=href,
+                        landing_page_url=href,
+                        full_ad_copy=section_text[:500],
+                    ))
+                    break  # One sponsor per section
+
+        return sponsors
+
+    def _extract_utm_tagged_links(
+        self,
+        content_soup: BeautifulSoup,
+        issue_url: str,
+    ) -> list[SponsorInfo]:
+        """
+        Extract sponsors from links with UTM tracking parameters.
+
+        Links with utm_source, utm_medium, or utm_campaign are almost
+        always paid placements or tracked sponsor links. This is the #1
+        signal for identifying advertising in newsletters.
+        """
+        sponsors = []
+        skip_domains = self._get_skip_domains()
+        seen_domains = set()
+
+        for link in content_soup.find_all("a", href=True):
+            href = link.get("href", "")
+            href_lower = href.lower()
+
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            # Check for UTM parameters
+            has_utm = any(param in href_lower for param in [
+                "utm_source=", "utm_medium=", "utm_campaign=",
+                "utm_content=", "utm_term=",
+            ])
+
+            if not has_utm:
+                continue
+
+            # Get the domain
+            domain = extract_domain(href, strip_marketing=True)
+            if not domain or domain in skip_domains:
+                continue
+
+            # Resolve tracking links to actual domain
+            if is_tracking_domain(href):
+                resolved = resolve_redirect_url(href)
+                if resolved:
+                    domain = extract_domain(resolved, strip_marketing=True)
+                    if not domain or domain in skip_domains:
+                        continue
+
+            if domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+
+            # Extract company name and context
+            link_text = clean_text(link.get_text())
+            name = self._extract_company_name_from_link(link, domain)
+
+            # Get surrounding context for ad copy
+            ad_copy = self._get_link_context(link)
+
+            # Determine what they sell from context
+            product = self._extract_product_from_context(ad_copy, name)
+
+            sponsors.append(SponsorInfo(
+                advertiser_name=name,
+                advertiser_domain=domain,
+                placement_type="utm_tracked",
+                ad_copy_snippet=truncate_text(ad_copy, 200),
+                issue_url=issue_url,
+                issue_date=None,
+                source_newsletter=self.domain,
+                confidence="high",
+                sponsor_url=href,
+                landing_page_url=href,
+                full_ad_copy=ad_copy[:500],
+                product_service=product,
+            ))
+
+        return sponsors
+
+    def _extract_affiliate_sponsors(
+        self,
+        content_html: str,
+        issue_url: str,
+        issue_date: str | None,
+    ) -> list[SponsorInfo]:
+        """
+        Extract sponsors from affiliate network links.
+
+        Uses the base class extract_affiliate_links() but with
+        the dynamic skip domain list for this newsletter.
+        """
+        sponsors = []
+        skip_domains = self._get_skip_domains()
+
+        soup = BeautifulSoup(content_html, "lxml")
+
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            link_text = clean_text(a.get_text())
+
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            domain = extract_domain(href, strip_marketing=False)
+            if not domain:
+                continue
+
+            # Skip newsletter's own links
+            if any(skip in domain.lower() for skip in skip_domains):
+                continue
+
+            # Check known affiliate networks
+            affiliate_network = None
+            for network_domain, network_name in AFFILIATE_NETWORKS.items():
+                if network_domain in domain.lower():
+                    affiliate_network = network_name
+                    break
+
+            # Check URL params for affiliate indicators
+            href_lower = href.lower()
+            if not affiliate_network:
+                if "tag=" in href_lower and "amazon" in href_lower:
+                    affiliate_network = "Amazon"
+                elif any(p in href_lower for p in ["?ref=", "&ref=", "affiliate", "partner_id", "aff_id"]):
+                    affiliate_network = "Affiliate"
+
+            if not affiliate_network:
+                continue
+
+            # Resolve to actual domain
+            actual_domain = domain
+            if affiliate_network != "Amazon":
+                try:
+                    resolved = resolve_redirect_url(href, timeout=2.0)
+                    if resolved:
+                        actual_domain = extract_domain(resolved, strip_marketing=True) or domain
+                except Exception:
+                    pass
+
+            # Get context
+            parent = a.parent
+            context = clean_text(parent.get_text())[:200] if parent else link_text
+            name = link_text if link_text and len(link_text) > 2 else actual_domain.split(".")[0].title()
+
+            sponsors.append(SponsorInfo(
+                advertiser_name=name,
+                advertiser_domain=actual_domain,
+                placement_type="affiliate_link",
+                ad_copy_snippet=context,
+                issue_url=issue_url,
+                issue_date=issue_date,
+                source_newsletter=self.domain,
+                confidence="medium",
+                sponsor_url=href,
+                landing_page_url=href,
+                full_ad_copy=context,
+            ))
+
+        return sponsors
+
+    def _extract_promotional_links(
+        self,
+        content_soup: BeautifulSoup,
+        issue_url: str,
+    ) -> list[SponsorInfo]:
+        """
+        Extract sponsors from external links that look promotional.
+
+        Finds external links to company websites (not news, academic, social)
+        that appear in a promotional context (near discount codes, CTA
+        buttons, product descriptions, or recommendation language).
+        """
+        sponsors = []
+        skip_domains = self._get_skip_domains()
+        seen_domains = set()
+
+        # Promotional context indicators
+        promo_indicators = [
+            r'discount', r'coupon', r'promo\s*code', r'code[:\s]+\w+',
+            r'use\s+code', r'save\s+\d+%', r'\d+%\s+off',
+            r'exclusive\s+(?:offer|deal|discount)',
+            r'special\s+(?:offer|deal|discount|pricing)',
+            r'free\s+(?:trial|shipping|sample|gift)',
+            r'limited\s+time', r'act\s+now', r'don\'?t\s+miss',
+            r'check\s+(?:it\s+)?out', r'highly\s+recommend',
+            r'i\s+(?:use|love|recommend|suggest|swear\s+by)',
+            r'my\s+(?:favorite|go-to|preferred)',
+            r'game[\s-]changer', r'must[\s-]have', r'worth\s+(?:trying|checking)',
+        ]
+
+        for link in content_soup.find_all("a", href=True):
+            href = link.get("href", "")
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            domain = extract_domain(href, strip_marketing=True)
+            if not domain or domain in skip_domains or domain in seen_domains:
+                continue
+
+            # Skip links already captured by other strategies (UTM, affiliate)
+            href_lower = href.lower()
+            has_utm = any(p in href_lower for p in ["utm_source=", "utm_medium="])
+            if has_utm:
+                continue  # Already handled by UTM strategy
+            is_affiliate = any(net in domain.lower() for net in AFFILIATE_NETWORKS)
+            if is_affiliate:
+                continue  # Already handled by affiliate strategy
+
+            # Get context around this link
+            context = self._get_link_context(link)
+            context_lower = context.lower()
+
+            # Check if context is promotional
+            is_promo = any(re.search(pat, context_lower) for pat in promo_indicators)
+
+            # Also check if the link is styled as a button (CTA)
+            link_classes = " ".join(link.get("class", []))
+            is_button = any(kw in link_classes.lower() for kw in [
+                "btn", "button", "cta", "action",
+            ])
+
+            # Check if link has a promotional parent container
+            parent = link.parent
+            parent_classes = " ".join(parent.get("class", [])).lower() if parent and parent.get("class") else ""
+            in_promo_section = any(
+                kw in parent_classes
+                for kw in ["recommend", "product", "offer", "feature", "pick", "tool"]
+            )
+
+            if not (is_promo or is_button or in_promo_section):
+                continue
+
+            seen_domains.add(domain)
+
+            # Resolve tracking if needed
+            if is_tracking_domain(href):
+                resolved = resolve_redirect_url(href)
+                if resolved:
+                    domain = extract_domain(resolved, strip_marketing=True) or domain
+
+            name = self._extract_company_name_from_link(link, domain)
+            product = self._extract_product_from_context(context, name)
+
+            sponsors.append(SponsorInfo(
+                advertiser_name=name,
+                advertiser_domain=domain,
+                placement_type="promotional_link",
+                ad_copy_snippet=truncate_text(context, 200),
+                issue_url=issue_url,
+                issue_date=None,
+                source_newsletter=self.domain,
+                confidence="medium",
+                sponsor_url=href,
+                landing_page_url=href,
+                full_ad_copy=context[:500],
+                product_service=product,
+            ))
+
+        return sponsors
+
+    def _extract_company_name_from_link(self, link, domain: str) -> str:
+        """Extract a clean company name from a link element and its context."""
+        link_text = clean_text(link.get_text())
+
+        # If link text is a good company name (not a CTA phrase), use it
+        cta_phrases = {
+            "learn more", "get started", "sign up", "try it", "click here",
+            "read more", "shop now", "buy now", "visit", "check it out",
+            "see more", "discover", "explore", "start", "join", "register",
+            "download", "subscribe", "watch", "listen", "view",
+        }
+
+        if link_text and len(link_text) > 1 and link_text.lower() not in cta_phrases:
+            # Check it's not too long (probably a sentence, not a name)
+            if len(link_text) <= 50:
+                # Remove trailing punctuation
+                name = link_text.rstrip(".,!?:;")
+                if name:
+                    return name
+
+        # Check for a nearby heading or strong text
+        parent = link.parent
+        if parent:
+            # Look for strong/bold text in the same parent
+            strong = parent.find(["strong", "b", "h3", "h4"])
+            if strong:
+                strong_text = clean_text(strong.get_text())
+                if strong_text and 2 < len(strong_text) <= 40:
+                    return strong_text
+
+        # Fall back to domain name
+        return domain.split(".")[0].replace("-", " ").title()
+
+    def _get_link_context(self, link) -> str:
+        """Get the text context surrounding a link (for ad copy extraction)."""
+        # Try to get the containing paragraph or div
+        for parent in link.parents:
+            if parent.name in ("p", "div", "td", "li", "section", "blockquote"):
+                text = clean_text(parent.get_text())
+                if text and len(text) > 20:
+                    return text[:500]
+            # Don't go too far up
+            if parent.name in ("article", "main", "body"):
+                break
+
+        # Fall back to immediate parent
+        parent = link.parent
+        if parent:
+            return clean_text(parent.get_text())[:500]
+
+        return clean_text(link.get_text())
+
+    def _extract_product_from_context(self, context: str, company_name: str) -> str | None:
+        """Extract what a company sells/offers from surrounding text."""
+        if not context:
+            return None
+
+        # Escape company name for regex, handle multi-word names
+        esc_name = re.escape(company_name)
+
+        # Patterns that describe products/services (ordered by specificity)
+        product_patterns = [
+            # "Company is the/a X" - direct product description
+            rf'{esc_name}\s+is\s+(?:the|a|an)\s+([\w\s,\-]+?)(?:\.|!|\?|$)',
+            # "Company, the X that..." - appositive description
+            rf'{esc_name},?\s+the\s+([\w\s,\-]+?)(?:\bthat\b|\bwhich\b|\bfor\b|\.|!)',
+            # "Company offers/provides/sells X"
+            rf'{esc_name}\s+(?:offers?|provides?|sells?|makes?|delivers?|creates?)\s+([\w\s]+?)(?:\.|,|!|\?|$)',
+            # "X from/by Company"
+            rf'([\w\s]+?)\s+(?:by|from)\s+{esc_name}',
+            # "Company for X" - what it's used for
+            rf'{esc_name}\s+for\s+([\w\s]+?)(?:\.|,|!|\?|$)',
+            # "their/the X platform/tool/service/product"
+            r'(?:their|the|a|an)\s+([\w\s]+?(?:platform|tool|service|product|app|device|supplement|solution|software|system|program|kit|test|testing|course|monitor|monitoring|tracker|tracking|drink|wearable))',
+            # "for continuous/comprehensive/advanced X"
+            r'for\s+((?:continuous|comprehensive|advanced|real-time|daily|personalized)\s+[\w\s]+?)(?:\.|,|!|\?|$)',
+            # "for your X" (what problem it solves)
+            r'for\s+your\s+([\w\s]+?)(?:\.|,|!|\?|$)',
+            # "game-changer for X" / "great for X"
+            r'(?:game[\s-]changer|great|perfect|essential|must[\s-]have)\s+for\s+([\w\s]+?)(?:\.|,|!|\?|$)',
+            # Discount/offer descriptions
+            r'(?:get|save|enjoy)\s+(.+?)(?:\.|,|!|\?|$)',
+        ]
+
+        for pattern in product_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                product = clean_text(match.group(1))
+                if 5 < len(product) < 100:
+                    return product
+
+        return None
 
     def _extract_issue_date(
         self,

@@ -215,17 +215,19 @@ def save_to_csv(sponsors: list[dict], output_path: str) -> str:
 
     # Reorder columns for better readability
     column_order = [
-        "advertiser_name",
-        "advertiser_domain",
-        "category",
+        "company_name",
+        "domain",
+        "sector",
         "niche_fit",
-        "placement_type",
+        "sponsor_type",
+        "confidence",
+        "product_service",
         "ad_copy_snippet",
+        "landing_page_url",
         "source_newsletter",
         "issue_date",
         "issue_url",
         "sponsor_url",
-        "confidence",
     ]
 
     # Only include columns that exist
@@ -260,29 +262,33 @@ def generate_summary(sponsors: list[dict]) -> str:
         summary.append(f"  - {source}: {count}")
 
     # By category
-    summary.append("\nBy Category:")
-    for cat, count in df["category"].value_counts().items():
-        summary.append(f"  - {cat}: {count}")
+    if "sector" in df.columns:
+        summary.append("\nBy Category:")
+        for cat, count in df["sector"].value_counts().items():
+            summary.append(f"  - {cat}: {count}")
 
     # By niche fit
-    summary.append("\nBy Niche Fit:")
-    for fit, count in df["niche_fit"].value_counts().items():
-        summary.append(f"  - {fit}: {count}")
+    if "niche_fit" in df.columns:
+        summary.append("\nBy Niche Fit:")
+        for fit, count in df["niche_fit"].value_counts().items():
+            summary.append(f"  - {fit}: {count}")
 
     # Top advertisers by confidence
-    summary.append("\nTop High-Confidence Advertisers:")
-    high_conf = df[df["confidence"] == "high"].head(10)
-    for _, row in high_conf.iterrows():
-        summary.append(
-            f"  - {row['advertiser_name']} ({row['category']}) - {row['niche_fit']}"
-        )
+    if "confidence" in df.columns:
+        summary.append("\nTop High-Confidence Advertisers:")
+        high_conf = df[df["confidence"] == "high"].head(10)
+        for _, row in high_conf.iterrows():
+            summary.append(
+                f"  - {row['company_name']} ({row.get('sector', 'other')}) - {row.get('product_service', 'N/A')}"
+            )
 
     # High-fit advertisers
-    high_fit = df[df["niche_fit"].str.contains("High", na=False)]
-    if len(high_fit) > 0:
-        summary.append(f"\nHigh-Fit Advertisers ({len(high_fit)} total):")
-        for _, row in high_fit.head(10).iterrows():
-            summary.append(f"  - {row['advertiser_name']} ({row['advertiser_domain']})")
+    if "niche_fit" in df.columns:
+        high_fit = df[df["niche_fit"].str.contains("High", na=False)]
+        if len(high_fit) > 0:
+            summary.append(f"\nHigh-Fit Advertisers ({len(high_fit)} total):")
+            for _, row in high_fit.head(10).iterrows():
+                summary.append(f"  - {row['company_name']} ({row['domain']})")
 
     summary.append("\n" + "=" * 60)
 
