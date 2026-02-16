@@ -243,6 +243,8 @@ class WebsiteScraper:
             "contact", "about", "team", "advertise", "advertising",
             "partner", "press", "media", "sponsor", "leadership",
             "get in touch", "reach us", "media kit", "work with us",
+            "connect", "company", "corporate", "email", "inquir",
+            "collaborate", "newsletter", "info",
         ]
 
         with self._browser_context() as context:
@@ -370,12 +372,15 @@ class WebsiteScraper:
 
     # Common paths where contact/advertising emails are found
     CONTACT_PATHS = [
-        "/contact", "/contact-us", "/get-in-touch",
-        "/about", "/about-us", "/about/contact",
-        "/advertise", "/advertising", "/media-kit", "/mediakit",
-        "/partnerships", "/sponsors", "/sponsor",
+        "/contact", "/contact-us", "/get-in-touch", "/connect",
+        "/about", "/about-us", "/about/contact", "/company",
+        "/advertise", "/advertise-with-us", "/advertising",
+        "/media-kit", "/mediakit", "/media-kit/",
+        "/partnerships", "/partners", "/sponsors", "/sponsor",
         "/press", "/press-room", "/newsroom", "/media",
         "/team", "/leadership", "/our-team", "/about/team",
+        "/info", "/corporate", "/corporate/contact",
+        "/footer", "/site-map", "/sitemap",
     ]
 
     def scrape_domain(self, domain: str, company_name: str | None = None) -> WebsiteScrapeResult:
@@ -464,23 +469,30 @@ class WebsiteScraper:
         # Always use browser when available — finds JS-rendered emails and
         # discovers real navigation links (footer, hamburger menu, etc.)
         if self.use_browser and _time_remaining() > 10:
-            # Collect browser URLs: common paths + discovered links
+            # Browser MUST re-visit key pages even if HTTP visited them,
+            # because JS rendering reveals different content (emails hidden
+            # behind JavaScript, dynamic footer content, etc.)
             browser_urls = []
 
-            # Start with pages we haven't visited yet
-            for path in self.CONTACT_PATHS:
-                url = f"{base_url}{path}"
-                if url not in visited_urls:
+            # Always start with homepage (footer emails are JS-rendered)
+            browser_urls.append(base_url)
+
+            # Re-visit pages that HTTP found valid (200) — JS may reveal more
+            for url in valid_paths:
+                if url != base_url and url not in browser_urls:
                     browser_urls.append(url)
 
-            # Always include homepage for link discovery even if HTTP visited it
-            browser_urls.insert(0, base_url)
+            # Also add unvisited contact paths
+            for path in self.CONTACT_PATHS:
+                url = f"{base_url}{path}"
+                if url not in browser_urls:
+                    browser_urls.append(url)
 
             # Find real links via browser (footer links, nav links, etc.)
             try:
                 real_links = self._find_links_with_browser(base_url, domain)
                 for link in real_links:
-                    if link not in visited_urls and link not in browser_urls:
+                    if link not in browser_urls:
                         browser_urls.append(link)
             except Exception as e:
                 logger.debug(f"Browser link discovery failed: {e}")
@@ -500,16 +512,13 @@ class WebsiteScraper:
                 except Exception as e:
                     logger.debug(f"Claude URL selection failed: {e}")
 
-            # Deduplicate and limit
+            # Deduplicate while preserving order
             unique_browser = []
-            seen_browser = set(visited_urls)
+            seen_browser = set()
             for u in browser_urls:
                 if u not in seen_browser:
                     seen_browser.add(u)
                     unique_browser.append(u)
-            # Always include homepage for footer scraping even if HTTP visited it
-            if base_url not in unique_browser:
-                unique_browser.insert(0, base_url)
 
             # Browser scrape all discovered URLs
             if unique_browser:
@@ -578,10 +587,12 @@ class WebsiteScraper:
 
         Searches:
         1. Standard email regex across full page
-        2. mailto: links
+        2. mailto: links (most reliable signal)
         3. Obfuscated emails (name [at] domain [dot] com)
         4. Footer sections specifically (where many emails hide)
         5. HTML entity decoded emails (&#64; for @)
+        6. Meta tags and JSON-LD structured data
+        7. data-email attributes and other hidden sources
         """
         contacts = []
         found_emails: set[str] = set()
@@ -610,10 +621,8 @@ class WebsiteScraper:
 
         # 4. Specifically parse footer content (emails often only in footer)
         footer_elements = soup.find_all(["footer"]) or []
-        # Also look for elements with footer-like classes
         for el in soup.find_all(True, class_=re.compile(r'footer|bottom|colophon', re.I)):
             footer_elements.append(el)
-        # Also try id-based footer
         footer_by_id = soup.find(id=re.compile(r'footer|bottom', re.I))
         if footer_by_id:
             footer_elements.append(footer_by_id)
@@ -623,7 +632,6 @@ class WebsiteScraper:
             footer_decoded = footer_text.replace("&#64;", "@").replace("&#x40;", "@")
             footer_emails = EMAIL_PATTERN.findall(footer_decoded)
             emails.update(footer_emails)
-            # Also check footer mailto links
             for link in footer.find_all("a", href=True):
                 href = link.get("href", "")
                 if href.startswith("mailto:"):
@@ -631,9 +639,38 @@ class WebsiteScraper:
                     if email and "@" in email:
                         emails.add(email)
 
+        # 5. Meta tags (some sites embed email in meta tags)
+        for meta in soup.find_all("meta"):
+            content = meta.get("content", "")
+            if "@" in content:
+                meta_emails = EMAIL_PATTERN.findall(content)
+                emails.update(meta_emails)
+
+        # 6. JSON-LD structured data (schema.org ContactPoint, Organization, etc.)
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json
+                data = json.loads(script.string or "")
+                self._extract_emails_from_json(data, emails)
+            except Exception:
+                pass
+
+        # 7. data-email attributes and other hidden sources
+        for el in soup.find_all(True, attrs={"data-email": True}):
+            email = el.get("data-email", "").strip().lower()
+            if email and "@" in email:
+                emails.add(email)
+        # Also check data-href for obfuscated mailto
+        for el in soup.find_all(True, attrs={"data-href": True}):
+            href = el.get("data-href", "")
+            if href.startswith("mailto:"):
+                email = href.replace("mailto:", "").split("?")[0].strip().lower()
+                if email and "@" in email:
+                    emails.add(email)
+
         # Filter and classify emails
         for email in emails:
-            email = email.lower().strip()
+            email = email.lower().strip().rstrip(".")
 
             # Skip obvious spam/system emails
             if any(s in email for s in SKIP_PATTERNS):
@@ -655,17 +692,21 @@ class WebsiteScraper:
                 "marketing", "press", "pr", "communications",
             ]
             is_priority = any(p == prefix or prefix.startswith(p) for p in priority_prefixes)
-            is_generic_business = prefix in (
-                "info", "hello", "contact", "sales", "business",
-                "general", "inquiries", "team",
-            )
 
-            # Accept: emails matching the domain, priority prefixes, or generic business
+            # Check if the email's domain matches the company we're scraping
             email_domain = email.split("@")[1] if "@" in email else ""
             domain_match = domain in email_domain or email_domain.endswith(f".{domain}")
 
-            if not domain_match and not is_priority and not is_generic_business:
-                continue
+            # Accept ALL emails that belong to this company's domain
+            # (any prefix — personal names, departments, etc.)
+            # For third-party domains, only accept known business prefixes
+            if not domain_match:
+                is_generic_business = prefix in (
+                    "info", "hello", "contact", "sales", "business",
+                    "general", "inquiries", "team",
+                )
+                if not is_priority and not is_generic_business:
+                    continue
 
             if email in found_emails:
                 continue
@@ -677,3 +718,16 @@ class WebsiteScraper:
             ))
 
         return contacts
+
+    def _extract_emails_from_json(self, data, emails_set: set):
+        """Recursively extract emails from JSON-LD structured data."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key.lower() in ("email", "contactpoint", "contacttype"):
+                    if isinstance(value, str) and "@" in value:
+                        clean = value.replace("mailto:", "").strip().lower()
+                        emails_set.add(clean)
+                self._extract_emails_from_json(value, emails_set)
+        elif isinstance(data, list):
+            for item in data:
+                self._extract_emails_from_json(item, emails_set)
