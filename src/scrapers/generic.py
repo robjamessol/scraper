@@ -719,11 +719,18 @@ class GenericNewsletterScraper(BaseScraper):
 
             def _add_sponsor(sponsor: SponsorInfo):
                 """Deduplicate and add a sponsor, filtering self-domain."""
-                # Filter out the newsletter's own domain
+                # Filter out the newsletter's own domain and skip domains
                 if sponsor.advertiser_domain:
                     d = sponsor.advertiser_domain.lower()
+                    # Check exact match and self-domain substring
                     if d in skip_domains or self.domain in d:
                         return
+                    # Check root domain (e.g., mz164.isrefer.com → isrefer.com)
+                    parts = d.split(".")
+                    for i in range(1, len(parts) - 1):
+                        root = ".".join(parts[i:])
+                        if root in skip_domains:
+                            return
 
                 key = sponsor.advertiser_domain or normalize_company_name(sponsor.advertiser_name)
                 if key and key not in seen_keys and len(key) > 1:

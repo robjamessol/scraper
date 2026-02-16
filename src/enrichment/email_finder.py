@@ -22,22 +22,22 @@ logger = logging.getLogger(__name__)
 MAX_VERIFY_WORKERS = 20
 
 
-def verify_email_smtp_permissive(email: str, timeout: float = 5.0) -> str:
+def verify_email_smtp(email: str, timeout: float = 5.0) -> str:
     """
-    Permissive SMTP Verification for high-performance scraping.
+    Strict SMTP verification.
 
-    This is a "soft pass" verification - we only reject emails that are
-    explicitly confirmed as invalid. Corporate servers often block SMTP
-    probing, so we assume validity for any ambiguous response.
+    Only returns 'valid' if the server explicitly confirms the email
+    exists with a 250 response code. All other cases return 'invalid'
+    or 'unknown'.
 
     Args:
         email: Email address to verify
         timeout: Connection timeout in seconds
 
     Returns:
-        'valid': Server confirmed existence (250)
+        'valid': Server confirmed existence (250/251)
         'invalid': Server explicitly rejected (550)
-        'unknown': Server blocked/timeout/error (Soft Pass - KEEP THESE)
+        'unknown': Server blocked/timeout/error (treated as NOT verified)
     """
     domain = email.split('@')[-1]
 
@@ -45,7 +45,6 @@ def verify_email_smtp_permissive(email: str, timeout: float = 5.0) -> str:
         records = dns.resolver.resolve(domain, 'MX')
         mx_record = str(records[0].exchange).rstrip('.')
     except Exception:
-        # DNS failure - keep the email just in case
         return 'unknown'
 
     try:
@@ -56,18 +55,14 @@ def verify_email_smtp_permissive(email: str, timeout: float = 5.0) -> str:
         code, _ = server.rcpt(email)
         server.quit()
 
-        if code == 250:
+        if code in [250, 251]:
             return 'valid'
         elif code == 550:
             return 'invalid'
         else:
-            # Graylisted or other code - soft pass
             return 'unknown'
 
     except Exception:
-        # Timeout, Connection Refused, etc. -> Assume Valid (Soft Pass)
-        # Corporate firewalls often block this, so we assume it's good
-        # if we can't prove it's bad.
         return 'unknown'
 
 
@@ -167,27 +162,21 @@ class EmailFinder:
 
     def _verify_email_smtp(self, email: str) -> bool:
         """
-        Verify if an email exists via SMTP using "Permissive Verification".
+        Strict SMTP verification - only returns True if the server
+        explicitly confirms the email exists with a 250 response.
 
-        This checks if the mail server accepts the recipient without
-        actually sending an email. Many servers support this.
+        This prevents pattern-generated emails from being accepted
+        just because the server timed out or blocked the probe.
 
-        Permissive Verification Logic:
-        - 250 (OK): Return True (Verified)
-        - 550 (User Unknown): Return False (Invalid)
-        - Timeout/Disconnect/Unknown: Return True (Soft Pass)
-
-        Reason: We'd rather keep an unverified email than delete a valid
-        high-value email from a corporate server that blocks probing.
-
-        Returns True if verified or unknown, False only if definitively rejected.
+        Returns True ONLY if server responds with 250 (confirmed exists).
+        Returns False for everything else (timeouts, errors, unknown codes).
         """
         domain = email.split('@')[-1]
         mx_hosts = self._get_mx_records(domain)
 
         if not mx_hosts:
-            # No MX records - can't verify, but don't reject (soft pass)
-            return True
+            # No MX records - can't verify, reject
+            return False
 
         # Try each MX server
         for mx_host in mx_hosts[:2]:  # Try top 2 MX servers
@@ -204,34 +193,29 @@ class EmailFinder:
                 code, _ = smtp.rcpt(email)
                 smtp.quit()
 
-                # 250 = OK, email exists
-                # 251 = User not local, will forward
-                # 550 = User not found (ONLY case where we reject)
-                # 552 = Mailbox full (but exists)
-                if code in [250, 251, 552]:
+                # 250 = OK, email exists (the ONLY case we accept)
+                # 251 = User not local, will forward (also good)
+                if code in [250, 251]:
                     return True
-                elif code == 550:
-                    return False
                 else:
-                    # Unknown response code - soft pass (don't reject)
-                    return True
+                    # Any other code (550 rejected, 452 temp fail, etc.) = reject
+                    return False
 
-            except smtplib.SMTPServerDisconnected:
-                # Server disconnected - likely blocking verification, soft pass
-                return True
             except smtplib.SMTPRecipientsRefused:
                 # Email definitively doesn't exist
                 return False
+            except smtplib.SMTPServerDisconnected:
+                # Server disconnected - can't confirm, try next MX
+                continue
             except socket.timeout:
-                # Timeout - corporate servers often block, soft pass
-                return True
+                # Timeout - can't confirm, try next MX
+                continue
             except Exception as e:
-                self._log(f"SMTP check failed for {email}: {e}", "warning")
-                # On any error, soft pass (don't reject potentially valid email)
-                return True
+                logger.debug(f"SMTP check for {email} via {mx_host}: {e}")
+                continue
 
-        # Couldn't connect to any MX server - soft pass
-        return True
+        # Couldn't get a 250 from any MX server - reject
+        return False
 
     def generate_emails(self, domain: str) -> list[FoundEmail]:
         """
@@ -351,7 +335,6 @@ class EmailFinder:
         self._log(f"Verifying top {len(to_verify)} email patterns via SMTP...")
 
         verified = []
-        unverified = []
 
         # Verify emails in parallel
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -370,22 +353,19 @@ class EmailFinder:
                         email_obj.confidence = "high"
                         email_obj.source = "smtp_verified"
                         verified.append(email_obj)
-                        self._log(f"Verified: {email_obj.email}")
+                        self._log(f"  Verified: {email_obj.email}")
 
                         # Stop early if we have enough verified emails
                         if len(verified) >= max_results:
                             break
-                    else:
-                        unverified.append(email_obj)
-                except Exception as e:
-                    unverified.append(email_obj)
+                except Exception:
+                    pass  # Skip emails we can't confirm
 
-        # Combine results: verified first, then unverified from checked, then remaining
-        results = verified + unverified + remaining
-        results = results[:max_results]
+        # Only return emails that were ACTUALLY verified (250 response)
+        # Do NOT include unverified pattern-generated guesses
+        results = verified[:max_results]
 
-        verified_count = sum(1 for e in results if e.verified)
-        self._log(f"Found {len(results)} emails ({verified_count} verified) for {domain}")
+        self._log(f"Found {len(results)} verified emails for {domain}")
 
         return results
 

@@ -1104,26 +1104,42 @@ def run_domain_scan(domain: str, limit: int = 20):
         add_log("Deduplicating sponsors...")
         update_status(current_action="Deduplicating")
 
+        def _is_skip_domain(sponsor_domain: str, source_domain: str) -> bool:
+            """Check if a sponsor domain should be filtered out."""
+            if not sponsor_domain:
+                return False
+            sd = sponsor_domain.lower()
+            # Self-domain check
+            if sd == source_domain or source_domain in sd:
+                return True
+            if sd.replace("www.", "") == source_domain.replace("www.", ""):
+                return True
+            # Check if root domain is in the known skip list
+            from ..scrapers.generic import GenericNewsletterScraper
+            skip_set = GenericNewsletterScraper.SOCIAL_AND_UTILITY_DOMAINS
+            parts = sd.split(".")
+            for i in range(len(parts) - 1):
+                root = ".".join(parts[i:])
+                if root in skip_set:
+                    return True
+            return False
+
         seen = set()
         unique = []
         for s in all_sponsors:
             key = s.get("domain") or s.get("company_name", "").lower()
             if key and key not in seen:
                 seen.add(key)
-                # Filter out the newsletter's own domain
-                sponsor_domain = s.get("domain", "")
-                if sponsor_domain and (
-                    sponsor_domain == domain
-                    or domain in sponsor_domain
-                    or sponsor_domain.replace("www.", "") == domain.replace("www.", "")
-                ):
+                if _is_skip_domain(s.get("domain", ""), domain):
                     continue
                 unique.append(s)
 
         add_log(f"Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} mentions")
 
         # Merge with existing data instead of overwriting
+        # Also filter self-domain from existing data (cleans stale entries)
         existing = get_advertisers()
+        existing = [a for a in existing if not _is_skip_domain(a.get("domain", ""), domain)]
         existing_domains = {a.get("domain") for a in existing if a.get("domain")}
 
         new_advertisers = []
