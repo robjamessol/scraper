@@ -580,27 +580,57 @@ class GenericNewsletterScraper(BaseScraper):
 
     # Domains to always skip (not advertisers)
     SOCIAL_AND_UTILITY_DOMAINS = {
+        # Social media
         "twitter.com", "x.com", "facebook.com", "linkedin.com",
         "instagram.com", "youtube.com", "youtu.be", "google.com",
         "google.co.uk", "pinterest.com", "reddit.com", "tiktok.com",
-        "threads.net", "mastodon.social",
+        "threads.net", "mastodon.social", "snapchat.com",
+        # App stores & music
         "apple.com", "apps.apple.com", "play.google.com",
-        "spotify.com", "open.spotify.com",
-        "en.wikipedia.org", "wikipedia.org",
+        "spotify.com", "open.spotify.com", "music.apple.com",
+        "itunes.apple.com", "podcasts.apple.com",
+        # Email/newsletter platforms
         "substack.com", "beehiiv.com", "convertkit.com",
-        "mailchimp.com", "hubspot.com",
+        "mailchimp.com", "hubspot.com", "constantcontact.com",
+        "campaignmonitor.com", "sendinblue.com", "mailerlite.com",
+        # CMS / web infrastructure
         "gravatar.com", "wp.com", "wordpress.com", "wordpress.org",
         "w3.org", "schema.org", "creativecommons.org",
+        "squarespace.com", "wix.com", "shopify.com", "weebly.com",
+        # Dev / code
         "github.com", "gitlab.com", "stackexchange.com",
+        "stackoverflow.com", "bitbucket.org",
+        # Academic / research
+        "en.wikipedia.org", "wikipedia.org",
         "nih.gov", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
         "doi.org", "arxiv.org", "nature.com", "sciencedirect.com",
-        "scholar.google.com",
+        "scholar.google.com", "researchgate.net", "jstor.org",
+        "pmc.ncbi.nlm.nih.gov",
+        # Major news & media (editorial links, not sponsors)
         "nytimes.com", "washingtonpost.com", "wsj.com", "bbc.com",
         "bbc.co.uk", "cnn.com", "reuters.com", "apnews.com",
+        "nbc.com", "nbcnews.com", "cbs.com", "cbsnews.com",
+        "abc.com", "abcnews.go.com", "fox.com", "foxnews.com",
+        "npr.org", "pbs.org", "usatoday.com", "bloomberg.com",
+        "forbes.com", "time.com", "theatlantic.com", "wired.com",
+        "vice.com", "vox.com", "theguardian.com", "huffpost.com",
+        # Streaming / entertainment (editorial references)
+        "netflix.com", "hbo.com", "hulu.com", "disneyplus.com",
+        "primevideo.com", "peacocktv.com",
+        # URL shorteners (handled by tracking resolution)
+        "amzn.to", "bit.ly", "t.co", "goo.gl", "ow.ly", "tinyurl.com",
+        "buff.ly", "is.gd",
+        # Referral/affiliate platforms (handled by affiliate strategy)
+        "isrefer.com", "refersion.com", "tapfiliate.com",
+        # Ad tech & CDNs
         "cloudflare.com", "jsdelivr.net", "googleapis.com",
         "googlesyndication.com", "googletagmanager.com",
         "doubleclick.net", "googleadservices.com",
         "gstatic.com", "cdnjs.cloudflare.com",
+        "googleanalytics.com", "google-analytics.com",
+        "facebook.net", "fbcdn.net", "akamaized.net",
+        # Government
+        "gov", "fda.gov", "cdc.gov", "who.int",
     }
 
     # CSS class/id patterns that indicate sponsor sections
@@ -621,6 +651,18 @@ class GenericNewsletterScraper(BaseScraper):
             root = ".".join(parts[-2:])
             skip.add(root)
             skip.add(f"www.{root}")
+            # Skip domains sharing the same brand name
+            # e.g., for bengreenfieldfitness.com also skip bengreenfield*.com variants
+            brand = parts[0]  # e.g., "bengreenfieldfitness"
+            # Common name variations: strip common suffixes to get core brand
+            for suffix in ["fitness", "life", "health", "media", "news",
+                           "daily", "weekly", "blog", "online", "digital",
+                           "hq", "co", "inc", "labs", "studio", "group"]:
+                if brand.endswith(suffix) and len(brand) > len(suffix) + 2:
+                    core = brand[:-len(suffix)]
+                    tld = parts[-1]  # e.g., "com"
+                    skip.add(f"{core}.{tld}")
+                    skip.add(f"www.{core}.{tld}")
         return skip
 
     def scrape_issue(self, issue_url: str) -> list[SponsorInfo]:
@@ -1013,6 +1055,15 @@ class GenericNewsletterScraper(BaseScraper):
             if not (is_promo or is_button or in_promo_section):
                 continue
 
+            # Check if link text is a usable company name
+            # For promotional links, we need a real name — generic CTAs like
+            # "here", "click here", "register" produce garbage results
+            link_text = clean_text(link.get_text()).strip()
+            if not link_text or not self._is_valid_company_name(link_text):
+                # Link text is a CTA — skip this promotional link since we can't
+                # reliably identify who the sponsor is from domain alone
+                continue
+
             seen_domains.add(domain)
 
             # Resolve tracking if needed
@@ -1041,25 +1092,82 @@ class GenericNewsletterScraper(BaseScraper):
 
         return sponsors
 
-    def _extract_company_name_from_link(self, link, domain: str) -> str:
-        """Extract a clean company name from a link element and its context."""
-        link_text = clean_text(link.get_text())
+    def _is_valid_company_name(self, name: str) -> bool:
+        """Check if a string looks like a real company/brand name (not a CTA or headline)."""
+        if not name or len(name) < 2:
+            return False
 
-        # If link text is a good company name (not a CTA phrase), use it
+        name_lower = name.lower().strip()
+
+        # Reject URLs or domain-like strings
+        if name_lower.startswith(("http://", "https://", "www.")):
+            return False
+        if re.match(r'^[\w.-]+\.(com|org|net|io|co|ai|app|dev|xyz|info)$', name_lower):
+            return False
+
+        # Exact CTA phrases that are never company names
         cta_phrases = {
             "learn more", "get started", "sign up", "try it", "click here",
             "read more", "shop now", "buy now", "visit", "check it out",
             "see more", "discover", "explore", "start", "join", "register",
-            "download", "subscribe", "watch", "listen", "view",
+            "download", "subscribe", "watch", "listen", "view", "here",
+            "apply", "apply now", "apply here", "join me", "join us",
+            "take the quiz", "try now", "try free", "try it free",
+            "click here to register", "register here", "register now",
+            "check out", "find out more", "get it", "get yours",
+            "order now", "order here", "grab yours", "claim", "claim now",
+            "enroll", "enroll now", "book now", "reserve", "reserve now",
+            "go here", "go now", "see it", "see here", "see details",
+            "more info", "more details", "full details", "details here",
+            "do the race yourself", "do it yourself", "start here",
+            "get it here", "available here", "find it here",
         }
+        if name_lower in cta_phrases:
+            return False
 
-        if link_text and len(link_text) > 1 and link_text.lower() not in cta_phrases:
-            # Check it's not too long (probably a sentence, not a name)
-            if len(link_text) <= 50:
-                # Remove trailing punctuation
-                name = link_text.rstrip(".,!?:;")
-                if name:
-                    return name
+        # Names starting with action verbs are likely CTAs, not company names
+        action_prefixes = [
+            "get ", "click ", "apply ", "take ", "join ", "check ",
+            "never ", "register ", "sign ", "try ", "buy ", "shop ",
+            "order ", "grab ", "claim ", "enroll ", "book ", "reserve ",
+            "download ", "watch ", "listen ", "start ", "discover ",
+            "find ", "view ", "see ", "do ", "go ", "visit ",
+            "available ", "subscribe ",
+        ]
+        if any(name_lower.startswith(prefix) for prefix in action_prefixes):
+            return False
+
+        # Names containing these words are likely CTAs or descriptions, not company names
+        cta_keywords = {"click", "register", " here"}
+        if any(kw in name_lower for kw in cta_keywords):
+            return False
+
+        # Too many words = likely a headline or sentence, not a company name
+        # Most company names are 1-4 words
+        word_count = len(name.split())
+        if word_count > 6:
+            return False
+
+        # Contains sentence-ending punctuation mid-string = likely a headline
+        if any(c in name[:-1] for c in ['–', '—', '?', '!']):
+            return False
+
+        return True
+
+    def _extract_company_name_from_link(self, link, domain: str) -> str | None:
+        """
+        Extract a clean company name from a link element and its context.
+
+        Returns None if no valid company name can be determined (the caller
+        should skip this link).
+        """
+        link_text = clean_text(link.get_text())
+
+        # Try link text first
+        if link_text and len(link_text) > 1:
+            name = link_text.rstrip(".,!?:;").strip()
+            if self._is_valid_company_name(name) and len(name) <= 50:
+                return name
 
         # Check for a nearby heading or strong text
         parent = link.parent
@@ -1068,10 +1176,10 @@ class GenericNewsletterScraper(BaseScraper):
             strong = parent.find(["strong", "b", "h3", "h4"])
             if strong:
                 strong_text = clean_text(strong.get_text())
-                if strong_text and 2 < len(strong_text) <= 40:
+                if strong_text and self._is_valid_company_name(strong_text) and len(strong_text) <= 40:
                     return strong_text
 
-        # Fall back to domain name
+        # Fall back to domain name (always valid as a company name)
         return domain.split(".")[0].replace("-", " ").title()
 
     def _get_link_context(self, link) -> str:
