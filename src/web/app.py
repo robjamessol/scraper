@@ -358,7 +358,7 @@ def get_advertisers() -> list[dict]:
         return []
 
 
-def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None):
+def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None, skip_emails: bool = False):
     """
     Run newsletter scan synchronously (called from thread pool).
     This runs Playwright in a separate thread to avoid async conflicts.
@@ -493,7 +493,16 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         save_scan_data(unique)
 
         # ===== PHASE 2: Scrape company websites for contacts (PARALLEL) =====
-        if unique:
+        if skip_emails:
+            add_log("Skipping Phase 2 (email lookup) - Advertisers Only mode")
+            # Fill empty email columns so CSV export is clean
+            for company in unique:
+                for i in range(5):
+                    company.setdefault(f"email_{i+1}", "")
+                    company.setdefault(f"title_{i+1}", "")
+                    company.setdefault(f"name_{i+1}", "")
+            update_status(progress=100)
+        elif unique:
             add_log(f"🔍 Phase 2: Finding contact info for {len(unique)} companies (parallel)...")
             update_status(current_action="Finding contacts")
 
@@ -722,14 +731,14 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
         )
 
 
-async def run_scan(newsletters: list[str] | None = None, limit: int | None = None):
+async def run_scan(newsletters: list[str] | None = None, limit: int | None = None, skip_emails: bool = False):
     """Run a newsletter scan in a thread pool to avoid async/sync conflicts."""
     if scan_status["is_running"]:
         raise HTTPException(400, "Scan already in progress")
 
     # Run the synchronous scraper in a thread pool
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(executor, run_scan_sync, newsletters, limit)
+    await loop.run_in_executor(executor, run_scan_sync, newsletters, limit, skip_emails)
 
 
 async def run_scheduled_scan():
@@ -914,22 +923,24 @@ async def api_start_scan(
     background_tasks: BackgroundTasks,
     newsletters: list[str] | None = None,
     limit: int | None = None,
+    skip_emails: bool = False,
 ):
     """
     Start a new scan.
 
     - **newsletters**: List of newsletter IDs to scan (default: all enabled)
     - **limit**: Maximum issues per newsletter (default: no limit)
+    - **skip_emails**: Skip Phase 2 email/contact lookup (default: false)
 
     Returns immediately; check /api/status for progress.
     """
     if scan_status["is_running"]:
         raise HTTPException(400, detail="Scan already in progress")
 
-    background_tasks.add_task(run_scan, newsletters, limit)
+    background_tasks.add_task(run_scan, newsletters, limit, skip_emails)
 
     return {
-        "message": "Scan started",
+        "message": "Scan started" + (" (advertisers only)" if skip_emails else ""),
         "newsletters": newsletters or list(SCRAPERS.keys()),
     }
 
@@ -977,6 +988,7 @@ async def api_scan_domain(
     data = await request.json()
     domain = data.get("domain", "").strip()
     limit = data.get("limit") or None
+    skip_emails = data.get("skip_emails", False)
 
     if not domain:
         raise HTTPException(400, detail="Domain is required")
@@ -988,16 +1000,16 @@ async def api_scan_domain(
     if domain.startswith("www."):
         domain = domain[4:]
 
-    background_tasks.add_task(run_domain_scan, domain, limit)
+    background_tasks.add_task(run_domain_scan, domain, limit, skip_emails)
 
     return {
-        "message": f"Scanning {domain} for newsletter sponsors",
+        "message": f"Scanning {domain} for newsletter sponsors" + (" (advertisers only)" if skip_emails else ""),
         "domain": domain,
         "limit": limit,
     }
 
 
-def run_domain_scan(domain: str, limit: int = None):
+def run_domain_scan(domain: str, limit: int = None, skip_emails: bool = False):
     """
     Run a generic domain scan using GenericNewsletterScraper.
 
@@ -1159,7 +1171,15 @@ def run_domain_scan(domain: str, limit: int = None):
         save_scan_data(existing)
 
         # Phase 2: Contact enrichment for new advertisers
-        if new_advertisers:
+        if skip_emails:
+            add_log("Skipping Phase 2 (email lookup) - Advertisers Only mode")
+            for company in new_advertisers:
+                for i in range(5):
+                    company.setdefault(f"email_{i+1}", "")
+                    company.setdefault(f"title_{i+1}", "")
+                    company.setdefault(f"name_{i+1}", "")
+            save_scan_data(existing)
+        elif new_advertisers:
             add_log(f"Phase 2: Finding contacts for {len(new_advertisers)} new companies...")
             update_status(current_action="Finding contacts")
 

@@ -81,14 +81,18 @@
             const limitSelect = document.getElementById('scanLimit');
             const limit = limitSelect ? limitSelect.value : '25';
             const limitText = limit ? `${limit} issues` : 'all issues';
+            const skipEmailsEl = document.getElementById('scanSkipEmails');
+            const skipEmails = skipEmailsEl ? skipEmailsEl.checked : false;
+            const modeText = skipEmails ? ' (advertisers only, no email lookup)' : '';
 
-            if (!confirm(`Start a new scan (${limitText})? This may take several minutes.`)) return;
+            if (!confirm(`Start a new scan (${limitText}${modeText})? This may take several minutes.`)) return;
 
             try {
                 let url = '/api/scan';
-                if (limit) {
-                    url += `?limit=${limit}`;
-                }
+                const params = [];
+                if (limit) params.push(`limit=${limit}`);
+                if (skipEmails) params.push('skip_emails=true');
+                if (params.length) url += '?' + params.join('&');
 
                 const res = await fetch(url, { method: 'POST' });
                 const data = await res.json();
@@ -343,6 +347,13 @@
                 cancelBtn.classList.add('hidden');
             }
 
+            // Re-enable domain scan button
+            const domainBtn = document.getElementById('domainScanBtn');
+            if (domainBtn) {
+                domainBtn.disabled = false;
+                domainBtn.textContent = 'Scan Domain';
+            }
+
             // Show completion actions in the progress panel with countdown
             const currentAction = document.getElementById('currentAction');
             if (currentAction) {
@@ -385,6 +396,13 @@
             const cancelBtn = document.getElementById('cancelButton');
             if (cancelBtn) {
                 cancelBtn.classList.add('hidden');
+            }
+
+            // Re-enable domain scan button
+            const domainBtn = document.getElementById('domainScanBtn');
+            if (domainBtn) {
+                domainBtn.disabled = false;
+                domainBtn.textContent = 'Scan Domain';
             }
 
             // Show stopped state actions in the progress panel with countdown

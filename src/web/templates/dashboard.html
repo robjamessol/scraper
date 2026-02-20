@@ -88,6 +88,10 @@
                     <option value="">All (Slow)</option>
                 </select>
             </div>
+            <label class="flex items-center space-x-1.5 cursor-pointer" title="Skip email/contact lookup - just find advertisers and their websites (much faster)">
+                <input type="checkbox" id="scanSkipEmails" class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500">
+                <span class="text-sm text-gray-400">Advertisers Only</span>
+            </label>
             <button onclick="startScan()"
                     id="scanButton"
                     class="bg-primary text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-indigo-500 disabled:opacity-50"
@@ -136,6 +140,10 @@
                 <option value="">All (Slow)</option>
             </select>
         </div>
+        <label class="flex items-center space-x-1.5 cursor-pointer" title="Skip email/contact lookup - just find advertisers and their websites (much faster)">
+            <input type="checkbox" id="domainSkipEmails" class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500">
+            <span class="text-sm text-gray-400">Advertisers Only</span>
+        </label>
         <button onclick="scanDomain()"
                 id="domainScanBtn"
                 class="bg-purple-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-purple-500 disabled:opacity-50">
@@ -320,61 +328,6 @@
 </div>
 
 <script>
-    let pollInterval = null;
-    let lastStatus = null;
-
-    function startPolling() {
-        if (pollInterval) clearInterval(pollInterval);
-        pollInterval = setInterval(updateStatus, 2000);
-    }
-
-    async function updateStatus() {
-        try {
-            const response = await fetch('/api/status');
-            const data = await response.json();
-
-            const scanButton = document.getElementById('scanButton');
-            const cancelButton = document.getElementById('cancelButton');
-            const progressPanel = document.getElementById('progressPanel');
-
-            if (data.status === 'running') {
-                progressPanel.classList.remove('hidden');
-                document.getElementById('progressBar').style.width = `${data.progress}%`;
-                document.getElementById('progressPercent').textContent = `${data.progress}%`;
-                document.getElementById('currentAction').textContent = data.current_action;
-                document.getElementById('issuesCount').textContent = `${data.issues_scanned}/${data.issues_total}`;
-                document.getElementById('foundCount').textContent = data.advertisers_found;
-
-                scanButton.disabled = true;
-                scanButton.innerHTML = `Scanning... ${data.progress}%`;
-                cancelButton.classList.remove('hidden');
-
-                if (data.logs && data.logs.length > 0) {
-                    const logContainer = document.getElementById('logOutput');
-                    const recentLogs = data.logs.slice(-50);
-                    logContainer.innerHTML = recentLogs.map(log =>
-                        `<div class="${log.level === 'error' ? 'text-red-400' : 'text-gray-400'} font-mono text-xs">[${log.time}] ${log.message}</div>`
-                    ).join('');
-                    const container = document.getElementById('logsContainer');
-                    container.scrollTop = container.scrollHeight;
-                }
-            } else {
-                scanButton.disabled = false;
-                scanButton.innerHTML = 'Run Scan';
-                cancelButton.classList.add('hidden');
-
-                const domainBtn = document.getElementById('domainScanBtn');
-                if (domainBtn) {
-                    domainBtn.disabled = false;
-                    domainBtn.textContent = 'Scan Domain';
-                }
-
-                if (lastStatus === 'running') window.location.reload();
-            }
-            lastStatus = data.status;
-        } catch (e) { console.error(e); }
-    }
-
     async function scanDomain() {
         const domain = document.getElementById('domainInput').value.trim();
         if (!domain) {
@@ -384,13 +337,13 @@
 
         const limitValue = document.getElementById('domainLimit').value;
         const limit = limitValue ? parseInt(limitValue) : null;
-        const limitText = limit ? `${limit} issues` : 'all issues';
+        const skipEmails = document.getElementById('domainSkipEmails').checked;
         const btn = document.getElementById('domainScanBtn');
         btn.disabled = true;
         btn.textContent = 'Starting...';
 
         try {
-            const body = {domain: domain};
+            const body = {domain: domain, skip_emails: skipEmails};
             if (limit) body.limit = limit;
             const response = await fetch('/api/scan-domain', {
                 method: 'POST',
@@ -403,6 +356,8 @@
                 document.getElementById('progressPanel').classList.remove('hidden');
                 document.getElementById('scanButton').disabled = true;
                 document.getElementById('cancelButton').classList.remove('hidden');
+                logIndex = 0;
+                startPolling();
             } else {
                 alert(data.detail || 'Failed to start scan');
                 btn.disabled = false;
@@ -414,8 +369,6 @@
             btn.textContent = 'Scan Domain';
         }
     }
-
-    document.addEventListener('DOMContentLoaded', startPolling);
 </script>
 
 {% endblock %}
