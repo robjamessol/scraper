@@ -976,7 +976,7 @@ async def api_scan_domain(
 
     data = await request.json()
     domain = data.get("domain", "").strip()
-    limit = data.get("limit", 20)
+    limit = data.get("limit") or None
 
     if not domain:
         raise HTTPException(400, detail="Domain is required")
@@ -997,7 +997,7 @@ async def api_scan_domain(
     }
 
 
-def run_domain_scan(domain: str, limit: int = 20):
+def run_domain_scan(domain: str, limit: int = None):
     """
     Run a generic domain scan using GenericNewsletterScraper.
 

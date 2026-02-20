@@ -125,12 +125,15 @@
                class="flex-1 border border-gray-700 rounded px-3 py-2 text-sm bg-gray-800 text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
                onkeydown="if(event.key==='Enter')scanDomain()">
         <div class="flex items-center space-x-2">
-            <label class="text-sm text-gray-400">Limit:</label>
+            <label class="text-sm text-gray-400">Issues:</label>
             <select id="domainLimit" class="border border-gray-700 rounded px-2 py-2 text-sm bg-gray-800 text-gray-200">
-                <option value="5">5</option>
+                <option value="5">5 (Quick Test)</option>
                 <option value="10">10</option>
-                <option value="20" selected>20</option>
+                <option value="25" selected>25</option>
                 <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="365">365 (Full Year)</option>
+                <option value="">All (Slow)</option>
             </select>
         </div>
         <button onclick="scanDomain()"
@@ -379,16 +382,20 @@
             return;
         }
 
-        const limit = parseInt(document.getElementById('domainLimit').value) || 20;
+        const limitValue = document.getElementById('domainLimit').value;
+        const limit = limitValue ? parseInt(limitValue) : null;
+        const limitText = limit ? `${limit} issues` : 'all issues';
         const btn = document.getElementById('domainScanBtn');
         btn.disabled = true;
         btn.textContent = 'Starting...';
 
         try {
+            const body = {domain: domain};
+            if (limit) body.limit = limit;
             const response = await fetch('/api/scan-domain', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({domain: domain, limit: limit}),
+                body: JSON.stringify(body),
             });
 
             const data = await response.json();
