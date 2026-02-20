@@ -736,7 +736,7 @@ async def run_scheduled_scan():
     """Run the scheduled daily scan."""
     add_log("⏰ Starting scheduled daily scan...")
     try:
-        await run_scan(limit=50)  # Limit to 50 issues per newsletter for scheduled runs
+        await run_scan(limit=365)  # Limit to 365 issues per newsletter for scheduled runs
     except Exception as e:
         add_log(f"❌ Scheduled scan failed: {e}", level="error")
 
