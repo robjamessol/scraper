@@ -513,7 +513,10 @@ class GenericNewsletterScraper(BaseScraper):
 
             self._log(f"    Discovered {len(issue_urls)} content URLs for {self.domain}")
 
-            # Apply limit
+            # Sort by date (newest first) so the limit returns the most recent issues
+            issue_urls = self._sort_issues_newest_first(issue_urls)
+
+            # Apply limit AFTER date sorting so we get the newest N issues
             if limit:
                 issue_urls = issue_urls[:limit]
                 self._log(f"    Applied limit: {len(issue_urls)} URLs")

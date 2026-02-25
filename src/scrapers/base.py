@@ -312,6 +312,200 @@ class BaseScraper(ABC):
         # Scroll back to top
         page.evaluate("window.scrollTo(0, 0)")
 
+    @staticmethod
+    def _extract_date_from_url(url: str) -> str | None:
+        """
+        Try to extract a date string (YYYY-MM-DD) from a URL.
+
+        Handles common newsletter URL date formats like:
+        - /issues/2026-01-15-slug
+        - /issues/2026/01/15/slug
+        - /issues/slug-20260115
+        - /email-roundup-december-2024
+
+        Args:
+            url: Issue URL
+
+        Returns:
+            Date string in YYYY-MM-DD format, or None
+        """
+        # Numeric date patterns
+        patterns = [
+            r'/(\d{4})-(\d{2})-(\d{2})/',
+            r'/(\d{4})/(\d{2})/(\d{2})/',
+            r'(\d{4})-(\d{2})-(\d{2})',
+            r'-(\d{4})(\d{2})(\d{2})(?:[/-]|$)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                try:
+                    year, month, day = match.groups()
+                    y, m, d = int(year), int(month), int(day)
+                    if 2000 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                        return f"{year}-{month}-{day}"
+                except (ValueError, IndexError):
+                    continue
+
+        # Month name patterns (e.g., /email-roundup-december-2024)
+        month_map = {
+            "january": "01", "february": "02", "march": "03", "april": "04",
+            "may": "05", "june": "06", "july": "07", "august": "08",
+            "september": "09", "october": "10", "november": "11", "december": "12",
+        }
+        url_lower = url.lower()
+        for month_name, month_num in month_map.items():
+            if month_name in url_lower:
+                year_match = re.search(r'(\d{4})', url_lower)
+                if year_match:
+                    y = int(year_match.group(1))
+                    if 2000 <= y <= 2100:
+                        return f"{year_match.group(1)}-{month_num}-01"
+
+        return None
+
+    def _extract_dates_from_archive(
+        self,
+        soup: BeautifulSoup,
+        issue_urls: set[str],
+        base_url: str,
+    ) -> dict[str, str]:
+        """
+        Extract dates from the archive page by looking at text near each issue link.
+
+        Many archive pages show dates next to each issue (e.g., "Jan 15, 2026").
+        This walks up the DOM from each link to find nearby date text.
+
+        Args:
+            soup: Parsed archive page
+            issue_urls: Set of issue URLs to find dates for
+            base_url: Base URL for resolving relative hrefs
+
+        Returns:
+            Dict mapping issue URL -> date string (YYYY-MM-DD)
+        """
+        url_dates = {}
+
+        date_patterns = [
+            (r'((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})', "%B %d, %Y"),
+            (r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4})', None),
+            (r'(\d{4}-\d{2}-\d{2})', "%Y-%m-%d"),
+            (r'(\d{1,2}/\d{1,2}/\d{4})', "%m/%d/%Y"),
+        ]
+
+        short_month_formats = ["%b %d, %Y", "%b %d %Y", "%b. %d, %Y", "%b. %d %Y"]
+
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+
+            # Build full URL
+            if href.startswith("/"):
+                full_url = urljoin(base_url, href)
+            elif href.startswith("http"):
+                full_url = href
+            else:
+                continue
+
+            # Normalize to match against our set
+            normalized = full_url.rstrip("/")
+            if normalized not in issue_urls or normalized in url_dates:
+                continue
+
+            # Walk up the DOM (up to 4 levels) looking for date text
+            element = link
+            for _ in range(4):
+                if element is None:
+                    break
+                text = element.get_text(separator=" ")
+                for regex, fmt in date_patterns:
+                    match = re.search(regex, text, re.IGNORECASE)
+                    if match:
+                        date_str = match.group(1).strip().replace(",", ", ").replace("  ", " ")
+                        parsed = None
+                        if fmt:
+                            try:
+                                parsed = datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+                            except ValueError:
+                                try:
+                                    parsed = datetime.strptime(date_str.replace(",", ""), fmt.replace(",", "")).strftime("%Y-%m-%d")
+                                except ValueError:
+                                    pass
+                        else:
+                            for sfmt in short_month_formats:
+                                try:
+                                    parsed = datetime.strptime(date_str, sfmt).strftime("%Y-%m-%d")
+                                    break
+                                except ValueError:
+                                    continue
+                        if parsed:
+                            url_dates[normalized] = parsed
+                            break
+                if normalized in url_dates:
+                    break
+                element = element.parent
+
+        return url_dates
+
+    def _sort_issues_newest_first(
+        self,
+        issue_urls: list[str],
+        archive_soup: BeautifulSoup | None = None,
+        base_url: str = "",
+    ) -> list[str]:
+        """
+        Sort issue URLs so the newest issues come first.
+
+        Uses two strategies:
+        1. Extract dates from URLs (e.g., /issues/2026-01-15-slug)
+        2. Extract dates from archive page context (text near each link)
+
+        Issues without extractable dates are placed at the end,
+        preserving their original order.
+
+        Args:
+            issue_urls: List of issue URLs in their original order
+            archive_soup: Parsed archive page (for context-based date extraction)
+            base_url: Base URL for resolving relative hrefs
+
+        Returns:
+            Issue URLs sorted newest-first
+        """
+        url_dates: dict[str, str] = {}
+
+        # Strategy 1: Extract dates from URLs
+        for url in issue_urls:
+            date = self._extract_date_from_url(url)
+            if date:
+                url_dates[url] = date
+
+        # Strategy 2: Extract dates from archive page context
+        if archive_soup and len(url_dates) < len(issue_urls):
+            url_set = set(issue_urls) - set(url_dates.keys())
+            context_dates = self._extract_dates_from_archive(
+                archive_soup, url_set, base_url
+            )
+            url_dates.update(context_dates)
+
+        # Separate dated and undated
+        dated = [(url, url_dates[url]) for url in issue_urls if url in url_dates]
+        undated = [url for url in issue_urls if url not in url_dates]
+
+        # Sort dated issues newest-first
+        dated.sort(key=lambda x: x[1], reverse=True)
+
+        if dated:
+            logger.info(
+                f"Sorted {len(dated)} issues by date "
+                f"(newest: {dated[0][1]}, oldest: {dated[-1][1]})"
+            )
+        if undated:
+            logger.info(
+                f"{len(undated)} issues without extractable dates "
+                f"(keeping original order)"
+            )
+
+        return [url for url, _ in dated] + undated
+
     @abstractmethod
     def discover_all_issues(self, limit: int | None = None) -> list[str]:
         """
@@ -873,15 +1067,24 @@ class BaseScraper(ABC):
                 logger.error(f"Error scraping {issue_url}: {e}")
                 continue
 
-        # Deduplicate by domain
-        seen_domains = set()
-        unique_sponsors = []
+        # Deduplicate by domain, keeping the sponsor from the newest issue
+        seen_domains: dict[str, int] = {}  # key -> index in unique_sponsors
+        unique_sponsors: list[SponsorInfo] = []
 
         for sponsor in all_sponsors:
             key = sponsor.advertiser_domain or normalize_company_name(sponsor.advertiser_name)
             if key not in seen_domains:
-                seen_domains.add(key)
+                seen_domains[key] = len(unique_sponsors)
                 unique_sponsors.append(sponsor)
+            else:
+                # Keep the one with the more recent issue date
+                existing_idx = seen_domains[key]
+                existing = unique_sponsors[existing_idx]
+                if sponsor.issue_date and (
+                    not existing.issue_date
+                    or sponsor.issue_date > existing.issue_date
+                ):
+                    unique_sponsors[existing_idx] = sponsor
 
         logger.info(
             f"Scan complete. Found {len(all_sponsors)} total mentions, "

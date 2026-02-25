@@ -296,7 +296,10 @@ class HealthcareBrewScraper(BaseScraper):
 
             logger.info(f"Found {len(issue_urls)} issues in archive")
 
-            # Apply limit if specified
+            # Sort issues newest-first using dates from URLs and archive page context
+            issue_urls = self._sort_issues_newest_first(issue_urls, soup, self.BASE_URL)
+
+            # Apply limit AFTER sorting so we get the newest N issues
             if limit:
                 logger.info(f"Applying limit: {limit} (from {len(issue_urls)} total)")
                 issue_urls = issue_urls[:limit]
@@ -886,6 +889,10 @@ class MorningBrewScraper(BaseScraper):
 
             logger.info(f"Found {len(issue_urls)} issues in archive")
 
+            # Sort issues newest-first using dates from URLs and archive page context
+            issue_urls = self._sort_issues_newest_first(issue_urls, soup, self.BASE_URL)
+
+            # Apply limit AFTER sorting so we get the newest N issues
             if limit:
                 issue_urls = issue_urls[:limit]
 

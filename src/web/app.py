@@ -473,17 +473,26 @@ def run_scan_sync(newsletters: list[str] | None = None, limit: int | None = None
                 add_log("⛔ Scan cancelled by user")
                 break
 
-        # ===== PHASE 1 COMPLETE: Deduplicate sponsors =====
-        add_log("🔄 Deduplicating sponsors...")
+        # ===== PHASE 1 COMPLETE: Deduplicate sponsors (keep newest) =====
+        add_log("🔄 Deduplicating sponsors (keeping newest issue data)...")
         update_status(current_action="Deduplicating")
 
-        seen = set()
-        unique = []
+        seen: dict[str, int] = {}  # key -> index in unique list
+        unique: list[dict] = []
         for s in all_sponsors:
             key = s.get("domain") or s.get("company_name", "").lower()
-            if key and key not in seen:
-                seen.add(key)
+            if not key:
+                continue
+            if key not in seen:
+                seen[key] = len(unique)
                 unique.append(s)
+            else:
+                # Keep the one with the more recent issue date
+                existing_idx = seen[key]
+                existing_date = unique[existing_idx].get("issue_date", "")
+                new_date = s.get("issue_date", "")
+                if new_date and (not existing_date or new_date > existing_date):
+                    unique[existing_idx] = s
 
         add_log(f"📊 Phase 1 complete: {len(unique)} unique companies from {len(all_sponsors)} sponsor mentions")
 
